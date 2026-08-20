@@ -30,7 +30,11 @@ pub mod workers;
 
 use crate::config::Config;
 use crate::metering::pricing::PricingTable;
+use crate::engine::bandit::RoutingBandit;
+use crate::engine::fallback::ProviderHealth;
 use crate::metrics::Metrics;
+use crate::middleware::auth::KeyCache;
+use crate::providers::pool::SharedKeyPool;
 use crate::providers::ProviderRegistry;
 use crate::store::KvStore;
 use std::sync::Arc;
@@ -56,6 +60,14 @@ pub struct AppState {
     pub pricing: Arc<PricingTable>,
     /// Provider adapters, keyed by provider id.
     pub providers: Arc<ProviderRegistry>,
+    /// In-process LRU in front of Redis for API key lookups.
+    pub key_cache: Arc<KeyCache>,
+    /// Per-provider circuit breakers.
+    pub health: Arc<ProviderHealth>,
+    /// Outcome-driven routing statistics (Phase 7).
+    pub bandit: Arc<RoutingBandit>,
+    /// Round-robin over our own pooled provider keys, backing the free tier.
+    pub shared_pool: Arc<SharedKeyPool>,
     /// Shared HTTP client — connection pooling across every upstream call.
     pub http: reqwest::Client,
     /// Process start time, for uptime reporting.
@@ -81,6 +93,10 @@ impl AppState {
             db: None,
             pricing: Arc::new(PricingTable::with_seed_data()),
             providers: Arc::new(ProviderRegistry::with_builtins()),
+            key_cache: Arc::new(KeyCache::default()),
+            health: Arc::new(ProviderHealth::new()),
+            bandit: Arc::new(RoutingBandit::new()),
+            shared_pool: Arc::new(SharedKeyPool::new()),
             http: reqwest::Client::new(),
             started_at: Instant::now(),
         }

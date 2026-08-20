@@ -60,9 +60,14 @@ pub struct Config {
     /// credentials. Never logged, never stored in the database.
     pub master_key: [u8; 32],
 
-    /// Pooled provider keys backing the free tier's shared models.
-    pub shared_openai_keys: Vec<String>,
-    pub shared_google_keys: Vec<String>,
+    /// Pooled provider keys backing the free tier's shared models, by provider id.
+    ///
+    /// Populated from `SHARED_<PROVIDER>_KEYS` environment variables, each a
+    /// comma-separated list. These are keys **we** pay for, so they are the only real
+    /// cost a free-tier user imposes; the round-robin in
+    /// [`crate::providers::pool::SharedKeyPool`] spreads load so no single key hits its
+    /// own provider-side rate limit.
+    pub shared_provider_keys: std::collections::HashMap<String, Vec<String>>,
 
     /// Resend API key for transactional email. `None` logs emails instead of sending.
     pub resend_api_key: Option<String>,
@@ -122,8 +127,7 @@ impl Config {
 
             master_key,
 
-            shared_openai_keys: list("SHARED_OPENAI_KEYS"),
-            shared_google_keys: list("SHARED_GOOGLE_KEYS"),
+            shared_provider_keys: load_shared_keys(),
 
             resend_api_key: opt("RESEND_API_KEY"),
             email_from: opt("AEGIS_EMAIL_FROM").unwrap_or_else(|| "Aegis <noreply@aegis.dev>".into()),
@@ -165,8 +169,7 @@ impl Config {
             redis_url: None,
             qdrant_url: None,
             master_key: [7u8; 32],
-            shared_openai_keys: vec![],
-            shared_google_keys: vec![],
+            shared_provider_keys: std::collections::HashMap::new(),
             resend_api_key: None,
             email_from: "Aegis <noreply@aegis.dev>".to_string(),
             stripe_secret_key: None,
@@ -214,6 +217,14 @@ impl Config {
         Ok(())
     }
 
+    /// Pooled keys for a provider, if any.
+    pub fn shared_keys(&self, provider: &str) -> &[String] {
+        self.shared_provider_keys
+            .get(provider)
+            .map(|keys| keys.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Whether session cookies get the `Secure` attribute.
     pub fn secure_cookies(&self) -> bool {
         self.environment.is_production_like()
@@ -247,6 +258,21 @@ fn load_master_key(environment: Environment) -> Result<[u8; 32]> {
         // Anything encrypted with it is worthless, which is the point.
         _ => Ok(*b"aegis-development-key-do-not-use"),
     }
+}
+
+/// Collect `SHARED_<PROVIDER>_KEYS` for every provider we ship an adapter for.
+fn load_shared_keys() -> std::collections::HashMap<String, Vec<String>> {
+    let providers = [
+        "openai", "anthropic", "google", "openrouter", "moonshot", "deepseek", "mistral",
+        "groq", "custom",
+    ];
+    providers
+        .iter()
+        .filter_map(|provider| {
+            let keys = list(&format!("SHARED_{}_KEYS", provider.to_uppercase()));
+            (!keys.is_empty()).then(|| (provider.to_string(), keys))
+        })
+        .collect()
 }
 
 fn opt(key: &str) -> Option<String> {

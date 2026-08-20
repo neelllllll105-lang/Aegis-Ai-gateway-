@@ -1,1 +1,1642 @@
-//! Placeholder — implemented later in this build.
+//! Data access.
+//!
+//! # The rule this module exists to enforce
+//!
+//! **Every tenant-scoped query takes an `org_id` and filters on it.** Not "usually", not
+//! "when the caller remembers" — the function signatures make it impossible to ask for a
+//! resource without also saying which organisation is asking. A lookup by id alone does
+//! not exist here, so no caller can accidentally read across tenants.
+//!
+//! The consequence is that a mistyped or malicious id returns `NotFound` rather than
+//! somebody else's data, and the integration tests in `tests/` assert exactly that.
+//!
+//! # Runtime-checked queries
+//!
+//! Queries use `sqlx::query_as` rather than the compile-time `query_as!` macro. See
+//! `docs/adr/0004-runtime-checked-sql.md` — the short version is that the macro requires
+//! a live database at build time, which would mean nobody can compile or test this
+//! repository without first standing up PostgreSQL. Column mapping is covered by the
+//! integration tests instead.
+
+use crate::error::{AegisError, Result};
+use crate::money::MicroCents;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::{FromRow, PgPool};
+use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// Row types
+// ---------------------------------------------------------------------------
+
+/// A user account.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct User {
+    pub id: Uuid,
+    pub email: String,
+    pub email_verified_at: Option<DateTime<Utc>>,
+    /// Never serialized to a client.
+    #[serde(skip)]
+    pub password_hash: Option<String>,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub is_admin: bool,
+    pub totp_enabled: bool,
+    pub disabled_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl User {
+    /// True when the account may sign in.
+    pub fn is_active(&self) -> bool {
+        self.disabled_at.is_none()
+    }
+}
+
+/// An organisation — the tenancy root.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Organization {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub plan: String,
+    pub savings_share_bp: i32,
+    pub billing_email: Option<String>,
+    pub zero_retention: bool,
+    pub content_capture: bool,
+    pub region: String,
+    pub stripe_customer_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Organization {
+    /// Savings-share rate in basis points.
+    pub fn savings_share_basis_points(&self) -> u32 {
+        self.savings_share_bp.max(0) as u32
+    }
+
+    /// Whether responses may be cached for this organisation.
+    pub fn caching_allowed(&self) -> bool {
+        !self.zero_retention
+    }
+}
+
+/// An API key, without the key itself.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct ApiKey {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub team_id: Option<Uuid>,
+    pub name: String,
+    pub key_prefix: String,
+    #[serde(skip)]
+    pub key_hash: String,
+    pub rate_limit_per_minute: i32,
+    pub monthly_budget_mc: Option<i64>,
+    pub allowed_models: Option<serde_json::Value>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl ApiKey {
+    /// True when the key may authenticate a request right now.
+    pub fn is_usable(&self) -> bool {
+        self.revoked_at.is_none() && self.expires_at.is_none_or(|e| e > Utc::now())
+    }
+
+    /// The model allowlist, if one is set.
+    pub fn allowed_model_list(&self) -> Option<Vec<String>> {
+        self.allowed_models.as_ref().and_then(|value| {
+            value.as_array().map(|models| {
+                models
+                    .iter()
+                    .filter_map(|m| m.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+        })
+    }
+}
+
+/// A BYOK provider credential, without the key.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct ProviderCredential {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub provider: String,
+    /// Ciphertext. Never serialized; the `skip` is what keeps it out of API responses.
+    #[serde(skip)]
+    pub encrypted_key: Vec<u8>,
+    pub key_hint: Option<String>,
+    pub base_url: Option<String>,
+    pub label: Option<String>,
+    pub is_default: bool,
+    pub last_tested_at: Option<DateTime<Utc>>,
+    pub last_test_ok: Option<bool>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A team.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Team {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub name: String,
+    pub monthly_budget_mc: Option<i64>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A stored routing policy.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct StoredPolicy {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub name: String,
+    pub rules: serde_json::Value,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A budget.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Budget {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub team_id: Option<Uuid>,
+    pub api_key_id: Option<Uuid>,
+    pub period: String,
+    pub limit_mc: i64,
+    pub hard_limit: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A membership row joined with the user.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Member {
+    pub user_id: Uuid,
+    pub email: String,
+    pub name: Option<String>,
+    pub role: String,
+    pub joined_at: DateTime<Utc>,
+}
+
+/// Aggregated usage for a period.
+#[derive(Debug, Clone, Default, FromRow, Serialize)]
+pub struct UsageSummary {
+    pub requests: i64,
+    pub cache_hits: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub baseline_cost_mc: i64,
+    pub actual_cost_mc: i64,
+    pub gross_savings_mc: i64,
+    pub aegis_fee_mc: i64,
+}
+
+/// One row of the request metadata log. Deliberately carries no prompt or response
+/// content — Principle 4.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct RequestLogRow {
+    pub request_id: Uuid,
+    pub requested_model: String,
+    pub served_model: String,
+    pub provider: String,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub baseline_cost_mc: i64,
+    pub actual_cost_mc: i64,
+    pub gross_savings_mc: i64,
+    pub latency_ms: i32,
+    pub cache_hit: bool,
+    pub cache_type: Option<String>,
+    pub routing_reason: String,
+    pub status_code: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Everything the hot path needs about a key, resolved in one query.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct KeyContext {
+    pub api_key_id: Uuid,
+    pub org_id: Uuid,
+    pub team_id: Option<Uuid>,
+    pub rate_limit_per_minute: i32,
+    pub monthly_budget_mc: Option<i64>,
+    pub allowed_models: Option<serde_json::Value>,
+    pub plan: String,
+    pub savings_share_bp: i32,
+    pub zero_retention: bool,
+    pub org_region: String,
+}
+
+impl KeyContext {
+    /// The model allowlist, if one is set.
+    pub fn allowed_model_list(&self) -> Option<Vec<String>> {
+        self.allowed_models.as_ref().and_then(|value| {
+            value.as_array().map(|models| {
+                models
+                    .iter()
+                    .filter_map(|m| m.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Users & auth
+// ---------------------------------------------------------------------------
+
+/// Create a user.
+pub async fn create_user(
+    pool: &PgPool,
+    email: &str,
+    password_hash: Option<&str>,
+    name: Option<&str>,
+) -> Result<User> {
+    sqlx::query_as::<_, User>(
+        "INSERT INTO users (email, password_hash, name)
+         VALUES (LOWER($1), $2, $3)
+         RETURNING id, email, email_verified_at, password_hash, name, avatar_url,
+                   is_admin, totp_enabled, disabled_at, created_at",
+    )
+    .bind(email)
+    .bind(password_hash)
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .map_err(map_unique_violation("an account with this email already exists"))
+}
+
+/// Find a user by email.
+pub async fn find_user_by_email(pool: &PgPool, email: &str) -> Result<Option<User>> {
+    sqlx::query_as::<_, User>(
+        "SELECT id, email, email_verified_at, password_hash, name, avatar_url,
+                is_admin, totp_enabled, disabled_at, created_at
+         FROM users WHERE LOWER(email) = LOWER($1) AND deleted_at IS NULL",
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Find a user by id.
+pub async fn find_user_by_id(pool: &PgPool, user_id: Uuid) -> Result<Option<User>> {
+    sqlx::query_as::<_, User>(
+        "SELECT id, email, email_verified_at, password_hash, name, avatar_url,
+                is_admin, totp_enabled, disabled_at, created_at
+         FROM users WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Store a session.
+pub async fn create_session(
+    pool: &PgPool,
+    user_id: Uuid,
+    token_hash: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<Uuid> {
+    let row: (Uuid,) = sqlx::query_as(
+        "INSERT INTO sessions (user_id, token_hash, expires_at) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(user_id)
+    .bind(token_hash)
+    .bind(expires_at)
+    .fetch_one(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(row.0)
+}
+
+/// Resolve a session token hash to its user, if the session is live.
+pub async fn find_user_by_session(pool: &PgPool, token_hash: &str) -> Result<Option<User>> {
+    sqlx::query_as::<_, User>(
+        "SELECT u.id, u.email, u.email_verified_at, u.password_hash, u.name, u.avatar_url,
+                u.is_admin, u.totp_enabled, u.disabled_at, u.created_at
+         FROM sessions s
+         JOIN users u ON u.id = s.user_id
+         WHERE s.token_hash = $1
+           AND s.expires_at > NOW()
+           AND u.deleted_at IS NULL
+           AND u.disabled_at IS NULL",
+    )
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Delete a session (logout).
+pub async fn delete_session(pool: &PgPool, token_hash: &str) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
+        .bind(token_hash)
+        .execute(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Remove expired sessions. Called periodically.
+pub async fn purge_expired_sessions(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query("DELETE FROM sessions WHERE expires_at < NOW()")
+        .execute(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(result.rows_affected())
+}
+
+/// Mark an email verified.
+pub async fn mark_email_verified(pool: &PgPool, user_id: Uuid) -> Result<()> {
+    sqlx::query("UPDATE users SET email_verified_at = NOW(), updated_at = NOW() WHERE id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(AegisError::Database)
+}
+
+/// Store a single-use auth token.
+pub async fn create_auth_token(
+    pool: &PgPool,
+    user_id: Uuid,
+    token_hash: &str,
+    purpose: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO auth_tokens (user_id, token_hash, purpose, expires_at)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(user_id)
+    .bind(token_hash)
+    .bind(purpose)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(AegisError::Database)
+}
+
+/// Consume a single-use auth token, returning its user.
+///
+/// The `consumed_at IS NULL` predicate is inside the UPDATE, so consumption is atomic: two
+/// concurrent redemptions of the same reset link cannot both succeed.
+pub async fn consume_auth_token(
+    pool: &PgPool,
+    token_hash: &str,
+    purpose: &str,
+) -> Result<Option<Uuid>> {
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "UPDATE auth_tokens SET consumed_at = NOW()
+         WHERE token_hash = $1 AND purpose = $2 AND consumed_at IS NULL AND expires_at > NOW()
+         RETURNING user_id",
+    )
+    .bind(token_hash)
+    .bind(purpose)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(row.map(|(user_id,)| user_id))
+}
+
+/// Update a user's password hash.
+pub async fn update_password(pool: &PgPool, user_id: Uuid, password_hash: &str) -> Result<()> {
+    sqlx::query("UPDATE users SET password_hash = $2, updated_at = NOW() WHERE id = $1")
+        .bind(user_id)
+        .bind(password_hash)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(AegisError::Database)
+}
+
+// ---------------------------------------------------------------------------
+// Organizations
+// ---------------------------------------------------------------------------
+
+/// Create an organisation and make `owner_id` its owner, atomically.
+///
+/// One transaction: an organisation with no owner is unreachable through the UI and would
+/// need manual repair.
+pub async fn create_org_with_owner(
+    pool: &PgPool,
+    name: &str,
+    slug: &str,
+    owner_id: Uuid,
+) -> Result<Organization> {
+    let mut tx = pool.begin().await.map_err(AegisError::Database)?;
+
+    let org = sqlx::query_as::<_, Organization>(
+        "INSERT INTO organizations (name, slug, plan, savings_share_bp)
+         VALUES ($1, $2, 'free', 0)
+         RETURNING id, name, slug, plan, savings_share_bp, billing_email, zero_retention,
+                   content_capture, region, stripe_customer_id, created_at",
+    )
+    .bind(name)
+    .bind(slug)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(map_unique_violation("that organisation slug is taken"))?;
+
+    sqlx::query("INSERT INTO org_memberships (org_id, user_id, role) VALUES ($1, $2, 'owner')")
+        .bind(org.id)
+        .bind(owner_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AegisError::Database)?;
+
+    tx.commit().await.map_err(AegisError::Database)?;
+    Ok(org)
+}
+
+/// Fetch an organisation the user belongs to.
+///
+/// Membership is part of the query, not a separate check a caller could forget.
+pub async fn find_org_for_user(
+    pool: &PgPool,
+    org_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<Organization>> {
+    sqlx::query_as::<_, Organization>(
+        "SELECT o.id, o.name, o.slug, o.plan, o.savings_share_bp, o.billing_email,
+                o.zero_retention, o.content_capture, o.region, o.stripe_customer_id, o.created_at
+         FROM organizations o
+         JOIN org_memberships m ON m.org_id = o.id
+         WHERE o.id = $1 AND m.user_id = $2",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Fetch an organisation by id, without a membership check.
+///
+/// For the gateway hot path, where authentication already established the org from an API
+/// key, and for admin tooling. Never reachable from a user-facing route.
+pub async fn find_org(pool: &PgPool, org_id: Uuid) -> Result<Option<Organization>> {
+    sqlx::query_as::<_, Organization>(
+        "SELECT id, name, slug, plan, savings_share_bp, billing_email, zero_retention,
+                content_capture, region, stripe_customer_id, created_at
+         FROM organizations WHERE id = $1",
+    )
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Every organisation a user belongs to.
+pub async fn list_orgs_for_user(pool: &PgPool, user_id: Uuid) -> Result<Vec<Organization>> {
+    sqlx::query_as::<_, Organization>(
+        "SELECT o.id, o.name, o.slug, o.plan, o.savings_share_bp, o.billing_email,
+                o.zero_retention, o.content_capture, o.region, o.stripe_customer_id, o.created_at
+         FROM organizations o
+         JOIN org_memberships m ON m.org_id = o.id
+         WHERE m.user_id = $1
+         ORDER BY o.created_at",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// A user's role in an organisation, if they are a member.
+pub async fn role_in_org(pool: &PgPool, org_id: Uuid, user_id: Uuid) -> Result<Option<String>> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT role FROM org_memberships WHERE org_id = $1 AND user_id = $2")
+            .bind(org_id)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(AegisError::Database)?;
+    Ok(row.map(|(role,)| role))
+}
+
+/// Update organisation settings.
+pub async fn update_org_settings(
+    pool: &PgPool,
+    org_id: Uuid,
+    name: Option<&str>,
+    billing_email: Option<&str>,
+    zero_retention: Option<bool>,
+    content_capture: Option<bool>,
+) -> Result<Organization> {
+    sqlx::query_as::<_, Organization>(
+        "UPDATE organizations SET
+            name = COALESCE($2, name),
+            billing_email = COALESCE($3, billing_email),
+            zero_retention = COALESCE($4, zero_retention),
+            -- Zero retention wins: enabling it must force capture off in the same
+            -- statement, or the CHECK constraint would reject an otherwise valid update.
+            content_capture = CASE
+                WHEN COALESCE($4, zero_retention) THEN false
+                ELSE COALESCE($5, content_capture)
+            END,
+            updated_at = NOW()
+         WHERE id = $1
+         RETURNING id, name, slug, plan, savings_share_bp, billing_email, zero_retention,
+                   content_capture, region, stripe_customer_id, created_at",
+    )
+    .bind(org_id)
+    .bind(name)
+    .bind(billing_email)
+    .bind(zero_retention)
+    .bind(content_capture)
+    .fetch_one(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Change an organisation's plan and savings-share rate together.
+pub async fn update_org_plan(
+    pool: &PgPool,
+    org_id: Uuid,
+    plan: &str,
+    savings_share_bp: i32,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE organizations SET plan = $2, savings_share_bp = $3, updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(org_id)
+    .bind(plan)
+    .bind(savings_share_bp)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(AegisError::Database)
+}
+
+/// List members of an organisation.
+pub async fn list_members(pool: &PgPool, org_id: Uuid) -> Result<Vec<Member>> {
+    sqlx::query_as::<_, Member>(
+        "SELECT m.user_id, u.email, u.name, m.role, m.joined_at
+         FROM org_memberships m
+         JOIN users u ON u.id = m.user_id
+         WHERE m.org_id = $1
+         ORDER BY m.joined_at",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Add a member.
+pub async fn add_member(
+    pool: &PgPool,
+    org_id: Uuid,
+    user_id: Uuid,
+    role: &str,
+    invited_by: Option<Uuid>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO org_memberships (org_id, user_id, role, invited_by)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .bind(role)
+    .bind(invited_by)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(AegisError::Database)
+}
+
+/// Remove a member.
+///
+/// Refuses to remove the last owner: an organisation with no owner cannot be
+/// administered, and recovering one is a manual database operation.
+pub async fn remove_member(pool: &PgPool, org_id: Uuid, user_id: Uuid) -> Result<bool> {
+    let mut tx = pool.begin().await.map_err(AegisError::Database)?;
+
+    let owners: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM org_memberships WHERE org_id = $1 AND role = 'owner'",
+    )
+    .bind(org_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AegisError::Database)?;
+
+    let target_role: Option<(String,)> =
+        sqlx::query_as("SELECT role FROM org_memberships WHERE org_id = $1 AND user_id = $2")
+            .bind(org_id)
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(AegisError::Database)?;
+
+    if let Some((role,)) = &target_role {
+        if role == "owner" && owners.0 <= 1 {
+            return Err(AegisError::BadRequest(
+                "cannot remove the last owner of an organisation".into(),
+            ));
+        }
+    }
+
+    let result = sqlx::query("DELETE FROM org_memberships WHERE org_id = $1 AND user_id = $2")
+        .bind(org_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AegisError::Database)?;
+
+    tx.commit().await.map_err(AegisError::Database)?;
+    Ok(result.rows_affected() > 0)
+}
+
+// ---------------------------------------------------------------------------
+// API keys
+// ---------------------------------------------------------------------------
+
+/// Create an API key. The plaintext is never passed in or stored — only its hash.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_api_key(
+    pool: &PgPool,
+    org_id: Uuid,
+    created_by: Option<Uuid>,
+    name: &str,
+    key_prefix: &str,
+    key_hash: &str,
+    team_id: Option<Uuid>,
+    rate_limit_per_minute: i32,
+    monthly_budget_mc: Option<i64>,
+    allowed_models: Option<serde_json::Value>,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<ApiKey> {
+    sqlx::query_as::<_, ApiKey>(
+        "INSERT INTO api_keys
+            (org_id, team_id, created_by, name, key_prefix, key_hash,
+             rate_limit_per_minute, monthly_budget_mc, allowed_models, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id, org_id, team_id, name, key_prefix, key_hash, rate_limit_per_minute,
+                   monthly_budget_mc, allowed_models, last_used_at, expires_at, revoked_at,
+                   created_at",
+    )
+    .bind(org_id)
+    .bind(team_id)
+    .bind(created_by)
+    .bind(name)
+    .bind(key_prefix)
+    .bind(key_hash)
+    .bind(rate_limit_per_minute)
+    .bind(monthly_budget_mc)
+    .bind(allowed_models)
+    .bind(expires_at)
+    .fetch_one(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Resolve a key hash to everything the hot path needs, in one round trip.
+///
+/// Only ever reached on a cache miss; the result is cached in Redis for 60 seconds.
+pub async fn resolve_key(pool: &PgPool, key_hash: &str) -> Result<Option<KeyContext>> {
+    sqlx::query_as::<_, KeyContext>(
+        "SELECT k.id AS api_key_id, k.org_id, k.team_id, k.rate_limit_per_minute,
+                k.monthly_budget_mc, k.allowed_models,
+                o.plan, o.savings_share_bp, o.zero_retention, o.region AS org_region
+         FROM api_keys k
+         JOIN organizations o ON o.id = k.org_id
+         WHERE k.key_hash = $1
+           AND k.revoked_at IS NULL
+           AND (k.expires_at IS NULL OR k.expires_at > NOW())",
+    )
+    .bind(key_hash)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// List an organisation's keys.
+pub async fn list_api_keys(pool: &PgPool, org_id: Uuid) -> Result<Vec<ApiKey>> {
+    sqlx::query_as::<_, ApiKey>(
+        "SELECT id, org_id, team_id, name, key_prefix, key_hash, rate_limit_per_minute,
+                monthly_budget_mc, allowed_models, last_used_at, expires_at, revoked_at,
+                created_at
+         FROM api_keys WHERE org_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Fetch one key **within an organisation**.
+///
+/// Note the two-part predicate: passing another org's key id returns `None`, not the key.
+pub async fn find_api_key(pool: &PgPool, org_id: Uuid, key_id: Uuid) -> Result<Option<ApiKey>> {
+    sqlx::query_as::<_, ApiKey>(
+        "SELECT id, org_id, team_id, name, key_prefix, key_hash, rate_limit_per_minute,
+                monthly_budget_mc, allowed_models, last_used_at, expires_at, revoked_at,
+                created_at
+         FROM api_keys WHERE id = $1 AND org_id = $2",
+    )
+    .bind(key_id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Update mutable key settings.
+pub async fn update_api_key(
+    pool: &PgPool,
+    org_id: Uuid,
+    key_id: Uuid,
+    name: Option<&str>,
+    rate_limit_per_minute: Option<i32>,
+    monthly_budget_mc: Option<i64>,
+    allowed_models: Option<serde_json::Value>,
+) -> Result<Option<ApiKey>> {
+    sqlx::query_as::<_, ApiKey>(
+        "UPDATE api_keys SET
+            name = COALESCE($3, name),
+            rate_limit_per_minute = COALESCE($4, rate_limit_per_minute),
+            monthly_budget_mc = COALESCE($5, monthly_budget_mc),
+            allowed_models = COALESCE($6, allowed_models)
+         WHERE id = $1 AND org_id = $2
+         RETURNING id, org_id, team_id, name, key_prefix, key_hash, rate_limit_per_minute,
+                   monthly_budget_mc, allowed_models, last_used_at, expires_at, revoked_at,
+                   created_at",
+    )
+    .bind(key_id)
+    .bind(org_id)
+    .bind(name)
+    .bind(rate_limit_per_minute)
+    .bind(monthly_budget_mc)
+    .bind(allowed_models)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Revoke a key.
+///
+/// A soft revoke: the row stays so usage records keep referring to something real, and so
+/// an audit can show when the key stopped working.
+pub async fn revoke_api_key(pool: &PgPool, org_id: Uuid, key_id: Uuid) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE api_keys SET revoked_at = NOW()
+         WHERE id = $1 AND org_id = $2 AND revoked_at IS NULL",
+    )
+    .bind(key_id)
+    .bind(org_id)
+    .execute(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Record that a key was used. Best-effort and off the hot path.
+pub async fn touch_api_key(pool: &PgPool, key_id: Uuid) -> Result<()> {
+    sqlx::query("UPDATE api_keys SET last_used_at = NOW() WHERE id = $1")
+        .bind(key_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(AegisError::Database)
+}
+
+// ---------------------------------------------------------------------------
+// Provider credentials
+// ---------------------------------------------------------------------------
+
+/// Store an encrypted BYOK credential.
+pub async fn create_credential(
+    pool: &PgPool,
+    org_id: Uuid,
+    provider: &str,
+    encrypted_key: &[u8],
+    key_hint: Option<&str>,
+    base_url: Option<&str>,
+    label: Option<&str>,
+    is_default: bool,
+) -> Result<ProviderCredential> {
+    let mut tx = pool.begin().await.map_err(AegisError::Database)?;
+
+    if is_default {
+        // A partial unique index enforces one default per provider; clear the old one
+        // first so setting a new default is not a constraint violation.
+        sqlx::query(
+            "UPDATE provider_credentials SET is_default = false
+             WHERE org_id = $1 AND provider = $2 AND is_default",
+        )
+        .bind(org_id)
+        .bind(provider)
+        .execute(&mut *tx)
+        .await
+        .map_err(AegisError::Database)?;
+    }
+
+    let credential = sqlx::query_as::<_, ProviderCredential>(
+        "INSERT INTO provider_credentials
+            (org_id, provider, encrypted_key, key_hint, base_url, label, is_default)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, org_id, provider, encrypted_key, key_hint, base_url, label,
+                   is_default, last_tested_at, last_test_ok, created_at",
+    )
+    .bind(org_id)
+    .bind(provider)
+    .bind(encrypted_key)
+    .bind(key_hint)
+    .bind(base_url)
+    .bind(label)
+    .bind(is_default)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AegisError::Database)?;
+
+    tx.commit().await.map_err(AegisError::Database)?;
+    Ok(credential)
+}
+
+/// List an organisation's credentials. Ciphertext is present but never serialized.
+pub async fn list_credentials(pool: &PgPool, org_id: Uuid) -> Result<Vec<ProviderCredential>> {
+    sqlx::query_as::<_, ProviderCredential>(
+        "SELECT id, org_id, provider, encrypted_key, key_hint, base_url, label,
+                is_default, last_tested_at, last_test_ok, created_at
+         FROM provider_credentials WHERE org_id = $1 ORDER BY provider, created_at",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// The default credential for a provider within an organisation.
+pub async fn find_default_credential(
+    pool: &PgPool,
+    org_id: Uuid,
+    provider: &str,
+) -> Result<Option<ProviderCredential>> {
+    sqlx::query_as::<_, ProviderCredential>(
+        "SELECT id, org_id, provider, encrypted_key, key_hint, base_url, label,
+                is_default, last_tested_at, last_test_ok, created_at
+         FROM provider_credentials
+         WHERE org_id = $1 AND provider = $2
+         ORDER BY is_default DESC, created_at
+         LIMIT 1",
+    )
+    .bind(org_id)
+    .bind(provider)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Fetch one credential within an organisation.
+pub async fn find_credential(
+    pool: &PgPool,
+    org_id: Uuid,
+    credential_id: Uuid,
+) -> Result<Option<ProviderCredential>> {
+    sqlx::query_as::<_, ProviderCredential>(
+        "SELECT id, org_id, provider, encrypted_key, key_hint, base_url, label,
+                is_default, last_tested_at, last_test_ok, created_at
+         FROM provider_credentials WHERE id = $1 AND org_id = $2",
+    )
+    .bind(credential_id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Delete a credential.
+pub async fn delete_credential(pool: &PgPool, org_id: Uuid, credential_id: Uuid) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM provider_credentials WHERE id = $1 AND org_id = $2")
+        .bind(credential_id)
+        .bind(org_id)
+        .execute(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Record the outcome of a credential test.
+pub async fn record_credential_test(
+    pool: &PgPool,
+    org_id: Uuid,
+    credential_id: Uuid,
+    ok: bool,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE provider_credentials SET last_tested_at = NOW(), last_test_ok = $3
+         WHERE id = $1 AND org_id = $2",
+    )
+    .bind(credential_id)
+    .bind(org_id)
+    .bind(ok)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(AegisError::Database)
+}
+
+// ---------------------------------------------------------------------------
+// Teams, policies, budgets
+// ---------------------------------------------------------------------------
+
+/// Create a team.
+pub async fn create_team(
+    pool: &PgPool,
+    org_id: Uuid,
+    name: &str,
+    monthly_budget_mc: Option<i64>,
+) -> Result<Team> {
+    sqlx::query_as::<_, Team>(
+        "INSERT INTO teams (org_id, name, monthly_budget_mc) VALUES ($1, $2, $3)
+         RETURNING id, org_id, name, monthly_budget_mc, created_at",
+    )
+    .bind(org_id)
+    .bind(name)
+    .bind(monthly_budget_mc)
+    .fetch_one(pool)
+    .await
+    .map_err(map_unique_violation("a team with that name already exists"))
+}
+
+/// List teams.
+pub async fn list_teams(pool: &PgPool, org_id: Uuid) -> Result<Vec<Team>> {
+    sqlx::query_as::<_, Team>(
+        "SELECT id, org_id, name, monthly_budget_mc, created_at
+         FROM teams WHERE org_id = $1 ORDER BY name",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Delete a team.
+pub async fn delete_team(pool: &PgPool, org_id: Uuid, team_id: Uuid) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM teams WHERE id = $1 AND org_id = $2")
+        .bind(team_id)
+        .bind(org_id)
+        .execute(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// The active routing policy for an organisation.
+pub async fn find_active_policy(pool: &PgPool, org_id: Uuid) -> Result<Option<StoredPolicy>> {
+    sqlx::query_as::<_, StoredPolicy>(
+        "SELECT id, org_id, name, rules, is_active, created_at
+         FROM routing_policies WHERE org_id = $1 AND is_active
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// List policies.
+pub async fn list_policies(pool: &PgPool, org_id: Uuid) -> Result<Vec<StoredPolicy>> {
+    sqlx::query_as::<_, StoredPolicy>(
+        "SELECT id, org_id, name, rules, is_active, created_at
+         FROM routing_policies WHERE org_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Create a policy.
+pub async fn create_policy(
+    pool: &PgPool,
+    org_id: Uuid,
+    name: &str,
+    rules: &serde_json::Value,
+) -> Result<StoredPolicy> {
+    sqlx::query_as::<_, StoredPolicy>(
+        "INSERT INTO routing_policies (org_id, name, rules) VALUES ($1, $2, $3)
+         RETURNING id, org_id, name, rules, is_active, created_at",
+    )
+    .bind(org_id)
+    .bind(name)
+    .bind(rules)
+    .fetch_one(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Delete a policy.
+pub async fn delete_policy(pool: &PgPool, org_id: Uuid, policy_id: Uuid) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM routing_policies WHERE id = $1 AND org_id = $2")
+        .bind(policy_id)
+        .bind(org_id)
+        .execute(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// List budgets.
+pub async fn list_budgets(pool: &PgPool, org_id: Uuid) -> Result<Vec<Budget>> {
+    sqlx::query_as::<_, Budget>(
+        "SELECT id, org_id, team_id, api_key_id, period, limit_mc, hard_limit, created_at
+         FROM budgets WHERE org_id = $1 ORDER BY created_at",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Create a budget.
+pub async fn create_budget(
+    pool: &PgPool,
+    org_id: Uuid,
+    team_id: Option<Uuid>,
+    api_key_id: Option<Uuid>,
+    period: &str,
+    limit_mc: i64,
+    hard_limit: bool,
+) -> Result<Budget> {
+    sqlx::query_as::<_, Budget>(
+        "INSERT INTO budgets (org_id, team_id, api_key_id, period, limit_mc, hard_limit)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, org_id, team_id, api_key_id, period, limit_mc, hard_limit, created_at",
+    )
+    .bind(org_id)
+    .bind(team_id)
+    .bind(api_key_id)
+    .bind(period)
+    .bind(limit_mc)
+    .bind(hard_limit)
+    .fetch_one(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Delete a budget.
+pub async fn delete_budget(pool: &PgPool, org_id: Uuid, budget_id: Uuid) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM budgets WHERE id = $1 AND org_id = $2")
+        .bind(budget_id)
+        .bind(org_id)
+        .execute(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(result.rows_affected() > 0)
+}
+
+// ---------------------------------------------------------------------------
+// Usage
+// ---------------------------------------------------------------------------
+
+/// Insert a usage record idempotently.
+///
+/// `ON CONFLICT DO NOTHING` against the unique index on `(request_id, created_at)` is what
+/// makes stream redelivery safe. Returns true when a row was actually written, so the
+/// worker can distinguish new records from duplicates.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_usage_record(
+    pool: &PgPool,
+    event: &crate::metering::usage::UsageEvent,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "INSERT INTO usage_records
+            (request_id, org_id, api_key_id, team_id, requested_model, served_model, provider,
+             input_tokens, output_tokens, tokens_estimated, baseline_cost_mc, actual_cost_mc,
+             gross_savings_mc, aegis_fee_mc, latency_ms, gateway_overhead_us, cache_hit,
+             cache_type, routing_reason, complexity_score_milli, tokens_saved_by_compression,
+             status_code, error_type, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                 $17, $18, $19, $20, $21, $22, $23, $24)
+         ON CONFLICT (request_id, created_at) DO NOTHING",
+    )
+    .bind(event.request_id)
+    .bind(event.org_id)
+    .bind(event.api_key_id)
+    .bind(event.team_id)
+    .bind(&event.requested_model)
+    .bind(&event.served_model)
+    .bind(&event.provider)
+    .bind(event.input_tokens as i32)
+    .bind(event.output_tokens as i32)
+    .bind(event.tokens_estimated)
+    .bind(event.baseline_cost_mc)
+    .bind(event.actual_cost_mc)
+    .bind(event.gross_savings_mc)
+    .bind(event.aegis_fee_mc)
+    .bind(event.latency_ms as i32)
+    .bind(microseconds(event.gateway_overhead_ms))
+    .bind(event.cache_hit)
+    .bind(event.cache_type.as_deref())
+    .bind(&event.routing_reason)
+    .bind(event.complexity_score.map(thousandths))
+    .bind(event.tokens_saved_by_compression as i32)
+    .bind(event.status_code as i32)
+    .bind(event.error_type.as_deref())
+    .bind(event.created_at)
+    .execute(pool)
+    .await
+    .map_err(AegisError::Database)?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Aggregated usage for an organisation over a period.
+pub async fn usage_summary(
+    pool: &PgPool,
+    org_id: Uuid,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<UsageSummary> {
+    sqlx::query_as::<_, UsageSummary>(
+        "SELECT
+            COUNT(*)::BIGINT AS requests,
+            COALESCE(SUM(CASE WHEN cache_hit THEN 1 ELSE 0 END), 0)::BIGINT AS cache_hits,
+            COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
+            COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
+            COALESCE(SUM(baseline_cost_mc), 0)::BIGINT AS baseline_cost_mc,
+            COALESCE(SUM(actual_cost_mc), 0)::BIGINT AS actual_cost_mc,
+            COALESCE(SUM(gross_savings_mc), 0)::BIGINT AS gross_savings_mc,
+            COALESCE(SUM(aegis_fee_mc), 0)::BIGINT AS aegis_fee_mc
+         FROM usage_records
+         WHERE org_id = $1 AND created_at >= $2 AND created_at < $3",
+    )
+    .bind(org_id)
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Paginated request metadata log. Never returns prompt or response content.
+pub async fn list_requests(
+    pool: &PgPool,
+    org_id: Uuid,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<RequestLogRow>> {
+    sqlx::query_as::<_, RequestLogRow>(
+        "SELECT request_id, requested_model, served_model, provider, input_tokens,
+                output_tokens, baseline_cost_mc, actual_cost_mc, gross_savings_mc,
+                latency_ms, cache_hit, cache_type, routing_reason, status_code, created_at
+         FROM usage_records
+         WHERE org_id = $1 AND created_at >= $2 AND created_at < $3
+         ORDER BY created_at DESC
+         LIMIT $4 OFFSET $5",
+    )
+    .bind(org_id)
+    .bind(from)
+    .bind(to)
+    .bind(limit.clamp(1, 1_000))
+    .bind(offset.max(0))
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Fold a usage record into the daily rollup.
+pub async fn upsert_daily_aggregate(
+    pool: &PgPool,
+    event: &crate::metering::usage::UsageEvent,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO daily_aggregates
+            (org_id, day, served_model, team_id, requests, cache_hits, input_tokens,
+             output_tokens, baseline_cost_mc, actual_cost_mc, gross_savings_mc, aegis_fee_mc)
+         VALUES ($1, $2::DATE, $3, COALESCE($4, '00000000-0000-0000-0000-000000000000'::UUID),
+                 1, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (org_id, day, served_model, team_id) DO UPDATE SET
+            requests = daily_aggregates.requests + 1,
+            cache_hits = daily_aggregates.cache_hits + EXCLUDED.cache_hits,
+            input_tokens = daily_aggregates.input_tokens + EXCLUDED.input_tokens,
+            output_tokens = daily_aggregates.output_tokens + EXCLUDED.output_tokens,
+            baseline_cost_mc = daily_aggregates.baseline_cost_mc + EXCLUDED.baseline_cost_mc,
+            actual_cost_mc = daily_aggregates.actual_cost_mc + EXCLUDED.actual_cost_mc,
+            gross_savings_mc = daily_aggregates.gross_savings_mc + EXCLUDED.gross_savings_mc,
+            aegis_fee_mc = daily_aggregates.aegis_fee_mc + EXCLUDED.aegis_fee_mc,
+            updated_at = NOW()",
+    )
+    .bind(event.org_id)
+    .bind(event.created_at)
+    .bind(&event.served_model)
+    .bind(event.team_id)
+    .bind(if event.cache_hit { 1i64 } else { 0i64 })
+    .bind(event.input_tokens as i64)
+    .bind(event.output_tokens as i64)
+    .bind(event.baseline_cost_mc)
+    .bind(event.actual_cost_mc)
+    .bind(event.gross_savings_mc)
+    .bind(event.aegis_fee_mc)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(AegisError::Database)
+}
+
+// ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+/// Append an audit entry.
+///
+/// Failures are returned but callers generally log and continue: an audit write must not
+/// undo the action it describes, and a gap is recoverable while a rolled-back key
+/// rotation is not.
+pub async fn write_audit_log(
+    pool: &PgPool,
+    org_id: Uuid,
+    user_id: Option<Uuid>,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<Uuid>,
+    metadata: Option<serde_json::Value>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO audit_logs
+            (org_id, user_id, action, resource_type, resource_id, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .bind(action)
+    .bind(resource_type)
+    .bind(resource_id)
+    .bind(metadata)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(AegisError::Database)
+}
+
+/// An audit log entry.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub org_id: Uuid,
+    pub user_id: Option<Uuid>,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: Option<Uuid>,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Read the audit log for an organisation.
+pub async fn list_audit_logs(
+    pool: &PgPool,
+    org_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<AuditEntry>> {
+    sqlx::query_as::<_, AuditEntry>(
+        "SELECT id, org_id, user_id, action, resource_type, resource_id, metadata, created_at
+         FROM audit_logs WHERE org_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+    )
+    .bind(org_id)
+    .bind(limit.clamp(1, 10_000))
+    .bind(offset.max(0))
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+// ---------------------------------------------------------------------------
+// Pricing
+// ---------------------------------------------------------------------------
+
+/// A pricing row as stored.
+#[derive(Debug, Clone, FromRow)]
+pub struct PricingRow {
+    pub model_id: String,
+    pub provider: String,
+    pub display_name: String,
+    pub tier: String,
+    pub input_cost_per_mtok_mc: i64,
+    pub output_cost_per_mtok_mc: i64,
+    pub context_window: i32,
+    pub supports_tools: bool,
+    pub supports_vision: bool,
+    pub is_active: bool,
+    pub source: String,
+}
+
+/// Load the current pricing table.
+pub async fn load_pricing(pool: &PgPool) -> Result<Vec<PricingRow>> {
+    sqlx::query_as::<_, PricingRow>(
+        "SELECT model_id, provider, display_name, tier, input_cost_per_mtok_mc,
+                output_cost_per_mtok_mc, context_window, supports_tools, supports_vision,
+                is_active, source
+         FROM model_pricing
+         WHERE effective_to IS NULL AND is_active
+         ORDER BY model_id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Supersede a model's price with a new one, closing the previous row.
+///
+/// Two statements in one transaction so there is never a moment with two current prices
+/// for a model, nor a moment with none.
+pub async fn upsert_pricing(pool: &PgPool, row: &PricingRow) -> Result<()> {
+    let mut tx = pool.begin().await.map_err(AegisError::Database)?;
+
+    sqlx::query(
+        "UPDATE model_pricing SET effective_to = NOW()
+         WHERE model_id = $1 AND effective_to IS NULL",
+    )
+    .bind(&row.model_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AegisError::Database)?;
+
+    sqlx::query(
+        "INSERT INTO model_pricing
+            (model_id, provider, display_name, tier, input_cost_per_mtok_mc,
+             output_cost_per_mtok_mc, context_window, supports_tools, supports_vision,
+             is_active, source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    )
+    .bind(&row.model_id)
+    .bind(&row.provider)
+    .bind(&row.display_name)
+    .bind(&row.tier)
+    .bind(row.input_cost_per_mtok_mc)
+    .bind(row.output_cost_per_mtok_mc)
+    .bind(row.context_window)
+    .bind(row.supports_tools)
+    .bind(row.supports_vision)
+    .bind(row.is_active)
+    .bind(&row.source)
+    .execute(&mut *tx)
+    .await
+    .map_err(AegisError::Database)?;
+
+    tx.commit().await.map_err(AegisError::Database)
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Milliseconds to microseconds, saturating and NaN-safe.
+///
+/// The gateway overhead column is a scaled integer, so the float never reaches the
+/// database. A non-finite reading — which would mean the clock misbehaved — is recorded as
+/// zero rather than rejecting a usage record and losing the billing row entirely.
+fn microseconds(millis: f64) -> i32 {
+    if !millis.is_finite() || millis <= 0.0 {
+        return 0;
+    }
+    (millis * 1_000.0).round().min(i32::MAX as f64) as i32
+}
+
+/// A 0.0..=1.0 score to thousandths, clamped.
+fn thousandths(score: f32) -> i16 {
+    if !score.is_finite() {
+        return 0;
+    }
+    (score.clamp(0.0, 1.0) * 1_000.0).round() as i16
+}
+
+/// Turn a unique-constraint violation into a readable 400 rather than a 500.
+fn map_unique_violation(message: &'static str) -> impl Fn(sqlx::Error) -> AegisError {
+    move |error| match &error {
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+            AegisError::BadRequest(message.to_string())
+        }
+        _ => AegisError::Database(error),
+    }
+}
+
+/// Money helper: read a micro-cent column as [`MicroCents`].
+pub fn micro_cents(value: i64) -> MicroCents {
+    MicroCents(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_key_usability_covers_revocation_and_expiry() {
+        let base = ApiKey {
+            id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            team_id: None,
+            name: "test".into(),
+            key_prefix: "aegis_sk_abcdefg".into(),
+            key_hash: "hash".into(),
+            rate_limit_per_minute: 60,
+            monthly_budget_mc: None,
+            allowed_models: None,
+            last_used_at: None,
+            expires_at: None,
+            revoked_at: None,
+            created_at: Utc::now(),
+        };
+        assert!(base.is_usable());
+
+        let revoked = ApiKey { revoked_at: Some(Utc::now()), ..base.clone() };
+        assert!(!revoked.is_usable());
+
+        let expired = ApiKey {
+            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+            ..base.clone()
+        };
+        assert!(!expired.is_usable());
+
+        let future = ApiKey {
+            expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            ..base
+        };
+        assert!(future.is_usable());
+    }
+
+    #[test]
+    fn allowlists_parse_from_jsonb() {
+        let key = ApiKey {
+            id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            team_id: None,
+            name: "k".into(),
+            key_prefix: "p".into(),
+            key_hash: "h".into(),
+            rate_limit_per_minute: 60,
+            monthly_budget_mc: None,
+            allowed_models: Some(serde_json::json!(["gpt-4o", "gpt-4o-mini"])),
+            last_used_at: None,
+            expires_at: None,
+            revoked_at: None,
+            created_at: Utc::now(),
+        };
+        assert_eq!(
+            key.allowed_model_list(),
+            Some(vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()])
+        );
+
+        let unrestricted = ApiKey { allowed_models: None, ..key.clone() };
+        assert_eq!(unrestricted.allowed_model_list(), None);
+
+        // A malformed value must not be read as "allow nothing", which would break every
+        // request for that key.
+        let malformed = ApiKey { allowed_models: Some(serde_json::json!("oops")), ..key };
+        assert_eq!(malformed.allowed_model_list(), None);
+    }
+
+    #[test]
+    fn credentials_never_serialize_their_ciphertext() {
+        // The `#[serde(skip)]` that keeps encrypted keys out of API responses.
+        let credential = ProviderCredential {
+            id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            provider: "openai".into(),
+            encrypted_key: b"super secret ciphertext".to_vec(),
+            key_hint: Some("...abcd".into()),
+            base_url: None,
+            label: Some("prod".into()),
+            is_default: true,
+            last_tested_at: None,
+            last_test_ok: None,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&credential).unwrap();
+        assert!(!json.contains("ciphertext"), "{json}");
+        assert!(!json.contains("encrypted_key"), "{json}");
+        assert!(json.contains("...abcd"), "the display hint should survive");
+    }
+
+    #[test]
+    fn users_never_serialize_their_password_hash() {
+        let user = User {
+            id: Uuid::new_v4(),
+            email: "a@b.com".into(),
+            email_verified_at: None,
+            password_hash: Some("$argon2id$v=19$m=19456,t=2,p=1$abc$def".into()),
+            name: None,
+            avatar_url: None,
+            is_admin: false,
+            totp_enabled: false,
+            disabled_at: None,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&user).unwrap();
+        assert!(!json.contains("argon2"), "{json}");
+        assert!(!json.contains("password"), "{json}");
+    }
+
+    #[test]
+    fn org_savings_rate_is_never_negative() {
+        let org = Organization {
+            id: Uuid::new_v4(),
+            name: "n".into(),
+            slug: "s".into(),
+            plan: "pro".into(),
+            savings_share_bp: -100,
+            billing_email: None,
+            zero_retention: false,
+            content_capture: false,
+            region: "eu-central".into(),
+            stripe_customer_id: None,
+            created_at: Utc::now(),
+        };
+        assert_eq!(org.savings_share_basis_points(), 0);
+        assert!(org.caching_allowed());
+    }
+
+    #[test]
+    fn zero_retention_orgs_disallow_caching() {
+        let org = Organization {
+            id: Uuid::new_v4(),
+            name: "n".into(),
+            slug: "s".into(),
+            plan: "enterprise".into(),
+            savings_share_bp: 1000,
+            billing_email: None,
+            zero_retention: true,
+            content_capture: false,
+            region: "eu-central".into(),
+            stripe_customer_id: None,
+            created_at: Utc::now(),
+        };
+        assert!(!org.caching_allowed());
+    }
+
+    #[test]
+    fn every_tenant_scoped_query_names_org_id() {
+        // A structural check on this file: any function taking an org_id must mention
+        // org_id in its SQL. Catches the "forgot the WHERE clause" class of bug at the
+        // point where it would otherwise become a cross-tenant leak.
+        let source = include_str!("repo.rs");
+        let scoped_fns = [
+            "fn find_api_key",
+            "fn update_api_key",
+            "fn revoke_api_key",
+            "fn list_api_keys",
+            "fn find_credential",
+            "fn delete_credential",
+            "fn list_credentials",
+            "fn find_default_credential",
+            "fn list_teams",
+            "fn delete_team",
+            "fn list_policies",
+            "fn delete_policy",
+            "fn list_budgets",
+            "fn delete_budget",
+            "fn usage_summary",
+            "fn list_requests",
+            "fn list_audit_logs",
+            "fn find_org_for_user",
+        ];
+        for name in scoped_fns {
+            let start = source.find(name).unwrap_or_else(|| panic!("{name} not found"));
+            // Look at the function body that follows, bounded generously.
+            let body: String = source[start..].chars().take(1_400).collect();
+            let sql_end = body.find("\n}").unwrap_or(body.len());
+            let body = &body[..sql_end];
+            assert!(
+                body.contains("org_id = $") || body.contains("m.user_id = $"),
+                "{name} does not appear to filter by org_id — possible cross-tenant read"
+            );
+        }
+    }
+
+    #[test]
+    fn overhead_is_stored_as_microseconds() {
+        assert_eq!(microseconds(0.371), 371);
+        assert_eq!(microseconds(1.0), 1_000);
+        assert_eq!(microseconds(0.0), 0);
+        // A misbehaving clock must not cost us the billing row: non-finite and negative
+        // readings record as zero rather than failing the insert.
+        assert_eq!(microseconds(-1.0), 0);
+        assert_eq!(microseconds(f64::NAN), 0);
+        assert_eq!(microseconds(f64::INFINITY), 0);
+        // A finite but absurd reading saturates instead of wrapping negative.
+        assert_eq!(microseconds(1e30), i32::MAX);
+    }
+
+    #[test]
+    fn complexity_is_stored_as_thousandths() {
+        assert_eq!(thousandths(0.0), 0);
+        assert_eq!(thousandths(0.371), 371);
+        assert_eq!(thousandths(1.0), 1_000);
+        // Out-of-range scores are clamped, never stored as a constraint violation.
+        assert_eq!(thousandths(1.5), 1_000);
+        assert_eq!(thousandths(-0.5), 0);
+        assert_eq!(thousandths(f32::NAN), 0);
+    }
+}

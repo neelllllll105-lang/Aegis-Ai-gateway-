@@ -22,6 +22,7 @@ pub mod mock;
 pub mod moonshot;
 pub mod openai;
 pub mod openrouter;
+pub mod pool;
 pub mod sse;
 
 use crate::error::{AegisError, Result};
