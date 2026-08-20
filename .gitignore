@@ -1,0 +1,45 @@
+# Rust
+/target
+apps/gateway/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+
+# Env & secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+secrets/
+
+# Build output
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Logs & runtime
+*.log
+/tmp/
+coverage/
+.sqlx-offline-tmp/
+
+# Local infra volumes
+infra/data/
