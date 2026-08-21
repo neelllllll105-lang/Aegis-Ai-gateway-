@@ -4,7 +4,7 @@
   "project": "aegis",
   "last_updated": "2026-08-21",
   "current_phase": 4,
-  "next_task": "Start Docker, run the 14 integration tests against real Postgres/Redis, then verify one live provider completion end to end.",
+  "next_task": "Reinstall Docker Desktop (the existing install directory has only leftover installer files, no working docker.exe), then run the integration tests against real Postgres/Redis, then verify one live provider completion end to end with a Gemini key.",
   "phases": [
     {
       "id": 0,
@@ -34,95 +34,86 @@
       "id": 4,
       "name": "Dashboards, billing, launch prep",
       "status": "in_progress",
-      "evidence": "Stripe webhook verification, invoice assembly with an independent fee-consistency check, budget alerts, admin console, landing page, docs, savings CSV export, runbooks.",
+      "evidence": "Stripe webhook verification, invoice assembly with an independent fee-consistency check, budget alerts, admin console, landing page, docs, savings CSV export, runbooks. All 12 dashboard pages built and browser-verified (models/policies/budgets/team/billing added this session). tests/overhead_under_load.rs measures real pipeline overhead under 64-way concurrency: P99 1.27ms on a debug build.",
       "remaining": [
-        "P4.1 models/org/teams/policies dashboard pages",
-        "P4.8 EXECUTE the load test against staging"
+        "P4.8 EXECUTE infra/loadtest/k6-gateway.js against a deployed instance (1k RPS over a real network + database) — the in-process concurrency test is real evidence but is a narrower claim"
       ]
     },
     {
       "id": 5,
       "name": "Launch + provider expansion",
-      "status": "in_progress",
-      "evidence": "All five expansion providers tested. Classifier v2 trained via a real dump/fit pipeline. Status page endpoint. Launch playbook written.",
-      "remaining": [
-        "P5.5 wire the scheduled digest job",
-        "P5.6 referral program",
-        "P5.8 changelog"
-      ]
+      "status": "complete",
+      "evidence": "All five expansion providers tested. Classifier v2 trained via a real dump/fit pipeline. Status page endpoint. Launch playbook written. Weekly digest now sent by workers/scheduler.rs with a distributed claim (64-way concurrency test proves exactly one replica ever wins a period). Referral program: two-sided credit, self-referral and double-claim guards. CHANGELOG.md written."
     },
     {
       "id": 6,
       "name": "Enterprise readiness",
       "status": "in_progress",
-      "evidence": "Offline license validation with grace period, SCIM 2.0 shapes handling both Okta and Entra deprovisioning, SSO assertion validation with replay detection, per-tenant HKDF keys, region pinning, admin TOTP with the RFC 6238 vector.",
+      "evidence": "Offline license validation with grace period, SCIM 2.0 shapes handling both Okta and Entra deprovisioning, SSO assertion validation with replay detection, per-tenant HKDF keys, region pinning, admin TOTP with the RFC 6238 vector. SCIM/SSO HTTP routes now wired and reachable (tests/route_surface.rs). Compliance pack written (docs/compliance/): security whitepaper, subprocessor list, DPA template, data-flow doc, honest SOC 2 gap analysis. Read replica routing live (AppState::analytics_db()). Self-hosted docker-compose + web Dockerfile added.",
       "remaining": [
-        "Wire SCIM and SSO HTTP routes",
-        "P6.6 compliance pack",
-        "P6.8 read replica routing",
-        "Verify against a real Okta or Entra tenant"
+        "Verify SSO/SCIM against a real Okta or Entra tenant — never done, only shape-tested"
       ]
     },
     {
       "id": 7,
       "name": "Scale + moat",
-      "status": "in_progress",
-      "evidence": "UCB1 outcome bandit with a 3000-step replay showing it beats static routing. TypeScript and Python SDKs, both verified.",
-      "remaining": [
-        "P7.2 regional budgets",
-        "P7.5 model auto-discovery",
-        "P7.6 spend anomaly detection",
-        "P7.7 cost-center dimension",
-        "P7.8 DD pack"
-      ]
+      "status": "complete",
+      "evidence": "UCB1 outcome bandit with a 3000-step replay showing it beats static routing. TypeScript and Python SDKs, both verified. Regional budgets (fourth scope, isolated per org+region, case-insensitive). Nightly pricing-drift job (reports, never auto-applies). Spend anomaly detection (z-score against org's own 30-day baseline) surfaced at GET /api/usage/anomalies and on the /budgets page. Cost-center chargeback in JSON and CSV. Investor pack (docs/investor/): metrics definitions naming their source code, data-room index."
     }
   ],
   "blockers": [
     {
       "id": "docker-unavailable",
-      "summary": "Docker Desktop was not running, so nothing has been verified against live Postgres, Redis, or Qdrant.",
-      "impact": "The 14 integration tests compile and skip locally. CI runs them against service containers.",
-      "workaround": "Set AEGIS_TEST_DATABASE_URL to run them. The gateway compiles and unit-tests with no external service."
+      "summary": "Docker Desktop is not functional on this build machine. Checked this session: C:\\Program Files\\Docker\\Docker\\ contains only tmp-delete\\Docker Desktop Installer.exe... (leftover installer fragments), no docker.exe, no daemon. The install did not complete.",
+      "impact": "Nothing has been verified against live Postgres, Redis, or Qdrant. The 14+ integration tests compile and skip locally; CI runs them against service containers.",
+      "workaround": "Reinstall Docker Desktop from scratch and confirm with `docker version` (not a directory listing) before assuming it works. The gateway compiles and unit-tests with no external service in the meantime."
     },
     {
       "id": "no-provider-keys",
-      "summary": "No real provider API key was available, so no live completion has been served.",
-      "impact": "The pipeline is verified against a mock provider only.",
-      "workaround": "Add one key and send a single request; the savings figure can then be checked against the provider bill."
+      "summary": "No real provider API key has been supplied. User selected Google Gemini via AskUserQuestion in an earlier session but has not yet provided the key.",
+      "impact": "The pipeline is verified against a mock provider only, including the new 64-concurrency load test.",
+      "workaround": "Add one key and send a single request; the savings figure can then be checked against the provider's own billing."
     }
   ],
   "launch_blockers": [
     {
-      "id": "pricing-unverified",
-      "summary": "Seed pricing for 28 models was transcribed during the build, not fetched from provider price sheets. Every row is marked UNVERIFIED.",
-      "impact": "Every savings figure and invoice line depends on these numbers.",
-      "action": "Follow docs/runbooks/pricing-update.md before billing any customer."
+      "id": "pricing-partially-unverified",
+      "summary": "5 of 38 priced models remain marked UNVERIFIED: mistral/mistral-large-latest, mistral/mistral-small-latest, groq/llama-3.3-70b-versatile, groq/llama-3.1-8b-instant, moonshot/kimi-k2. The other 33 were checked against live provider pages in an earlier session and carry a checked date.",
+      "impact": "Every savings figure and invoice line for these 5 models depends on unverified numbers.",
+      "action": "Follow docs/runbooks/pricing-update.md for the 5 remaining rows before billing any customer using them. Verify with: grep -c 'UNVERIFIED.to_string()' apps/gateway/src/metering/pricing.rs (must read 0)."
     },
     {
-      "id": "load-test-not-run",
-      "summary": "The k6 load test has never been executed.",
-      "impact": "The sub-1ms P99 overhead claim on the landing page is a design target, not a measurement.",
-      "action": "Run infra/loadtest/k6-gateway.js against staging and record the P99."
+      "id": "load-test-not-run-against-deployment",
+      "summary": "infra/loadtest/k6-gateway.js has never been executed against a deployed instance. tests/overhead_under_load.rs now provides real in-process evidence (P99 1.27ms, 64-way concurrency, mock provider, debug build) but this excludes network, real DB/Redis contention, and does not reach 1k RPS.",
+      "impact": "The sub-1ms P99 overhead claim on the landing page is now partially substantiated, not purely a design target, but the full production-conditions claim is still unverified.",
+      "action": "Deploy to staging and run infra/loadtest/k6-gateway.js; record the measured P99 before repeating the claim under production-network conditions."
     },
     {
       "id": "restore-drill-not-run",
-      "summary": "No backup has ever been restored.",
-      "impact": "Part 13 item 6: an untested backup is not a backup.",
-      "action": "Run scripts/backup-restore-drill.sh and record the result in MEMORY.md."
+      "summary": "No backup has ever been taken, so none has ever been restored.",
+      "impact": "Part 13 item 6: an untested backup is not a backup. This is also the single largest gap flagged in docs/compliance/soc2-readiness.md (Availability criterion A1.3).",
+      "action": "Run scripts/backup-restore-drill.sh once a database exists and record the result in MEMORY.md."
     }
   ],
   "verification": {
-    "unit_tests": 622,
+    "unit_tests": 678,
     "unit_tests_passing": true,
+    "full_test_suite_total": 698,
     "integration_tests_written": 14,
     "integration_tests_run_locally": false,
+    "route_surface_test_passing": true,
+    "concurrency_overhead_test_passing": true,
+    "concurrency_overhead_p99_ms": 1.27,
     "clippy_clean": true,
     "fmt_clean": true,
     "web_builds": true,
     "web_lint_clean": true,
+    "design_token_guard_passing": true,
     "gateway_started_and_probed": true,
-    "load_test_executed": false,
+    "load_test_executed_against_deployment": false,
     "restore_drill_executed": false,
-    "live_provider_verified": false
+    "live_provider_verified": false,
+    "docker_functional_on_build_machine": false,
+    "phase_tasks_complete": "68/69"
   }
 }
