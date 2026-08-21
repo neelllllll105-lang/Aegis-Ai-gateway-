@@ -4,7 +4,8 @@ import { RoutingSimulator } from "@/components/routing-simulator";
 import { AegisLogo } from "@/components/ui";
 
 /**
- * Aegis Homepage — Clever Application of the 4-Tier Palette (#F9F8F6, #EFE9E3, #D9CFC7, #C9B59C).
+ * Aegis Homepage — Strict User Palette (#F9F8F6, #EFE9E3, #D9CFC7, #C9B59C).
+ * Tokenator UI/UX Layout Structure with 100% Aegis Features & Content.
  */
 
 export default function HomePage() {
@@ -16,21 +17,21 @@ export default function HomePage() {
           className="pointer-events-none absolute inset-0"
           style={{
             background:
-              "radial-gradient(680px 300px at 82% -10%, rgba(34,199,178,.18), transparent 60%), radial-gradient(520px 280px at -8% 120%, rgba(201,181,156,.25), transparent 60%)",
+              "radial-gradient(680px 300px at 82% -10%, rgba(201,181,156,.35), transparent 60%), radial-gradient(520px 280px at -8% 120%, rgba(217,207,199,.35), transparent 60%)",
           }}
         />
         <div className="relative mx-auto max-w-3xl text-center">
-          {/* Aegis Sleek Emblem with Teal Ambient Glow */}
+          {/* Aegis Sleek Emblem with Subtle Ambient Warm Glow */}
           <div className="mx-auto mb-4 flex justify-center">
             <div
-              className="relative flex h-24 w-24 sm:h-28 sm:w-28 items-center justify-center rounded-3xl bg-[#22C7B2]/15 border-2 border-[#22C7B2]/40 shadow-xl transition-transform hover:scale-105"
-              style={{ filter: "drop-shadow(0 12px 36px rgba(34,199,178,.35))" }}
+              className="relative flex h-24 w-24 sm:h-28 sm:w-28 items-center justify-center rounded-3xl bg-[#EFE9E3] border-2 border-[#D9CFC7] shadow-lg transition-transform hover:scale-105"
+              style={{ filter: "drop-shadow(0 10px 25px rgba(201,181,156,.45))" }}
             >
-              <AegisLogo className="w-14 h-14 text-[#0D9488]" />
+              <AegisLogo className="w-14 h-14 text-[#0A0A0A]" />
             </div>
           </div>
 
-          <div className="mt-6 font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#0D9488]">
+          <div className="mt-6 font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#70685E]">
             The control plane for AI cost and governance
           </div>
 
@@ -45,13 +46,13 @@ export default function HomePage() {
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
             <Link
               href="/signup"
-              className="rounded-lg bg-[#22C7B2] px-7 py-3 font-bold text-[#0A1926] shadow-sm transition-all hover:opacity-90 active:scale-95"
+              className="rounded-lg bg-[#C9B59C] px-7 py-3 font-bold text-[#0A0A0A] shadow-sm transition-all hover:bg-[#BFAF98] active:scale-95 border border-[#BFAF98]"
             >
               Request access →
             </Link>
             <Link
               href="/connect"
-              className="rounded-lg border border-[#D9CFC7] bg-white px-6 py-3 font-bold text-black shadow-xs transition-colors hover:border-[#0D9488]"
+              className="rounded-lg border border-[#D9CFC7] bg-white px-6 py-3 font-bold text-black shadow-xs transition-colors hover:border-[#0A0A0A]"
             >
               How to use
             </Link>
@@ -74,7 +75,7 @@ export default function HomePage() {
       {/* --- LIVE INTERACTIVE SIMULATOR --- */}
       <section className="space-y-4">
         <div className="text-center">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#0D9488] font-black">
+          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#70685E] font-black">
             Interactive Testbed
           </div>
           <h2 className="mx-auto mt-2 max-w-2xl text-2xl sm:text-3xl font-black tracking-tight text-black">
@@ -92,7 +93,7 @@ export default function HomePage() {
       {/* --- THE PROBLEM --- */}
       <section>
         <div className="text-center">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#0D9488] font-bold">
+          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#70685E] font-bold">
             The problem
           </div>
           <h2 className="mx-auto mt-2 max-w-2xl text-balance text-2xl font-black tracking-tight sm:text-3xl text-black">
@@ -120,7 +121,7 @@ export default function HomePage() {
       {/* --- WHAT IT IS --- */}
       <section>
         <div className="text-center">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#0D9488] font-bold">
+          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#70685E] font-bold">
             What it is
           </div>
           <h2 className="mx-auto mt-2 max-w-2xl text-balance text-2xl font-black tracking-tight sm:text-3xl text-black">
@@ -141,22 +142,22 @@ export default function HomePage() {
               <p className="mt-1 text-xs text-[#403B35] font-medium">No code changes — one endpoint, one key.</p>
             </div>
 
-            <span className="self-center text-center text-2xl text-[#0D9488] font-black sm:px-1">→</span>
+            <span className="self-center text-center text-2xl text-black font-black sm:px-1">→</span>
 
-            <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border-2 border-[#22C7B2] bg-[#22C7B2]/10 p-5 text-center shadow-xs">
-              <div className="font-mono text-[10px] font-black uppercase tracking-wide text-[#0D9488]">
+            <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border-2 border-[#C9B59C] bg-[#EFE9E3] p-5 text-center shadow-xs">
+              <div className="font-mono text-[10px] font-black uppercase tracking-wide text-[#0A0A0A]">
                 Aegis Gateway
               </div>
               <div className="mt-2 text-base font-black text-black">The smart layer under your AI</div>
               <p className="mt-1 text-xs text-[#403B35] font-medium">Lowers the bill, keeps quality, and shows you the savings.</p>
               <div className="mt-3 flex flex-wrap justify-center gap-2">
-                <span className="rounded-full bg-[#22C7B2]/20 px-2.5 py-1 font-mono text-[10px] font-black text-[#0D9488]">Lower cost</span>
-                <span className="rounded-full bg-[#22C7B2]/20 px-2.5 py-1 font-mono text-[10px] font-black text-[#0D9488]">Governance</span>
-                <span className="rounded-full bg-[#22C7B2]/20 px-2.5 py-1 font-mono text-[10px] font-black text-[#0D9488]">Proof</span>
+                <span className="rounded-full bg-[#C9B59C] px-2.5 py-1 font-mono text-[10px] font-black text-[#0A0A0A]">Lower cost</span>
+                <span className="rounded-full bg-[#C9B59C] px-2.5 py-1 font-mono text-[10px] font-black text-[#0A0A0A]">Governance</span>
+                <span className="rounded-full bg-[#C9B59C] px-2.5 py-1 font-mono text-[10px] font-black text-[#0A0A0A]">Proof</span>
               </div>
             </div>
 
-            <span className="self-center text-center text-2xl text-[#0D9488] font-black sm:px-1">→</span>
+            <span className="self-center text-center text-2xl text-black font-black sm:px-1">→</span>
 
             <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-[#D9CFC7] bg-white p-5 text-center shadow-xs">
               <div className="font-mono text-[10px] font-bold uppercase tracking-wide text-[#70685E]">
@@ -176,7 +177,7 @@ export default function HomePage() {
       {/* --- HOW YOU BRING THE TOKENS --- */}
       <section>
         <div className="text-center">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#0D9488] font-bold">
+          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#70685E] font-bold">
             How you bring the tokens
           </div>
           <h2 className="mx-auto mt-2 max-w-2xl text-balance text-2xl font-black tracking-tight sm:text-3xl text-black">
@@ -189,7 +190,7 @@ export default function HomePage() {
           </p>
           <div className="mt-6 grid gap-4 sm:grid-cols-2">
             <div className="rounded-2xl border border-[#D9CFC7] bg-white p-6 shadow-xs">
-              <span className="rounded-full bg-[#22C7B2]/20 px-3 py-1 font-mono text-[10px] font-black uppercase tracking-wide text-[#0D9488]">
+              <span className="rounded-full bg-[#EFE9E3] border border-[#D9CFC7] px-3 py-1 font-mono text-[10px] font-black uppercase tracking-wide text-black">
                 Start free
               </span>
               <div className="mt-3 font-black text-black text-lg">Shared models, zero setup</div>
@@ -199,7 +200,7 @@ export default function HomePage() {
             </div>
 
             <div className="rounded-2xl border border-[#D9CFC7] bg-white p-6 shadow-xs">
-              <span className="rounded-full bg-[#22C7B2]/20 px-3 py-1 font-mono text-[10px] font-black uppercase tracking-wide text-[#0D9488]">
+              <span className="rounded-full bg-[#C9B59C] px-3 py-1 font-mono text-[10px] font-black uppercase tracking-wide text-black border border-[#BFAF98]">
                 Bring your own key
               </span>
               <div className="mt-3 font-black text-black text-lg">Your account, premium models — Pro</div>
@@ -215,7 +216,7 @@ export default function HomePage() {
       <section className="rounded-3xl border border-[#D9CFC7] bg-white px-6 py-12 text-black sm:px-10 shadow-xs">
         <div className="mx-auto max-w-3xl">
           <div className="text-center">
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#0D9488] font-bold">
+            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#70685E] font-bold">
               Privacy &amp; control
             </div>
             <h2 className="mt-2 text-2xl sm:text-3xl font-black tracking-tight text-black">
@@ -228,7 +229,7 @@ export default function HomePage() {
 
           <div className="mt-6 grid gap-4 sm:grid-cols-3">
             <div className="rounded-2xl border border-[#D9CFC7] bg-[#F9F8F6] p-5">
-              <span className="rounded-full px-2.5 py-0.5 font-mono text-[9px] font-black uppercase tracking-wide bg-[#22C7B2]/20 text-[#0D9488]">
+              <span className="rounded-full px-2.5 py-0.5 font-mono text-[9px] font-black uppercase tracking-wide bg-[#EFE9E3] text-black border border-[#D9CFC7]">
                 Available today
               </span>
               <div className="mt-2.5 font-black text-black text-sm">Per-tenant zero-retention</div>
@@ -238,7 +239,7 @@ export default function HomePage() {
             </div>
 
             <div className="rounded-2xl border border-[#D9CFC7] bg-[#F9F8F6] p-5">
-              <span className="rounded-full px-2.5 py-0.5 font-mono text-[9px] font-black uppercase tracking-wide bg-[#22C7B2]/20 text-[#0D9488]">
+              <span className="rounded-full px-2.5 py-0.5 font-mono text-[9px] font-black uppercase tracking-wide bg-[#EFE9E3] text-black border border-[#D9CFC7]">
                 Available today
               </span>
               <div className="mt-2.5 font-black text-black text-sm">Your account, not a shared pool</div>
@@ -248,7 +249,7 @@ export default function HomePage() {
             </div>
 
             <div className="rounded-2xl border border-[#D9CFC7] bg-[#F9F8F6] p-5">
-              <span className="rounded-full px-2.5 py-0.5 font-mono text-[9px] font-black uppercase tracking-wide bg-[#EFE9E3] text-[#403B35] border border-[#D9CFC7]">
+              <span className="rounded-full px-2.5 py-0.5 font-mono text-[9px] font-black uppercase tracking-wide bg-[#C9B59C] text-black border border-[#BFAF98]">
                 Enterprise
               </span>
               <div className="mt-2.5 font-black text-black text-sm">DPA · data residency · self-host</div>
@@ -263,7 +264,7 @@ export default function HomePage() {
       {/* --- THE OUTCOMES --- */}
       <section>
         <div className="text-center">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#0D9488] font-bold">
+          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#70685E] font-bold">
             The outcomes
           </div>
           <h2 className="mx-auto mt-2 max-w-2xl text-balance text-2xl font-black tracking-tight sm:text-3xl text-black">
@@ -310,7 +311,7 @@ export default function HomePage() {
       <section className="rounded-3xl bg-white border border-[#D9CFC7] px-6 py-12 text-black sm:px-10 shadow-xs">
         <div className="mx-auto max-w-3xl">
           <div className="text-center">
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#0D9488] font-bold">
+            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#70685E] font-bold">
               The result
             </div>
             <h2 className="mt-2 text-2xl font-black tracking-tight sm:text-3xl text-black">
@@ -326,23 +327,23 @@ export default function HomePage() {
               <div className="font-mono text-[11px] font-bold uppercase tracking-wide text-[#70685E]">
                 Before — premium only
               </div>
-              <div className="my-1.5 text-3xl font-black text-[#E11D48]">
+              <div className="my-1.5 text-3xl font-black text-[#DC2626]">
                 $100,000 / mo
               </div>
               <div className="h-5 overflow-hidden rounded-full bg-[#EFE9E3] border border-[#D9CFC7]">
-                <div className="h-full rounded-full bg-[#E11D48] w-full" />
+                <div className="h-full rounded-full bg-[#DC2626] w-full" />
               </div>
             </div>
 
             <div>
-              <div className="font-mono text-[11px] font-bold uppercase tracking-wide text-[#0D9488]">
+              <div className="font-mono text-[11px] font-bold uppercase tracking-wide text-black">
                 After — with Aegis
               </div>
-              <div className="my-1.5 text-3xl font-black text-[#0D9488]">
+              <div className="my-1.5 text-3xl font-black text-black">
                 $18,000 / mo
               </div>
               <div className="h-5 overflow-hidden rounded-full bg-[#EFE9E3] border border-[#D9CFC7]">
-                <div className="h-full rounded-full bg-[#22C7B2] w-[18%]" />
+                <div className="h-full rounded-full bg-[#C9B59C] w-[18%]" />
               </div>
             </div>
           </div>
@@ -351,8 +352,8 @@ export default function HomePage() {
             Every dollar of that difference is shown on an auditable savings dashboard, with quality confirmed to stay intact.
           </p>
 
-          <div className="mt-6 rounded-xl border border-[#22C7B2]/40 bg-[#22C7B2]/10 p-5 text-left">
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#0D9488] font-bold">
+          <div className="mt-6 rounded-xl border border-[#D9CFC7] bg-[#EFE9E3] p-5 text-left">
+            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-black font-bold">
               New · Pro
             </div>
             <h3 className="mt-1 text-lg font-black text-black">
@@ -368,7 +369,7 @@ export default function HomePage() {
       {/* --- ROI ESTIMATOR CALCULATOR --- */}
       <section className="space-y-4">
         <div className="text-center">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#0D9488] font-bold">
+          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#70685E] font-bold">
             Interactive Calculator
           </div>
           <h2 className="mx-auto mt-2 max-w-2xl text-2xl sm:text-3xl font-black tracking-tight text-black">
@@ -381,7 +382,7 @@ export default function HomePage() {
       {/* --- WHO IT'S FOR --- */}
       <section>
         <div className="text-center">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#0D9488] font-bold">
+          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[#70685E] font-bold">
             Who it&apos;s for
           </div>
           <h2 className="mx-auto mt-2 max-w-2xl text-balance text-2xl font-black tracking-tight sm:text-3xl text-black">
@@ -410,7 +411,7 @@ export default function HomePage() {
             </div>
           </div>
 
-          <div className="mt-6 rounded-2xl border border-[#22C7B2]/40 bg-[#22C7B2]/10 p-6">
+          <div className="mt-6 rounded-2xl border border-[#D9CFC7] bg-[#EFE9E3] p-6">
             <h3 className="text-lg font-black text-black">
               Why Aegis, not a gateway or a dashboard
             </h3>
@@ -432,7 +433,7 @@ export default function HomePage() {
         <div className="flex flex-wrap items-center justify-center gap-3">
           <Link
             href="/signup"
-            className="rounded-lg bg-[#22C7B2] px-7 py-3 font-bold text-[#0A1926] shadow-sm transition-all hover:opacity-90"
+            className="rounded-lg bg-[#C9B59C] px-7 py-3 font-bold text-[#0A0A0A] shadow-sm transition-all hover:bg-[#BFAF98] border border-[#BFAF98]"
           >
             Request access →
           </Link>
@@ -464,7 +465,7 @@ function ProblemCard({ title, description }: { title: string; description: strin
 function OutcomeCard({ icon, title, description }: { icon: string; title: string; description: string }) {
   return (
     <div className="rounded-2xl border border-[#D9CFC7] bg-white p-5 shadow-xs">
-      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#22C7B2]/20 font-black text-[#0D9488]">
+      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#EFE9E3] font-black text-black border border-[#D9CFC7]">
         {icon}
       </div>
       <div className="mt-3 font-black text-black text-base">{title}</div>

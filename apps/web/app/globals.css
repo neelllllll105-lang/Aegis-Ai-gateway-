@@ -1,15 +1,15 @@
 @import "tailwindcss";
 
 /*
- * Aegis Design System — Warm Linen & Camel Palette with Vibrant Teal Accents.
- *
- * Exact User Palette:
- * - Canvas Ground: #F9F8F6 (rgb 249, 248, 246)
- * - Secondary Surface: #EFE9E3 (rgb 239, 233, 227)
+ * Aegis Design System — Pure Palette from User Reference:
+ * - Canvas Background: #F9F8F6 (rgb 249, 248, 246)
+ * - Card Surface: #FFFFFF
+ * - Secondary Surface (Stats, Tags, Table headers): #EFE9E3 (rgb 239, 233, 227)
  * - Borders & Dividers: #D9CFC7 (rgb 217, 207, 199)
- * - Warm Camel / Footer: #C9B59C (rgb 201, 181, 156)
- * - Headings & Text: Pure Jet Black (#0A0A0A / #000000)
- * - Interactive Teal: #22C7B2 / #0D9488
+ * - Warm Accent, CTAs & Footer: #C9B59C (rgb 201, 181, 156)
+ * - Headings & High-contrast Text: #0A0A0A (Pure Jet Black)
+ * - Body Text: #403B35
+ * - Muted Text: #70685E
  */
 
 @theme {
@@ -20,7 +20,7 @@
   --color-surface-warm: #EFE9E3;
   --color-camel: #C9B59C;
   --color-footer: #C9B59C;
-  --color-footer-bg: #EAE1D7;
+  --color-footer-bg: #C9B59C;
   --color-line: #D9CFC7;
   --color-line-light: #EFE9E3;
   --color-line-dark: #C9B59C;
@@ -30,18 +30,16 @@
   --color-muted: #403B35;
   --color-muted-light: #70685E;
 
-  /* Signature Teal / Cyan Mint Accents */
-  --color-teal: #0D9488;
-  --color-teal-bright: #14B8A6;
-  --color-teal-glow: #22C7B2;
-  --color-teal-bg: rgba(34, 199, 178, 0.12);
-  --color-teal-border: rgba(34, 199, 178, 0.4);
-  --color-navy: #0A1926;
+  /* Palette Accents */
+  --color-accent: #C9B59C;
+  --color-accent-dark: #A89379;
+  --color-accent-bg: rgba(201, 181, 156, 0.20);
+  --color-accent-border: #D9CFC7;
 
   /* Semantic Alerts */
-  --color-amber: #D97706;
-  --color-red: #E11D48;
-  --color-green: #059669;
+  --color-amber: #B45309;
+  --color-red: #DC2626;
+  --color-green: #15803D;
 
   --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -72,8 +70,8 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     background-image: 
-      radial-gradient(680px 300px at 82% -10%, rgba(34, 199, 178, 0.16), transparent 60%),
-      radial-gradient(520px 280px at -8% 120%, rgba(201, 181, 156, 0.25), transparent 60%);
+      radial-gradient(680px 320px at 80% -5%, rgba(201, 181, 156, 0.28), transparent 60%),
+      radial-gradient(520px 280px at -5% 105%, rgba(217, 207, 199, 0.35), transparent 60%);
     background-attachment: fixed;
   }
 
@@ -91,32 +89,32 @@
   }
 
   ::selection {
-    background-color: rgba(34, 199, 178, 0.25);
+    background-color: rgba(201, 181, 156, 0.4);
     color: #0A0A0A;
   }
 
   :focus-visible {
-    outline: 2px solid #0D9488;
+    outline: 2px solid #0A0A0A;
     outline-offset: 2px;
     border-radius: var(--radius-sm);
   }
 }
 
 @layer components {
-  .btn-teal {
-    background-color: #22C7B2;
-    color: #0A1926;
-    font-weight: 700;
+  .btn-accent {
+    background-color: #C9B59C;
+    color: #0A0A0A;
+    font-weight: 800;
     border-radius: var(--radius);
     padding: 0.75rem 1.75rem;
     transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-    box-shadow: 0 4px 14px rgba(34, 199, 178, 0.25);
+    box-shadow: 0 2px 8px rgba(201, 181, 156, 0.3);
   }
 
-  .btn-teal:hover {
-    opacity: 0.92;
+  .btn-accent:hover {
+    background-color: #BFAF98;
     transform: translateY(-1px);
-    box-shadow: 0 6px 20px rgba(34, 199, 178, 0.35);
+    box-shadow: 0 4px 14px rgba(201, 181, 156, 0.4);
   }
 
   .card-surface {
@@ -138,19 +136,12 @@
     padding: 1.5rem;
   }
 
-  .eyebrow-teal {
+  .eyebrow-accent {
     font-family: var(--font-mono);
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.2em;
     font-weight: 800;
-    color: #0D9488;
-  }
-
-  .badge-camel {
-    background-color: #EFE9E3;
-    color: #0A0A0A;
-    border: 1px solid #D9CFC7;
-    font-weight: 800;
+    color: #70685E;
   }
 }

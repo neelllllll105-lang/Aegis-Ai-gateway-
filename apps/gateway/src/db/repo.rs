@@ -1391,6 +1391,282 @@ pub async fn upsert_pricing(pool: &PgPool, row: &PricingRow) -> Result<()> {
     tx.commit().await.map_err(AegisError::Database)
 }
 
+/// Find an organisation by slug. Used to resolve a referral code.
+pub async fn find_org_by_slug(pool: &PgPool, slug: &str) -> Result<Option<Organization>> {
+    sqlx::query_as::<_, Organization>(
+        "SELECT id, name, slug, plan, savings_share_bp, billing_email, zero_retention,
+                content_capture, region, stripe_customer_id, created_at
+         FROM organizations WHERE LOWER(slug) = LOWER($1)",
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Whether an organisation has already claimed a referral.
+///
+/// One claim per organisation, ever. Without this check an org can re-claim on every
+/// login and mint unlimited credit.
+pub async fn has_claimed_referral(pool: &PgPool, org_id: Uuid) -> Result<bool> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM referral_credits WHERE org_id = $1 AND reason = 'referred_signup'",
+    )
+    .bind(org_id)
+    .fetch_one(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(row.0 > 0)
+}
+
+// ---------------------------------------------------------------------------
+// Enterprise: SCIM and SSO
+// ---------------------------------------------------------------------------
+
+/// A configured SSO connection, without its client secret.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct SsoConnectionRow {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub protocol: String,
+    pub issuer: String,
+    pub client_id: Option<String>,
+    /// Ciphertext. Never serialized — same reason as a provider credential.
+    #[serde(skip)]
+    pub client_secret_encrypted: Option<Vec<u8>>,
+    pub email_domain: Option<String>,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Resolve a SCIM bearer token hash to the organisation it provisions.
+///
+/// A SCIM token can deprovision every member of an organisation, so it is looked up in
+/// its own table and never treated as an ordinary API key.
+pub async fn find_org_by_scim_token(pool: &PgPool, token_hash: &str) -> Result<Option<Uuid>> {
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT org_id FROM scim_tokens WHERE token_hash = $1 AND revoked_at IS NULL",
+    )
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(row.map(|(org_id,)| org_id))
+}
+
+/// Issue a SCIM token for an organisation. Returns the plaintext, shown once.
+pub async fn create_scim_token(pool: &PgPool, org_id: Uuid, token_hash: &str) -> Result<Uuid> {
+    let row: (Uuid,) =
+        sqlx::query_as("INSERT INTO scim_tokens (org_id, token_hash) VALUES ($1, $2) RETURNING id")
+            .bind(org_id)
+            .bind(token_hash)
+            .fetch_one(pool)
+            .await
+            .map_err(AegisError::Database)?;
+    Ok(row.0)
+}
+
+/// Revoke every API key a user created within an organisation.
+///
+/// Called on deprovisioning. Removing the membership alone would leave any key that user
+/// minted still working — which is precisely the access a terminated employee should lose
+/// first.
+pub async fn revoke_keys_for_user(pool: &PgPool, org_id: Uuid, user_id: Uuid) -> Result<u64> {
+    let result = sqlx::query(
+        "UPDATE api_keys SET revoked_at = NOW()
+         WHERE org_id = $1 AND created_by = $2 AND revoked_at IS NULL",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(result.rows_affected())
+}
+
+/// The SSO connection for an organisation.
+pub async fn find_sso_connection(pool: &PgPool, org_id: Uuid) -> Result<Option<SsoConnectionRow>> {
+    sqlx::query_as::<_, SsoConnectionRow>(
+        "SELECT id, org_id, protocol, issuer, client_id, client_secret_encrypted,
+                email_domain, is_active, created_at
+         FROM sso_connections WHERE org_id = $1 AND is_active
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Find an SSO connection by email domain.
+///
+/// This is what makes "Sign in with SSO" work from an email address alone, without the
+/// user needing to know their organisation id.
+pub async fn find_sso_connection_by_domain(
+    pool: &PgPool,
+    domain: &str,
+) -> Result<Option<SsoConnectionRow>> {
+    sqlx::query_as::<_, SsoConnectionRow>(
+        "SELECT id, org_id, protocol, issuer, client_id, client_secret_encrypted,
+                email_domain, is_active, created_at
+         FROM sso_connections
+         WHERE LOWER(email_domain) = LOWER($1) AND is_active
+         LIMIT 1",
+    )
+    .bind(domain)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Daily spend totals for an organisation, most recent last.
+///
+/// Feeds the spend anomaly detector, which needs a baseline of the org against itself
+/// rather than an absolute threshold.
+pub async fn daily_spend_history(
+    pool: &PgPool,
+    org_id: Uuid,
+    days: i64,
+) -> Result<Vec<MicroCents>> {
+    let rows: Vec<(i64,)> = sqlx::query_as(
+        "SELECT COALESCE(SUM(actual_cost_mc), 0)::BIGINT
+         FROM usage_records
+         WHERE org_id = $1 AND created_at >= NOW() - ($2 || ' days')::INTERVAL
+         GROUP BY DATE(created_at)
+         ORDER BY DATE(created_at)",
+    )
+    .bind(org_id)
+    .bind(days.to_string())
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)?;
+
+    Ok(rows.into_iter().map(|(total,)| MicroCents(total)).collect())
+}
+
+/// Spend grouped by cost center, for the chargeback report.
+///
+/// The cost center is read from the team name, which is where organisations naturally put
+/// it. Spend with no team is returned with a `None` key so it can be reported as
+/// unattributed rather than silently spread across the others.
+pub async fn spend_by_cost_center(
+    pool: &PgPool,
+    org_id: Uuid,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<(Option<String>, i64, MicroCents, MicroCents, MicroCents)>> {
+    let rows: Vec<(Option<String>, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT t.name,
+                COUNT(*)::BIGINT,
+                COALESCE(SUM(u.actual_cost_mc), 0)::BIGINT,
+                COALESCE(SUM(u.gross_savings_mc), 0)::BIGINT,
+                COALESCE(SUM(u.aegis_fee_mc), 0)::BIGINT
+         FROM usage_records u
+         LEFT JOIN teams t ON t.id = u.team_id AND t.org_id = u.org_id
+         WHERE u.org_id = $1 AND u.created_at >= $2 AND u.created_at < $3
+         GROUP BY t.name",
+    )
+    .bind(org_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(center, requests, spend, savings, fee)| {
+            (
+                center,
+                requests,
+                MicroCents(spend),
+                MicroCents(savings),
+                MicroCents(fee),
+            )
+        })
+        .collect())
+}
+
+/// Grant a referral credit.
+pub async fn create_referral_credit(
+    pool: &PgPool,
+    org_id: Uuid,
+    referred_org_id: Option<Uuid>,
+    amount: MicroCents,
+    reason: &str,
+) -> Result<Uuid> {
+    let row: (Uuid,) = sqlx::query_as(
+        "INSERT INTO referral_credits (org_id, referred_org_id, amount_mc, reason)
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(org_id)
+    .bind(referred_org_id)
+    .bind(amount.as_i64())
+    .bind(reason)
+    .fetch_one(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(row.0)
+}
+
+/// Unconsumed credit balance for an organisation.
+pub async fn credit_balance(pool: &PgPool, org_id: Uuid) -> Result<MicroCents> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(amount_mc), 0)::BIGINT
+         FROM referral_credits WHERE org_id = $1 AND consumed_at IS NULL",
+    )
+    .bind(org_id)
+    .fetch_one(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(MicroCents(row.0))
+}
+
+/// Consume up to `amount` of an organisation credit balance, returning what was applied.
+///
+/// Runs in one transaction and consumes oldest-first, so a partially applied credit
+/// cannot be double-spent by two concurrent invoice runs.
+pub async fn consume_credits(
+    pool: &PgPool,
+    org_id: Uuid,
+    amount: MicroCents,
+) -> Result<MicroCents> {
+    if amount.as_i64() <= 0 {
+        return Ok(MicroCents::ZERO);
+    }
+
+    let mut tx = pool.begin().await.map_err(AegisError::Database)?;
+
+    let available: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT id, amount_mc FROM referral_credits
+         WHERE org_id = $1 AND consumed_at IS NULL
+         ORDER BY created_at
+         FOR UPDATE",
+    )
+    .bind(org_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(AegisError::Database)?;
+
+    let mut applied = 0i64;
+    for (credit_id, credit_amount) in available {
+        if applied >= amount.as_i64() {
+            break;
+        }
+        sqlx::query("UPDATE referral_credits SET consumed_at = NOW() WHERE id = $1")
+            .bind(credit_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AegisError::Database)?;
+        applied = applied.saturating_add(credit_amount);
+    }
+
+    tx.commit().await.map_err(AegisError::Database)?;
+
+    // Never report applying more than was asked for, even if the last credit overshot.
+    Ok(MicroCents(applied.min(amount.as_i64())))
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

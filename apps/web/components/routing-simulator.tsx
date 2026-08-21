@@ -123,10 +123,10 @@ export function RoutingSimulator() {
 
   const complexityBarColor =
     current.complexityLabel === "Low"
-      ? "bg-[#059669]"
+      ? "bg-[#15803D]"
       : current.complexityLabel === "Medium"
-        ? "bg-[#D97706]"
-        : "bg-[#2563EB]";
+        ? "bg-[#B45309]"
+        : "bg-black";
 
   return (
     <div className="rounded-3xl border border-[#D9CFC7] bg-white p-6 sm:p-8 shadow-xs text-black">
@@ -145,8 +145,8 @@ export function RoutingSimulator() {
               disabled={simulating}
               className={`rounded-lg px-3.5 py-1.5 text-xs font-bold transition-all ${
                 isSelected
-                  ? "bg-[#22C7B2] text-[#0A1926] shadow-xs"
-                  : "bg-[#EFE9E3] text-[#403B35] hover:bg-[#D9CFC7] hover:text-black"
+                  ? "bg-[#C9B59C] text-[#0A0A0A] shadow-xs border border-[#BFAF98]"
+                  : "bg-[#EFE9E3] text-[#403B35] hover:bg-[#D9CFC7] hover:text-black border border-[#D9CFC7]"
               }`}
             >
               {s.name}
@@ -162,7 +162,7 @@ export function RoutingSimulator() {
           <div className="rounded-2xl border border-[#D9CFC7] bg-[#F9F8F6] p-4">
             <div className="flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-black mb-1.5">
               <span>Inbound Client Prompt</span>
-              <span className="font-mono text-[10px] text-[#0D9488] bg-[#22C7B2]/15 px-2 py-0.5 rounded-full border border-[#22C7B2]/40 font-bold">
+              <span className="font-mono text-[10px] text-black bg-[#EFE9E3] px-2 py-0.5 rounded-full border border-[#D9CFC7] font-bold">
                 Requested: {current.requestedModel}
               </span>
             </div>
@@ -220,15 +220,15 @@ export function RoutingSimulator() {
                   <span
                     className={`inline-block h-2.5 w-2.5 rounded-full ${
                       current.cacheStatus === "miss"
-                        ? "bg-[#D97706]"
-                        : "bg-[#059669]"
+                        ? "bg-[#B45309]"
+                        : "bg-[#15803D]"
                     }`}
                   />
                   <span
                     className={`text-xs font-black capitalize ${
                       current.cacheStatus === "miss"
-                        ? "text-[#D97706]"
-                        : "text-[#059669]"
+                        ? "text-[#B45309]"
+                        : "text-[#15803D]"
                     }`}
                   >
                     {current.cacheStatus.replace("_", " ")}
@@ -243,17 +243,17 @@ export function RoutingSimulator() {
               <div
                 className={`rounded-xl border p-3.5 transition-all ${
                   activeStep >= 4
-                    ? "border-[#22C7B2]/50 bg-[#22C7B2]/10 shadow-xs"
+                    ? "border-[#C9B59C] bg-[#EFE9E3] shadow-xs"
                     : "border-dashed border-[#D9CFC7] opacity-40 bg-[#F9F8F6]"
                 }`}
               >
-                <div className="text-[10px] font-black uppercase tracking-wider text-[#0D9488]">
+                <div className="text-[10px] font-black uppercase tracking-wider text-black">
                   3. Optimal Model
                 </div>
                 <div className="mt-1 text-xs font-black text-black truncate">
                   {current.routedModel.split("/")[1] || current.routedModel}
                 </div>
-                <div className="mt-1.5 text-[10px] font-bold text-[#0D9488]">
+                <div className="mt-1.5 text-[10px] font-bold text-black">
                   {current.qualityPreserved}
                 </div>
               </div>
@@ -276,7 +276,7 @@ export function RoutingSimulator() {
                   Audit Header Receipt
                 </span>
               </div>
-              <span className="text-[10px] font-mono bg-[#2C2823] text-[#22C7B2] px-2 py-0.5 rounded border border-[#403B33] font-bold">
+              <span className="text-[10px] font-mono bg-[#2C2823] text-[#C9B59C] px-2 py-0.5 rounded border border-[#403B33] font-bold">
                 RFC-9110
               </span>
             </div>
@@ -288,7 +288,7 @@ export function RoutingSimulator() {
               </div>
               <div className="flex justify-between">
                 <span className="text-[#A8A29E]">X-Aegis-Served-By:</span>
-                <span className="text-[#22C7B2] font-bold">{current.routedModel}</span>
+                <span className="text-[#C9B59C] font-bold">{current.routedModel}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-[#A8A29E]">X-Aegis-Baseline-Cost:</span>
@@ -296,11 +296,11 @@ export function RoutingSimulator() {
               </div>
               <div className="flex justify-between">
                 <span className="text-[#A8A29E]">X-Aegis-Actual-Cost:</span>
-                <span className="text-[#22C7B2] font-bold">{current.actualCost}</span>
+                <span className="text-[#C9B59C] font-bold">{current.actualCost}</span>
               </div>
               <div className="flex justify-between border-t border-[#2E2A25] pt-2 mt-2">
                 <span className="text-[#A8A29E]">X-Aegis-Savings:</span>
-                <span className="text-[#22C7B2] font-black text-sm">{current.savings} ({current.savingsPercent})</span>
+                <span className="text-[#C9B59C] font-black text-sm">{current.savings} ({current.savingsPercent})</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-[#A8A29E]">X-Aegis-Overhead:</span>
@@ -313,7 +313,7 @@ export function RoutingSimulator() {
             <span className="text-[11px] text-[#A8A29E]">
               Total Latency: <strong className="text-[#F9F8F6]">{current.latency}</strong>
             </span>
-            <span className="text-[10px] font-bold uppercase tracking-wider text-[#0A1926] bg-[#22C7B2] px-2.5 py-1 rounded-full shadow-2xs">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-[#0A0A0A] bg-[#C9B59C] px-2.5 py-1 rounded-full shadow-2xs">
               ✓ Audited Micro-Cents
             </span>
           </div>

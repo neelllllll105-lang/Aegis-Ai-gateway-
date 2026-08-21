@@ -11,25 +11,19 @@
 //! 4. Start background workers.
 //! 5. Only then bind the port and accept traffic.
 
+use aegis_gateway::build_router;
 use aegis_gateway::config::Config;
 use aegis_gateway::engine::bandit::RoutingBandit;
 use aegis_gateway::engine::fallback::ProviderHealth;
 use aegis_gateway::metering::pricing::PricingTable;
 use aegis_gateway::metrics::Metrics;
 use aegis_gateway::middleware::auth::KeyCache;
-use aegis_gateway::middleware::security_headers;
 use aegis_gateway::providers::pool::SharedKeyPool;
 use aegis_gateway::providers::ProviderRegistry;
-use aegis_gateway::routes::{admin, anthropic_compat, health, management, openai_compat};
 use aegis_gateway::store::{KvStore, MemoryStore, RedisStore};
 use aegis_gateway::{db, telemetry, workers, AppState};
-use axum::routing::{delete, get, patch, post};
-use axum::Router;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tower_http::cors::CorsLayer;
-use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::trace::TraceLayer;
 
 #[tokio::main]
 async fn main() {
@@ -183,147 +177,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("shutdown complete");
     Ok(())
-}
-
-/// Assemble the full router.
-pub fn build_router(state: AppState) -> Router {
-    let max_body = state.config.max_body_bytes;
-    let is_production = state.config.environment.is_production_like();
-
-    let public = Router::new()
-        .route("/health", get(health::health))
-        .route("/ready", get(health::ready))
-        .route("/metrics", get(health::metrics))
-        .route("/status", get(health::public_status));
-
-    // The OpenAI- and Anthropic-compatible surfaces. These are what a customer points
-    // their SDK at.
-    let gateway = Router::new()
-        .route(
-            "/v1/chat/completions",
-            post(openai_compat::chat_completions),
-        )
-        .route("/v1/models", get(openai_compat::list_models))
-        .route("/v1/embeddings", post(openai_compat::embeddings))
-        .route("/v1/messages", post(anthropic_compat::messages));
-
-    let api = Router::new()
-        .route("/api/auth/signup", post(management::signup))
-        .route("/api/auth/login", post(management::login))
-        .route("/api/auth/logout", post(management::logout))
-        .route("/api/auth/me", get(management::me))
-        .route(
-            "/api/keys",
-            get(management::list_keys).post(management::create_key),
-        )
-        .route("/api/keys/{id}", get(management::get_key))
-        .route("/api/keys/{id}", patch(management::update_key))
-        .route("/api/keys/{id}", delete(management::revoke_key))
-        .route(
-            "/api/org",
-            get(management::get_org).patch(management::update_org),
-        )
-        .route("/api/org/members", get(management::list_members))
-        .route("/api/org/members/invite", post(management::invite_member))
-        .route("/api/org/members/{id}", delete(management::remove_member))
-        .route(
-            "/api/org/teams",
-            get(management::list_teams).post(management::create_team),
-        )
-        .route("/api/org/teams/{id}", delete(management::delete_team))
-        .route(
-            "/api/providers",
-            get(management::list_providers).post(management::create_provider),
-        )
-        .route("/api/providers/{id}", delete(management::delete_provider))
-        .route("/api/providers/{id}/test", post(management::test_provider))
-        .route(
-            "/api/policies",
-            get(management::list_policies).post(management::create_policy),
-        )
-        .route("/api/policies/{id}", delete(management::delete_policy))
-        .route(
-            "/api/budgets",
-            get(management::list_budgets).post(management::create_budget),
-        )
-        .route("/api/budgets/{id}", delete(management::delete_budget))
-        .route("/api/usage/summary", get(management::usage_summary))
-        .route("/api/requests", get(management::list_requests))
-        .route(
-            "/api/savings/report.csv",
-            get(management::savings_report_csv),
-        )
-        .route("/api/billing/plan", get(management::billing_plan));
-
-    let admin_routes = Router::new()
-        .route("/api/admin/metrics", get(admin::system_metrics))
-        .route("/api/admin/routing", get(admin::routing_intelligence))
-        .route("/api/admin/pricing", get(admin::pricing_table))
-        .route("/api/admin/audit", get(admin::audit_log))
-        .route(
-            "/api/admin/providers/{provider}/reset",
-            post(admin::reset_circuit),
-        );
-
-    Router::new()
-        .merge(public)
-        .merge(gateway)
-        .merge(api)
-        .merge(admin_routes)
-        .layer(axum::middleware::from_fn(move |request, next| {
-            security_headers_layer(request, next, is_production)
-        }))
-        // Part 9 item 7: a hard body cap, applied before any parsing.
-        .layer(RequestBodyLimitLayer::new(max_body))
-        .layer(TraceLayer::new_for_http())
-        // The dashboard is served from a different origin, and credentials must be
-        // allowed for the session cookie to travel.
-        .layer(cors_layer(&state.config.app_url))
-        .with_state(state)
-}
-
-/// Apply security headers to every response.
-async fn security_headers_layer(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-    is_production: bool,
-) -> axum::response::Response {
-    let mut response = next.run(request).await;
-    let headers = response.headers_mut();
-    for (name, value) in security_headers::headers(is_production) {
-        headers.insert(name, value);
-    }
-    response
-}
-
-/// CORS for the dashboard origin.
-///
-/// A specific origin rather than a wildcard: `Access-Control-Allow-Credentials` and `*`
-/// are mutually exclusive, and the session cookie needs credentials.
-fn cors_layer(app_url: &str) -> CorsLayer {
-    match app_url.parse::<axum::http::HeaderValue>() {
-        Ok(origin) => CorsLayer::new()
-            .allow_origin(origin)
-            .allow_credentials(true)
-            .allow_headers([
-                axum::http::header::AUTHORIZATION,
-                axum::http::header::CONTENT_TYPE,
-                axum::http::HeaderName::from_static("x-aegis-routing-hint"),
-                axum::http::HeaderName::from_static("x-aegis-org"),
-                axum::http::HeaderName::from_static("x-api-key"),
-            ])
-            .allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::PATCH,
-                axum::http::Method::DELETE,
-                axum::http::Method::OPTIONS,
-            ]),
-        Err(_) => {
-            tracing::warn!(app_url, "invalid AEGIS_APP_URL; CORS disabled");
-            CorsLayer::new()
-        }
-    }
 }
 
 /// Build the shared HTTP client.

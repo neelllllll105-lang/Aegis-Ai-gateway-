@@ -476,7 +476,7 @@ fn is_reasoning_model(model: &str) -> bool {
 }
 
 /// Find a credential for a provider: the organisation's own key first, ours second.
-async fn resolve_credential(
+pub(crate) async fn resolve_credential(
     state: &AppState,
     auth: &AuthContext,
     provider_id: &str,

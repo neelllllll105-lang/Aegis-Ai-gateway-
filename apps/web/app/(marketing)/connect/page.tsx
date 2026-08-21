@@ -12,7 +12,7 @@ export default function ConnectPage() {
     <div className="space-y-16 pb-16 text-black">
       {/* Header */}
       <section className="mx-auto max-w-2xl pt-2 text-center">
-        <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#0D9488]">
+        <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#70685E]">
           Connect anything
         </div>
         <h1 className="mt-2 text-balance text-3xl font-black tracking-tight sm:text-4xl text-black">
@@ -25,8 +25,8 @@ export default function ConnectPage() {
 
       {/* Base URL & 3 Steps */}
       <section className="mx-auto max-w-3xl space-y-4">
-        <div className="rounded-2xl border-2 border-[#22C7B2]/40 bg-[#22C7B2]/10 p-5 shadow-xs">
-          <div className="text-[11px] font-mono font-black uppercase tracking-wide text-[#0D9488]">
+        <div className="rounded-2xl border-2 border-[#C9B59C] bg-[#EFE9E3] p-5 shadow-xs">
+          <div className="text-[11px] font-mono font-black uppercase tracking-wide text-black">
             Base URL
           </div>
           <div className="mt-2 flex items-center justify-between gap-2 rounded-xl bg-white border border-[#D9CFC7] p-3">
@@ -64,7 +64,7 @@ export default function ConnectPage() {
       {/* Works with Badges Grid */}
       <section className="space-y-6">
         <div className="text-center">
-          <div className="font-mono text-[11px] font-black uppercase tracking-[0.18em] text-[#0D9488]">
+          <div className="font-mono text-[11px] font-black uppercase tracking-[0.18em] text-[#70685E]">
             Works with
           </div>
           <h2 className="mx-auto mt-2 max-w-2xl text-balance text-2xl font-black tracking-tight sm:text-3xl text-black">
@@ -86,7 +86,7 @@ export default function ConnectPage() {
                   key={tool}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-[#D9CFC7] bg-white px-3 py-1.5 text-xs font-bold text-black shadow-2xs"
                 >
-                  <span className="text-[#0D9488]">✓</span> {tool}
+                  <span className="text-black font-black">✓</span> {tool}
                 </span>
               ))}
             </div>
@@ -102,7 +102,7 @@ export default function ConnectPage() {
                   key={tool}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-[#D9CFC7] bg-white px-3 py-1.5 text-xs font-bold text-black shadow-2xs"
                 >
-                  <span className="text-[#0D9488]">✓</span> {tool}
+                  <span className="text-black font-black">✓</span> {tool}
                 </span>
               ))}
             </div>
@@ -118,7 +118,7 @@ export default function ConnectPage() {
                   key={tool}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-[#D9CFC7] bg-white px-3 py-1.5 text-xs font-bold text-black shadow-2xs"
                 >
-                  <span className="text-[#0D9488]">✓</span> {tool}
+                  <span className="text-black font-black">✓</span> {tool}
                 </span>
               ))}
             </div>
@@ -129,7 +129,7 @@ export default function ConnectPage() {
       {/* Integration Guides (Collapsible Accordions) */}
       <section id="guides" className="scroll-mt-8 space-y-4">
         <div className="text-center">
-          <div className="font-mono text-[11px] font-black uppercase tracking-[0.18em] text-[#0D9488]">
+          <div className="font-mono text-[11px] font-black uppercase tracking-[0.18em] text-[#70685E]">
             Integration guides
           </div>
           <h2 className="mx-auto mt-2 max-w-2xl text-balance text-2xl font-black tracking-tight sm:text-3xl text-black">
@@ -137,7 +137,7 @@ export default function ConnectPage() {
           </h2>
         </div>
 
-        <div className="mx-auto max-w-3xl rounded-2xl border border-[#22C7B2]/40 bg-[#22C7B2]/10 p-5 shadow-xs">
+        <div className="mx-auto max-w-3xl rounded-2xl border border-[#D9CFC7] bg-[#EFE9E3] p-5 shadow-xs">
           <h3 className="text-sm font-black text-black">
             Coding in Cursor or VS Code? Get the biggest savings.
           </h3>
@@ -220,7 +220,7 @@ const response = await client.chat.completions.create({
 function StepCard({ num, title, desc }: { num: string; title: string; desc: string }) {
   return (
     <div className="flex gap-3 rounded-2xl border border-[#D9CFC7] bg-white p-4 shadow-xs">
-      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#22C7B2]/20 font-mono text-xs font-black text-[#0D9488]">
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#EFE9E3] font-mono text-xs font-black text-black border border-[#D9CFC7]">
         {num}
       </span>
       <div>
@@ -244,7 +244,7 @@ function GuideItem({
     <details className="group rounded-2xl border border-[#D9CFC7] bg-white open:bg-white shadow-xs">
       <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 font-black text-black text-sm marker:hidden">
         <span>{title}</span>
-        <span className="text-[#0D9488] font-black transition-transform group-open:rotate-90">
+        <span className="text-black font-black transition-transform group-open:rotate-90">
           ▶
         </span>
       </summary>

@@ -91,7 +91,7 @@ export default function PricingPage() {
     <div className="space-y-16 sm:space-y-24 pb-20 text-black">
       {/* Header */}
       <section className="mx-auto max-w-5xl px-6 pt-12 text-center">
-        <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#0D9488]">
+        <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#70685E]">
           Incentive-Aligned Pricing
         </div>
         <h1 className="mt-3 text-4xl sm:text-6xl font-black tracking-tight text-black">
@@ -110,7 +110,7 @@ export default function PricingPage() {
               key={tier.id}
               className={`rounded-3xl border bg-white p-6 shadow-xs flex flex-col justify-between transition-all ${
                 tier.highlighted
-                  ? "border-[#22C7B2] ring-2 ring-[#22C7B2] shadow-md scale-[1.02]"
+                  ? "border-[#C9B59C] ring-2 ring-[#C9B59C] shadow-md scale-[1.02]"
                   : "border-[#D9CFC7] hover:border-black"
               }`}
             >
@@ -119,7 +119,7 @@ export default function PricingPage() {
                   <span
                     className={`text-[11px] font-black uppercase tracking-wider px-3 py-1 rounded-full ${
                       tier.highlighted
-                        ? "bg-[#22C7B2] text-[#0A1926]"
+                        ? "bg-[#C9B59C] text-[#0A0A0A] border border-[#BFAF98]"
                         : "bg-[#EFE9E3] text-black border border-[#D9CFC7]"
                     }`}
                   >
@@ -141,7 +141,7 @@ export default function PricingPage() {
                   </span>
                 </div>
 
-                <div className="mt-1.5 text-xs font-black text-[#0D9488]">
+                <div className="mt-1.5 text-xs font-black text-black">
                   {tier.share}
                 </div>
 
@@ -158,7 +158,7 @@ export default function PricingPage() {
                       >
                         <span
                           aria-hidden="true"
-                          className="mt-0.5 text-[#0D9488] font-black shrink-0"
+                          className="mt-0.5 text-black font-black shrink-0"
                         >
                           ✓
                         </span>
@@ -174,7 +174,7 @@ export default function PricingPage() {
                   href={tier.id === "enterprise" ? "/connect" : "/signup"}
                   className={`block w-full rounded-lg px-4 py-2.5 text-center text-xs font-bold transition-all ${
                     tier.highlighted
-                      ? "bg-[#22C7B2] text-[#0A1926] shadow-xs hover:opacity-90"
+                      ? "bg-[#C9B59C] text-[#0A0A0A] shadow-xs hover:bg-[#BFAF98] border border-[#BFAF98]"
                       : "border border-black bg-white text-black hover:bg-[#EFE9E3]"
                   }`}
                 >
@@ -189,7 +189,7 @@ export default function PricingPage() {
       {/* Interactive Savings Calculator */}
       <section className="mx-auto max-w-5xl px-6">
         <div className="text-center max-w-2xl mx-auto mb-8">
-          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#0D9488]">
+          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#70685E]">
             Estimate Your Invoices
           </div>
           <h2 className="mt-3 text-3xl sm:text-4xl font-black tracking-tight text-black">
@@ -221,15 +221,15 @@ net_savings   = gross_savings - aegis_share          # what you keep`}</code>
             </div>
             <div className="space-y-2 pt-2">
               <div className="flex items-start gap-2 font-bold text-black text-xs">
-                <span className="text-[#0D9488] font-black">1.</span>
+                <span className="text-black font-black">1.</span>
                 <span>The performance fee can never exceed the verified savings.</span>
               </div>
               <div className="flex items-start gap-2 font-bold text-black text-xs">
-                <span className="text-[#0D9488] font-black">2.</span>
+                <span className="text-black font-black">2.</span>
                 <span>Any month with zero savings generates exactly $0 in share fees.</span>
               </div>
               <div className="flex items-start gap-2 font-bold text-black text-xs">
-                <span className="text-[#0D9488] font-black">3.</span>
+                <span className="text-black font-black">3.</span>
                 <span>All arithmetic is integer micro-cents, avoiding rounding drift.</span>
               </div>
             </div>

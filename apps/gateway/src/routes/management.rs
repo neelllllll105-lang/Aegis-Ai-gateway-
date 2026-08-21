@@ -1545,6 +1545,235 @@ pub async fn billing_plan(State(state): State<AppState>, headers: HeaderMap) -> 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Governance: anomalies, chargeback, credits
+// ---------------------------------------------------------------------------
+
+/// `GET /api/usage/anomalies`
+///
+/// Judges today against the organisation own recent history. Budgets catch spend above a
+/// line; this catches spend that is within budget but wildly unlike normal — the runaway
+/// agent loop that burns a month of budget in an afternoon and is invisible until the
+/// invoice arrives.
+pub async fn spend_anomalies(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match async {
+        let context = require_reader(&state, &headers).await?;
+        let pool = state.db()?;
+
+        // Thirty days of history, judged against today.
+        let history = repo::daily_spend_history(pool, context.org_id, 30).await?;
+        let today =
+            crate::metering::usage::current_spend(state.store.as_ref(), context.org_id).await;
+
+        // The most recent day in the history *is* today, so exclude it from its own
+        // baseline — otherwise a spike partially masks itself.
+        let baseline = if history.is_empty() {
+            Vec::new()
+        } else {
+            history[..history.len().saturating_sub(1)].to_vec()
+        };
+
+        let report =
+            crate::engine::governance::detect_spend_anomaly(context.org_id, today, &baseline);
+
+        Ok::<_, AegisError>(respond(StatusCode::OK, report))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `GET /api/usage/chargeback.csv`
+///
+/// Spend attributed to cost centers, for a finance system. Cost centers come from team
+/// names, which is where organisations naturally put them.
+pub async fn chargeback_csv(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(range): Query<RangeQuery>,
+) -> Response {
+    match async {
+        let context = require_reader(&state, &headers).await?;
+        let (start, end) = range.resolve();
+
+        let entries = repo::spend_by_cost_center(state.db()?, context.org_id, start, end).await?;
+        let report = crate::engine::governance::ChargebackReport::build(
+            context.org_id,
+            &start.format("%Y-%m-%d").to_string(),
+            &end.format("%Y-%m-%d").to_string(),
+            entries,
+        );
+
+        Ok::<_, AegisError>(
+            (
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+                    (
+                        axum::http::header::CONTENT_DISPOSITION,
+                        "attachment; filename=\"aegis-chargeback.csv\"",
+                    ),
+                ],
+                report.to_csv(),
+            )
+                .into_response(),
+        )
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `GET /api/usage/chargeback`
+pub async fn chargeback_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(range): Query<RangeQuery>,
+) -> Response {
+    match async {
+        let context = require_reader(&state, &headers).await?;
+        let (start, end) = range.resolve();
+
+        let entries = repo::spend_by_cost_center(state.db()?, context.org_id, start, end).await?;
+        let report = crate::engine::governance::ChargebackReport::build(
+            context.org_id,
+            &start.format("%Y-%m-%d").to_string(),
+            &end.format("%Y-%m-%d").to_string(),
+            entries,
+        );
+
+        Ok::<_, AegisError>(respond(StatusCode::OK, report))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Value of a referral credit, to each side. $10, per `MASTER_BUILD.md` P5.6.
+pub const REFERRAL_CREDIT: MicroCents = MicroCents(10_000_000);
+
+/// `GET /api/billing/credits`
+pub async fn list_credits(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match async {
+        let context = require_reader(&state, &headers).await?;
+        let pool = state.db()?;
+
+        let balance = repo::credit_balance(pool, context.org_id).await?;
+        let org = repo::find_org(pool, context.org_id)
+            .await?
+            .ok_or_else(|| AegisError::NotFound("organisation not found".into()))?;
+
+        Ok::<_, AegisError>(respond(
+            StatusCode::OK,
+            serde_json::json!({
+                "balance_mc": balance.as_i64(),
+                // The referral code is the org slug: stable, already unique, and readable
+                // enough to say out loud. A random code would need its own table and
+                // collision handling for no benefit.
+                "referral_code": org.slug,
+                "referral_url": format!("{}/signup?ref={}", state.config.app_url, org.slug),
+                "credit_per_referral_mc": REFERRAL_CREDIT.as_i64(),
+                "terms": "Both organisations receive credit once the referred org makes its first paid request.",
+            }),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `POST /api/billing/referral` — claim a referral.
+#[derive(Debug, Deserialize)]
+pub struct ClaimReferralRequest {
+    /// The referring organisation slug.
+    pub code: String,
+}
+
+/// `POST /api/billing/referral`
+pub async fn claim_referral(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ClaimReferralRequest>,
+) -> Response {
+    match async {
+        let context = require_writer(&state, &headers).await?;
+        let pool = state.db()?;
+
+        let referrer = repo::find_org_by_slug(pool, request.code.trim())
+            .await?
+            .ok_or_else(|| {
+                AegisError::NotFound("no organisation with that referral code".into())
+            })?;
+
+        // Self-referral would be free money for nothing.
+        if referrer.id == context.org_id {
+            return Err(AegisError::BadRequest(
+                "you cannot refer your own organisation".into(),
+            ));
+        }
+
+        // One claim per organisation, ever. Without this, an org can re-claim on every
+        // login and mint unlimited credit.
+        if repo::has_claimed_referral(pool, context.org_id).await? {
+            return Err(AegisError::BadRequest(
+                "this organisation has already claimed a referral".into(),
+            ));
+        }
+
+        // Both sides are credited, which is what makes anyone bother sharing a code.
+        repo::create_referral_credit(
+            pool,
+            context.org_id,
+            Some(referrer.id),
+            REFERRAL_CREDIT,
+            "referred_signup",
+        )
+        .await?;
+        repo::create_referral_credit(
+            pool,
+            referrer.id,
+            Some(context.org_id),
+            REFERRAL_CREDIT,
+            "referral_reward",
+        )
+        .await?;
+
+        audit(
+            &state,
+            &context,
+            "referral.claimed",
+            "organization",
+            Some(referrer.id),
+            Some(serde_json::json!({"code": request.code})),
+        )
+        .await;
+
+        Ok(respond(
+            StatusCode::CREATED,
+            serde_json::json!({
+                "credited_mc": REFERRAL_CREDIT.as_i64(),
+                "message": format!(
+                    "{} credit applied to both organisations.",
+                    REFERRAL_CREDIT.to_usd_string()
+                ),
+            }),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
 /// Expected savings-share rate for a plan, for the pricing calculator.
 pub fn expected_rate(plan: &str) -> u32 {
     savings_share_basis_points(plan)

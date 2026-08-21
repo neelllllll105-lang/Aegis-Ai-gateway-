@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { formatUsd, savingsSharePercent } from "@/lib/format";
 
 /**
- * Enterprise AI Savings & ROI Calculator — 4-Tier Neutral Palette (#F9F8F6, #EFE9E3, #D9CFC7, #C9B59C) + Teal.
+ * Enterprise AI Savings & ROI Calculator — Pure User Palette (#F9F8F6, #EFE9E3, #D9CFC7, #C9B59C).
  */
 
 const PLANS = [
@@ -106,7 +106,7 @@ export function SavingsCalculator() {
               step="500"
               value={monthlySpend}
               onChange={(e) => setMonthlySpend(Number(e.target.value))}
-              className="w-full h-2.5 bg-[#EFE9E3] rounded-lg appearance-none cursor-pointer accent-[#22C7B2]"
+              className="w-full h-2.5 bg-[#EFE9E3] rounded-lg appearance-none cursor-pointer accent-[#C9B59C]"
             />
 
             <div className="flex justify-between text-[10px] font-mono text-[#70685E] mt-1 font-bold">
@@ -133,18 +133,18 @@ export function SavingsCalculator() {
                     onClick={() => setWorkload(option.id)}
                     className={`flex items-start gap-3 rounded-2xl border p-3.5 text-left transition-all ${
                       selected
-                        ? "border-[#22C7B2] bg-[#22C7B2]/10 shadow-xs"
+                        ? "border-[#C9B59C] bg-[#EFE9E3] shadow-xs"
                         : "border-[#D9CFC7] bg-white hover:border-[#C9B59C] hover:bg-[#F9F8F6]"
                     }`}
                   >
                     <div
                       className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
                         selected
-                          ? "border-[#22C7B2] bg-[#22C7B2]"
+                          ? "border-black bg-black"
                           : "border-[#D9CFC7] bg-white"
                       }`}
                     >
-                      {selected && <span className="h-1.5 w-1.5 rounded-full bg-[#0A1926]" />}
+                      {selected && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
                     </div>
                     <div className="flex-1">
                       <div className="flex items-center justify-between gap-2">
@@ -154,7 +154,7 @@ export function SavingsCalculator() {
                         <span
                           className={`text-[10px] uppercase font-black px-2 py-0.5 rounded-full ${
                             selected
-                              ? "bg-[#22C7B2] text-[#0A1926]"
+                              ? "bg-[#C9B59C] text-black border border-[#BFAF98]"
                               : "bg-[#EFE9E3] text-[#403B35]"
                           }`}
                         >
@@ -186,7 +186,7 @@ export function SavingsCalculator() {
                     onClick={() => setPlan(option.id)}
                     className={`rounded-2xl border p-3 text-center transition-all ${
                       active
-                        ? "border-[#22C7B2] bg-[#22C7B2]/10 text-[#0D9488] font-bold shadow-xs"
+                        ? "border-[#C9B59C] bg-[#EFE9E3] text-black font-bold shadow-xs"
                         : "border-[#D9CFC7] bg-white text-[#403B35] hover:border-[#C9B59C] hover:bg-[#F9F8F6]"
                     }`}
                   >
@@ -206,19 +206,19 @@ export function SavingsCalculator() {
         </div>
 
         {/* --- Right Column: Savings Report --- */}
-        <div className="lg:col-span-5 flex flex-col justify-between rounded-2xl border border-[#22C7B2]/40 bg-[#22C7B2]/10 p-6 shadow-xs">
+        <div className="lg:col-span-5 flex flex-col justify-between rounded-2xl border border-[#D9CFC7] bg-[#EFE9E3] p-6 shadow-xs">
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-black uppercase tracking-wider text-[#0D9488]">
+              <span className="text-[11px] font-black uppercase tracking-wider text-black">
                 Estimated Net Savings
               </span>
-              <span className="inline-flex items-center gap-1 rounded-full bg-[#22C7B2] px-2.5 py-0.5 text-xs font-bold text-[#0A1926] shadow-xs">
+              <span className="inline-flex items-center gap-1 rounded-full bg-[#C9B59C] px-2.5 py-0.5 text-xs font-bold text-black border border-[#BFAF98] shadow-xs">
                 ~{result.savingsPercentage}% Net Reduction
               </span>
             </div>
 
             <div className="mt-3">
-              <div className="tabular text-3xl sm:text-4xl font-black tracking-tight text-[#0D9488]">
+              <div className="tabular text-3xl sm:text-4xl font-black tracking-tight text-black">
                 {formatUsd(result.netSavingMc)}
                 <span className="text-xs font-bold text-[#403B35] ml-1">/ month</span>
               </div>
@@ -238,18 +238,18 @@ export function SavingsCalculator() {
                     <span className="text-[#403B35] font-semibold">Direct Provider Cost</span>
                     <span className="font-black text-black">${monthlySpend.toLocaleString()}</span>
                   </div>
-                  <div className="w-full h-3 bg-[#EFE9E3] border border-[#D9CFC7] rounded-full overflow-hidden">
-                    <div className="h-full bg-[#E11D48] rounded-full w-full" />
+                  <div className="w-full h-3 bg-white border border-[#D9CFC7] rounded-full overflow-hidden">
+                    <div className="h-full bg-[#DC2626] rounded-full w-full" />
                   </div>
                 </div>
                 <div>
                   <div className="flex justify-between text-xs mb-1">
-                    <span className="font-black text-[#0D9488]">With Aegis (Total Cost)</span>
-                    <span className="font-black text-[#0D9488]">{formatUsd(result.newBillMc)}</span>
+                    <span className="font-black text-black">With Aegis (Total Cost)</span>
+                    <span className="font-black text-black">{formatUsd(result.newBillMc)}</span>
                   </div>
-                  <div className="w-full h-3 bg-[#EFE9E3] border border-[#D9CFC7] rounded-full overflow-hidden">
+                  <div className="w-full h-3 bg-white border border-[#D9CFC7] rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-[#22C7B2] rounded-full transition-all duration-500"
+                      className="h-full bg-[#C9B59C] rounded-full transition-all duration-500"
                       style={{
                         width: `${Math.max(12, Math.min(100, (result.newBillMc / (monthlySpend * 1_000_000)) * 100))}%`,
                       }}
@@ -260,10 +260,10 @@ export function SavingsCalculator() {
             </div>
 
             {/* Itemised Breakdown */}
-            <div className="mt-6 border-t border-[#22C7B2]/30 pt-4 space-y-2 text-xs">
+            <div className="mt-6 border-t border-[#D9CFC7] pt-4 space-y-2 text-xs">
               <div className="flex justify-between text-[#403B35]">
                 <span className="font-medium">Avoided provider spend</span>
-                <span className="tabular font-black text-[#0D9488]">
+                <span className="tabular font-black text-black">
                   − {formatUsd(result.grossSavingsMc)}
                 </span>
               </div>
@@ -282,7 +282,7 @@ export function SavingsCalculator() {
             </div>
           </div>
 
-          <div className="mt-6 pt-4 border-t border-[#22C7B2]/30 text-[11px] text-[#403B35] leading-relaxed">
+          <div className="mt-6 pt-4 border-t border-[#D9CFC7] text-[11px] text-[#403B35] leading-relaxed">
             <p>
               🔒 <strong>Incentive Aligned:</strong> If routing or caching produces zero savings in a month, no performance share is billed. Every dollar is tracked in integer micro-cents.
             </p>

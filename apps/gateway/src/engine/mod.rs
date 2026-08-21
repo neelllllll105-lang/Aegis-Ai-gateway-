@@ -8,5 +8,6 @@ pub mod bandit;
 pub mod classifier;
 pub mod compressor;
 pub mod fallback;
+pub mod governance;
 pub mod policy;
 pub mod router;

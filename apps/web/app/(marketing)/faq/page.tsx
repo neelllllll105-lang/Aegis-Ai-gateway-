@@ -108,10 +108,10 @@ const FAQS = [
 export default function FaqPage() {
   return (
     <div className="mx-auto max-w-5xl space-y-16 pb-16 pt-4 text-black">
-      {/* Comparison Section matching tokenator.ai/faq */}
+      {/* Comparison Section matching tokenator.ai/faq layout */}
       <section className="space-y-6">
         <header className="mx-auto max-w-2xl text-center">
-          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#0D9488]">
+          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#70685E]">
             How Aegis compares
           </div>
           <h1 className="mt-2 text-2xl sm:text-4xl font-black tracking-tight text-black">
@@ -143,25 +143,25 @@ export default function FaqPage() {
                 <tr
                   key={idx}
                   className={`border-b border-[#D9CFC7] last:border-0 ${
-                    row.isAegis ? "bg-[#22C7B2]/10 font-bold" : "hover:bg-[#FAF8F5]"
+                    row.isAegis ? "bg-[#EFE9E3] font-bold" : "hover:bg-[#FAF8F5]"
                   }`}
                 >
                   <th className="px-4 py-3.5">
-                    <span className={row.isAegis ? "text-[#0D9488] font-black text-sm" : "text-black font-bold"}>
+                    <span className={row.isAegis ? "text-black font-black text-sm" : "text-black font-bold"}>
                       {row.layer}
                     </span>
                     <span className="block text-[10px] text-[#70685E] font-normal mt-0.5">
                       {row.subtext}
                     </span>
                   </th>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[#0D9488]">{row.lowersCost}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[#0D9488]">{row.noRepeatPay}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[#0D9488]">{row.safetyBudgets}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[#0D9488]">{row.visibility}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[#0D9488]">{row.attribution}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[#0D9488]">{row.cutsSpend}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[#0D9488]">{row.showsSavings}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[#0D9488]">{row.protectsQuality}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.lowersCost}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.noRepeatPay}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.safetyBudgets}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.visibility}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.attribution}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.cutsSpend}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.showsSavings}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.protectsQuality}</td>
                 </tr>
               ))}
             </tbody>
@@ -170,8 +170,8 @@ export default function FaqPage() {
 
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#70685E]">
           <div className="flex items-center gap-4">
-            <span><strong className="text-[#0D9488]">●</strong> Core capability</span>
-            <span><strong className="text-[#D97706]">◐</strong> Partial / Some</span>
+            <span><strong className="text-black">●</strong> Core capability</span>
+            <span><strong className="text-[#B45309]">◐</strong> Partial / Some</span>
             <span><strong className="text-[#D9CFC7]">○</strong> None</span>
           </div>
           <p className="italic text-[11px]">Only Aegis both actively cuts spend and provides verified savings audit receipts.</p>
@@ -181,7 +181,7 @@ export default function FaqPage() {
       {/* FAQ Grid */}
       <section className="border-t border-[#D9CFC7] pt-12">
         <header className="mx-auto max-w-2xl text-center mb-8">
-          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#0D9488]">
+          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#70685E]">
             FAQ
           </div>
           <h2 className="mt-2 text-3xl font-black tracking-tight text-black">
@@ -200,7 +200,7 @@ export default function FaqPage() {
             >
               <summary className="flex cursor-pointer list-none items-center justify-between font-black text-black text-sm marker:hidden">
                 <span>{faq.q}</span>
-                <span className="text-[#0D9488] font-black text-lg transition-transform group-open:rotate-45">
+                <span className="text-black font-black text-lg transition-transform group-open:rotate-45">
                   +
                 </span>
               </summary>
@@ -213,7 +213,7 @@ export default function FaqPage() {
       </section>
 
       {/* Help Banner */}
-      <div className="rounded-2xl border border-[#22C7B2]/40 bg-[#22C7B2]/10 p-8 text-center shadow-xs">
+      <div className="rounded-2xl border border-[#D9CFC7] bg-[#EFE9E3] p-8 text-center shadow-xs">
         <h3 className="text-xl font-black text-black">Ready to cut your inference bill?</h3>
         <p className="mt-2 text-xs sm:text-sm text-[#403B35] font-semibold">
           Get started in under 5 minutes with zero code changes.
@@ -221,13 +221,13 @@ export default function FaqPage() {
         <div className="mt-5 flex justify-center gap-3">
           <Link
             href="/signup"
-            className="rounded-lg bg-[#22C7B2] px-6 py-2.5 text-xs font-bold text-[#0A1926] shadow-xs hover:opacity-90"
+            className="rounded-lg bg-[#C9B59C] px-6 py-2.5 text-xs font-bold text-[#0A0A0A] shadow-xs hover:bg-[#BFAF98] border border-[#BFAF98]"
           >
             Request access →
           </Link>
           <Link
             href="/connect"
-            className="rounded-lg border border-black bg-white px-5 py-2.5 text-xs font-bold text-black shadow-xs hover:bg-[#EFE9E3]"
+            className="rounded-lg border border-black bg-white px-5 py-2.5 text-xs font-bold text-black shadow-xs hover:bg-[#F9F8F6]"
           >
             Integration Guide
           </Link>

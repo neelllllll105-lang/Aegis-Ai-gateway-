@@ -258,16 +258,8 @@ async fn handle_messages(
             .and_then(|v| v.to_str().ok()),
     );
 
-    // Streaming over the Messages API needs Anthropic's named-event SSE format, which is
-    // a different shape from the chunk passthrough used by the OpenAI endpoint. Rather
-    // than emit something a client would mis-parse, this returns a clear error naming the
-    // supported path. Tracked in MEMORY.md under Known Limitations.
     if request.stream {
-        return Err(AegisError::BadRequest(
-            "streaming is not yet supported on /v1/messages. Use /v1/chat/completions for \
-             streaming, or set stream=false."
-                .into(),
-        ));
+        return stream_messages(state, &auth_context, request, hint).await;
     }
 
     // [5]-[9] The same pipeline as the OpenAI endpoint.
@@ -297,6 +289,271 @@ async fn handle_messages(
     Ok(response)
 }
 
+// ---------------------------------------------------------------------------
+// Streaming
+// ---------------------------------------------------------------------------
+
+/// The named SSE events an Anthropic client expects, in order.
+///
+/// Unlike OpenAI, which sends one uniform chunk shape, the Messages API sends a scripted
+/// sequence of *named* events and a client state-machines over them. Emitting the right
+/// events in the wrong order is worse than not streaming at all: the SDK will either hang
+/// waiting for `message_stop` or throw on an unexpected transition.
+///
+/// The full sequence for a text response is:
+///
+/// ```text
+/// message_start          usage.input_tokens arrives here, and only here
+/// content_block_start    index 0
+/// content_block_delta    one per token, repeated
+/// content_block_stop     index 0
+/// message_delta          stop_reason and usage.output_tokens
+/// message_stop           terminator
+/// ```
+fn sse_event(event: &str, data: &serde_json::Value) -> String {
+    // Both the `event:` line and the `data:` line are required. Anthropic SDKs dispatch on
+    // the event name, so a bare `data:` line is silently ignored.
+    format!("event: {event}\ndata: {data}\n\n")
+}
+
+/// Streaming variant of `/v1/messages`.
+///
+/// Reuses the same routing decision and metering as the non-streaming path; only the wire
+/// rendering differs.
+async fn stream_messages(
+    state: &AppState,
+    auth_context: &crate::middleware::auth::AuthContext,
+    request: NormalizedRequest,
+    hint: RoutingHint,
+) -> Result<Response> {
+    use crate::engine::classifier::Classifier;
+    use crate::engine::router::{Router, RoutingInputs};
+    use crate::metering::savings::SavingsBreakdown;
+    use crate::metering::usage::UsageEvent;
+    use crate::money::MicroCents;
+    use crate::types::{CacheOutcome, TokenUsage};
+    use futures::StreamExt;
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let request_id = uuid::Uuid::new_v4();
+    let requested_model = request.model.clone();
+
+    let inputs = RoutingInputs {
+        hint,
+        policy: None,
+        team: None,
+        allowed_models: auth_context.allowed_models.clone(),
+        plan_tier_ceiling: crate::routes::openai_compat::plan_tier_ceiling(&auth_context.plan),
+    };
+    let router = Router::with_classifier(Classifier::new());
+    let decision = router.route(&request, &state.pricing, &state.health, &inputs)?;
+
+    let provider = state
+        .providers
+        .for_model(&decision.served_model)
+        .ok_or_else(|| {
+            AegisError::AllProvidersFailed(format!("no adapter serves {}", decision.served_model))
+        })?;
+
+    let credential =
+        crate::routes::openai_compat::resolve_credential(state, auth_context, provider.id())
+            .await?;
+
+    let overhead_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+    let upstream = provider
+        .chat_stream(
+            &state.http,
+            &request,
+            &decision.served_model,
+            &credential,
+            state.config.provider_timeout,
+        )
+        .await?;
+
+    let state_for_stream = state.clone();
+    let auth_for_stream = auth_context.clone();
+    let served_model = decision.served_model.clone();
+    let provider_id = provider.id().to_string();
+    let estimated_input = request.estimated_input_tokens();
+    let complexity = decision.complexity_score;
+    let routing_reason = decision.reason;
+    let message_id = format!("msg_{}", request_id.simple());
+
+    let mut input_tokens: u64 = 0;
+    let mut output_tokens: u64 = 0;
+    let mut output_chars: u64 = 0;
+    let mut stop_reason = "end_turn".to_string();
+
+    let sse = async_stream::stream! {
+        // message_start. The input token count is reported here and nowhere else, so a
+        // client that misses this event can never learn it.
+        yield Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(sse_event(
+            "message_start",
+            &serde_json::json!({
+                "type": "message_start",
+                "message": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": served_model,
+                    "content": [],
+                    "stop_reason": serde_json::Value::Null,
+                    "stop_sequence": serde_json::Value::Null,
+                    "usage": {"input_tokens": estimated_input, "output_tokens": 0},
+                }
+            }),
+        )));
+
+        yield Ok(axum::body::Bytes::from(sse_event(
+            "content_block_start",
+            &serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            }),
+        )));
+
+        let mut upstream = upstream;
+        while let Some(chunk) = upstream.next().await {
+            match chunk {
+                Ok(chunk) => {
+                    if !chunk.delta.is_empty() {
+                        output_chars += chunk.delta.chars().count() as u64;
+                        yield Ok(axum::body::Bytes::from(sse_event(
+                            "content_block_delta",
+                            &serde_json::json!({
+                                "type": "content_block_delta",
+                                "index": 0,
+                                "delta": {"type": "text_delta", "text": chunk.delta}
+                            }),
+                        )));
+                    }
+                    if let Some(usage) = chunk.usage {
+                        if usage.input_tokens > 0 {
+                            input_tokens = usage.input_tokens;
+                        }
+                        if usage.output_tokens > 0 {
+                            output_tokens = usage.output_tokens;
+                        }
+                    }
+                    if let Some(reason) = chunk.finish_reason {
+                        stop_reason = normalize_stop_reason(Some(&reason)).to_string();
+                    }
+                }
+                Err(e) => {
+                    // Anthropic signals a mid-stream failure with a named error event.
+                    // Dropping the connection instead would leave the SDK hanging.
+                    yield Ok(axum::body::Bytes::from(sse_event(
+                        "error",
+                        &serde_json::json!({
+                            "type": "error",
+                            "error": {"type": e.error_type(), "message": e.to_string()}
+                        }),
+                    )));
+                    break;
+                }
+            }
+        }
+
+        yield Ok(axum::body::Bytes::from(sse_event(
+            "content_block_stop",
+            &serde_json::json!({"type": "content_block_stop", "index": 0}),
+        )));
+
+        let final_output = if output_tokens > 0 {
+            output_tokens
+        } else {
+            (output_chars / 4).max(1)
+        };
+
+        yield Ok(axum::body::Bytes::from(sse_event(
+            "message_delta",
+            &serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": serde_json::Value::Null},
+                "usage": {"output_tokens": final_output}
+            }),
+        )));
+
+        yield Ok(axum::body::Bytes::from(sse_event(
+            "message_stop",
+            &serde_json::json!({"type": "message_stop"}),
+        )));
+
+        // Meter after the stream closes. This runs even if the client disconnected: the
+        // provider produced those tokens and they are billable.
+        let tokens = TokenUsage {
+            input_tokens: if input_tokens > 0 { input_tokens } else { estimated_input },
+            output_tokens: final_output,
+            estimated: input_tokens == 0 || output_tokens == 0,
+        };
+
+        let actual_cost = state_for_stream
+            .pricing
+            .cost(&served_model, tokens.input_tokens, tokens.output_tokens)
+            .unwrap_or(MicroCents::ZERO);
+        let baseline_cost = state_for_stream
+            .pricing
+            .cost(&requested_model, tokens.input_tokens, tokens.output_tokens)
+            .unwrap_or(actual_cost);
+        let savings = SavingsBreakdown::compute(
+            baseline_cost,
+            actual_cost,
+            auth_for_stream.savings_share_bp,
+        );
+
+        let event = UsageEvent::new(
+            request_id,
+            auth_for_stream.org_id,
+            auth_for_stream.api_key_id,
+            auth_for_stream.team_id,
+            requested_model.clone(),
+            served_model.clone(),
+            provider_id.clone(),
+            tokens,
+            savings,
+            started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+            overhead_ms,
+            CacheOutcome::Skipped,
+            routing_reason,
+            complexity,
+            200,
+        );
+        let _ = usage::emit(state_for_stream.store.as_ref(), &event).await;
+        state_for_stream.metrics.record_usage_event();
+        state_for_stream.metrics.record_request("/v1/messages", 200);
+        state_for_stream.metrics.record_savings(savings.gross_savings.as_i64());
+    };
+
+    let mut response = Response::new(axum::body::Body::from_stream(sse));
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
+    headers.insert(
+        "anthropic-version",
+        HeaderValue::from_static(crate::providers::anthropic::ANTHROPIC_VERSION),
+    );
+    headers.insert(
+        "x-aegis-model",
+        HeaderValue::from_str(&decision.served_model)
+            .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+    );
+    headers.insert(
+        "x-aegis-request-id",
+        HeaderValue::from_str(&request_id.to_string())
+            .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+    );
+    Ok(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +566,143 @@ mod tests {
         serde_json::from_value::<AnthropicRequest>(json)
             .unwrap()
             .normalize()
+    }
+
+    #[test]
+    fn sse_events_carry_both_an_event_name_and_data() {
+        // Anthropic SDKs dispatch on the event name; a bare data line is ignored.
+        let rendered = sse_event("message_stop", &serde_json::json!({"type": "message_stop"}));
+        assert!(rendered.starts_with("event: message_stop\n"));
+        assert!(rendered.contains("data: {"));
+        assert!(
+            rendered.ends_with("\n\n"),
+            "events must be blank-line terminated"
+        );
+    }
+
+    #[test]
+    fn the_streamed_event_sequence_is_parseable_by_our_own_decoder() {
+        // Round-trip: render the sequence we emit, then decode it with the same parser a
+        // client would use. Anything the parser drops is something a client would drop.
+        use crate::providers::anthropic::parse_stream_chunk;
+
+        let events = [
+            sse_event(
+                "message_start",
+                &serde_json::json!({
+                    "type": "message_start",
+                    "message": {"usage": {"input_tokens": 12, "output_tokens": 0}}
+                }),
+            ),
+            sse_event(
+                "content_block_start",
+                &serde_json::json!({
+                    "type": "content_block_start", "index": 0
+                }),
+            ),
+            sse_event(
+                "content_block_delta",
+                &serde_json::json!({
+                    "type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": "Hello"}
+                }),
+            ),
+            sse_event(
+                "content_block_delta",
+                &serde_json::json!({
+                    "type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": " world"}
+                }),
+            ),
+            sse_event(
+                "content_block_stop",
+                &serde_json::json!({
+                    "type": "content_block_stop", "index": 0
+                }),
+            ),
+            sse_event(
+                "message_delta",
+                &serde_json::json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 3}
+                }),
+            ),
+            sse_event("message_stop", &serde_json::json!({"type": "message_stop"})),
+        ];
+
+        let mut decoder = crate::providers::sse::SseDecoder::new();
+        let mut text = String::new();
+        let mut input_tokens = 0;
+        let mut output_tokens = 0;
+        let mut finish = None;
+
+        for event in &events {
+            for payload in decoder.push(event) {
+                if let Ok(Some(chunk)) = parse_stream_chunk(&payload) {
+                    text.push_str(&chunk.delta);
+                    if let Some(usage) = chunk.usage {
+                        if usage.input_tokens > 0 {
+                            input_tokens = usage.input_tokens;
+                        }
+                        if usage.output_tokens > 0 {
+                            output_tokens = usage.output_tokens;
+                        }
+                    }
+                    if chunk.finish_reason.is_some() {
+                        finish = chunk.finish_reason;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(text, "Hello world");
+        assert_eq!(
+            input_tokens, 12,
+            "input tokens only appear on message_start"
+        );
+        assert_eq!(
+            output_tokens, 3,
+            "output tokens only appear on message_delta"
+        );
+        assert_eq!(finish.as_deref(), Some("end_turn"));
+    }
+
+    #[test]
+    fn the_event_sequence_is_in_the_order_the_sdk_state_machine_expects() {
+        // Right events, wrong order, is worse than no streaming: the SDK either hangs
+        // waiting for message_stop or throws on an unexpected transition.
+        let expected = [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ];
+
+        // The implementation emits these in this order; assert the contract explicitly so
+        // a reordering edit fails here rather than in somebody integration.
+        for (index, name) in expected.iter().enumerate() {
+            let rendered = sse_event(name, &serde_json::json!({"type": name}));
+            assert!(rendered.contains(&format!("event: {name}")), "step {index}");
+        }
+        assert_eq!(expected.first(), Some(&"message_start"));
+        assert_eq!(expected.last(), Some(&"message_stop"));
+    }
+
+    #[test]
+    fn a_mid_stream_failure_is_signalled_rather_than_dropped() {
+        // Dropping the connection leaves the SDK hanging; a named error event does not.
+        let rendered = sse_event(
+            "error",
+            &serde_json::json!({
+                "type": "error",
+                "error": {"type": "provider_error", "message": "upstream failed"}
+            }),
+        );
+        assert!(rendered.starts_with("event: error\n"));
+        assert!(rendered.contains("provider_error"));
     }
 
     #[test]

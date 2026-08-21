@@ -24,7 +24,7 @@ export function AegisLogo({ className = "w-6 h-6" }: { className?: string }) {
       <path
         d="M12 6.8L6.5 9.2V12.8C6.5 16.2 8.8 19.3 12 20.2C15.2 19.3 17.5 16.2 17.5 12.8V9.2L12 6.8Z"
         fill="currentColor"
-        fillOpacity="0.2"
+        fillOpacity="0.25"
         stroke="currentColor"
         strokeWidth="1.4"
         strokeLinecap="round"
@@ -79,7 +79,7 @@ export function SectionHeader({
     <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-6">
       <div>
         {eyebrow && (
-          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#0D9488] mb-1">
+          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#70685E] mb-1">
             {eyebrow}
           </div>
         )}
@@ -121,14 +121,14 @@ export function Stat({
           {label}
         </div>
         {trend && (
-          <span className="inline-flex items-center gap-1 text-[11px] font-black text-[#0D9488] bg-[#22C7B2]/15 px-2 py-0.5 rounded-full border border-[#22C7B2]/40">
+          <span className="inline-flex items-center gap-1 text-[11px] font-black text-black bg-[#EFE9E3] px-2 py-0.5 rounded-full border border-[#D9CFC7]">
             {trend}
           </span>
         )}
       </div>
       <div
         className={`tabular mt-2 text-2xl sm:text-3xl font-black tracking-tight ${
-          accent ? "text-[#0D9488]" : "text-black"
+          accent ? "text-[#0A0A0A]" : "text-black"
         }`}
       >
         {value}
@@ -151,12 +151,12 @@ export type BadgeTone =
 
 const BADGE_TONES: Record<BadgeTone, string> = {
   neutral: "bg-[#EFE9E3] text-black border-[#D9CFC7] font-bold",
-  accent: "bg-[#22C7B2]/15 text-[#0D9488] border-[#22C7B2]/40 font-black",
-  warm: "bg-[#FEF3C7] text-[#D97706] border-[#FDE68A] font-bold",
-  warn: "bg-[#FEF3C7] text-[#D97706] border-[#FDE68A] font-bold",
+  accent: "bg-[#C9B59C] text-black border-[#BFAF98] font-black",
+  warm: "bg-[#EFE9E3] text-black border-[#D9CFC7] font-bold",
+  warn: "bg-[#FEF3C7] text-[#B45309] border-[#FDE68A] font-bold",
   danger: "bg-[#FEE2E2] text-[#DC2626] border-[#FECACA] font-bold",
-  success: "bg-[#22C7B2]/15 text-[#0D9488] border-[#22C7B2]/40 font-black",
-  info: "bg-[#EFF6FF] text-[#2563EB] border-[#BFDBFE] font-bold",
+  success: "bg-[#EFE9E3] text-black border-[#D9CFC7] font-bold",
+  info: "bg-[#EFE9E3] text-black border-[#D9CFC7] font-bold",
 };
 
 export function Badge({
@@ -270,13 +270,13 @@ export function Td({
 // Forms & Buttons
 // ---------------------------------------------------------------------------
 
-type ButtonVariant = "primary" | "secondary" | "teal" | "ghost" | "danger";
+type ButtonVariant = "primary" | "secondary" | "accent" | "ghost" | "danger";
 
 const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
   primary:
     "bg-black text-white hover:bg-[#262626] shadow-xs font-black active:scale-[0.98]",
-  teal:
-    "bg-[#22C7B2] text-[#0A1926] hover:opacity-90 shadow-xs font-bold active:scale-[0.98]",
+  accent:
+    "bg-[#C9B59C] text-[#0A0A0A] hover:bg-[#BFAF98] shadow-xs font-bold active:scale-[0.98]",
   secondary:
     "bg-white text-black border border-[#D9CFC7] hover:bg-[#EFE9E3] shadow-xs font-bold active:scale-[0.98]",
   ghost:
@@ -351,7 +351,7 @@ export function Field({
         autoComplete={autoComplete}
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
-        className="mt-1.5 w-full rounded-xl border border-[#D9CFC7] bg-white px-3.5 py-2.5 text-xs text-black placeholder:text-[#9E9487] focus:border-[#0D9488] focus:ring-1 focus:ring-[#0D9488] focus:outline-none transition-colors"
+        className="mt-1.5 w-full rounded-xl border border-[#D9CFC7] bg-white px-3.5 py-2.5 text-xs text-black placeholder:text-[#9E9487] focus:border-[#C9B59C] focus:ring-1 focus:ring-[#C9B59C] focus:outline-none transition-colors"
       />
       {hint && <p className="mt-1 text-[11px] text-[#70685E] font-medium">{hint}</p>}
     </div>
@@ -384,7 +384,7 @@ export function CodeBlock({
       // Comments
       if (line.trim().startsWith("#")) {
         return (
-          <span key={idx} className="block text-[#22C7B2] font-medium">
+          <span key={idx} className="block text-[#C9B59C] font-medium">
             {line}
           </span>
         );
@@ -397,7 +397,7 @@ export function CodeBlock({
         return (
           <span key={idx} className="block">
             <span className="text-[#F9F8F6]">{codePart}</span>
-            <span className="text-[#22C7B2] font-bold">{commentPart}</span>
+            <span className="text-[#C9B59C] font-bold">{commentPart}</span>
           </span>
         );
       }
@@ -442,7 +442,7 @@ export function CodeBlock({
             aria-label="Copy code"
           >
             {copied ? (
-              <span className="text-[#22C7B2]">Copied</span>
+              <span className="text-[#C9B59C]">Copied</span>
             ) : (
               <span>Copy</span>
             )}

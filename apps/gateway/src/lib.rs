@@ -22,11 +22,14 @@ pub mod metrics;
 pub mod middleware;
 pub mod money;
 pub mod providers;
+pub mod router;
 pub mod routes;
 pub mod store;
 pub mod telemetry;
 pub mod types;
 pub mod workers;
+
+pub use router::build_router;
 
 use crate::config::Config;
 use crate::engine::bandit::RoutingBandit;
