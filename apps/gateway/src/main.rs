@@ -103,7 +103,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // ---- Database --------------------------------------------------------------
-    let (db, pricing) = match config.database_url.as_ref() {
+    let (db, db_replica, pricing) = match config.database_url.as_ref() {
         Some(_) => {
             let pool = db::pool::connect(&config).await?;
             db::pool::migrate(&pool).await?;
@@ -126,14 +126,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 PricingTable::from_models(rows.into_iter().map(into_model).collect())
             };
 
-            (Some(pool), table)
+            // Analytics replica, if one is configured. Reported explicitly at startup
+            // so a deployment that meant to have one but typed the variable wrong is
+            // visible in the first ten lines of the log rather than in a latency graph
+            // three weeks later.
+            let replica = db::pool::connect_replica(&config).await?;
+            match &replica {
+                Some(_) => tracing::info!("read replica connected — analytics will use it"),
+                None => tracing::info!("no read replica configured — analytics use the primary"),
+            }
+
+            (Some(pool), replica, table)
         }
         None => {
             tracing::warn!(
                 "DATABASE_URL not set — management endpoints will return an error and \
                  usage will not be persisted."
             );
-            (None, PricingTable::with_seed_data())
+            (None, None, PricingTable::with_seed_data())
         }
     };
 
@@ -142,6 +152,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         store: Arc::clone(&store),
         metrics: Arc::new(Metrics::new()),
         db,
+        db_replica,
         pricing: Arc::new(pricing),
         providers: Arc::new(ProviderRegistry::with_builtins()),
         key_cache: Arc::new(KeyCache::default()),
@@ -158,6 +169,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(workers::usage_writer::run_partition_maintenance(
             state.clone(),
         ));
+        // Periodic jobs with external side effects. Safe to start on every replica: the
+        // scheduler claims each run in the shared store, so exactly one replica acts.
+        tokio::spawn(workers::scheduler::run(state.clone()));
         tracing::info!("background workers started");
     } else {
         tracing::warn!("workers not started: no database configured");

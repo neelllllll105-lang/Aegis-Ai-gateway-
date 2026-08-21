@@ -103,7 +103,11 @@ impl PipelineOutcome {
     }
 
     /// The usage event for this request.
-    pub fn usage_event(&self, auth: &AuthContext, status_code: u16) -> UsageEvent {
+    ///
+    /// `region` is the serving instance's own region, passed in rather than read from a
+    /// global: the usage writer may run elsewhere, and attributing spend to the writer's
+    /// region rather than the server's would silently misreport every regional budget.
+    pub fn usage_event(&self, auth: &AuthContext, status_code: u16, region: &str) -> UsageEvent {
         let mut event = UsageEvent::new(
             self.request_id,
             auth.org_id,
@@ -122,6 +126,7 @@ impl PipelineOutcome {
             status_code,
         );
         event.tokens_saved_by_compression = self.tokens_saved_by_compression;
+        event.region = Some(region.to_string());
         event
     }
 }
@@ -596,7 +601,8 @@ async fn handle_chat(
     }
 
     // ---- [3] Budget --------------------------------------------------------------
-    let budget_decision = budget::check(state.store.as_ref(), &auth_context, None, None).await?;
+    let budget_decision =
+        budget::check(state.store.as_ref(), &auth_context, None, None, None).await?;
     if !budget_decision.allowed {
         state.metrics.record_budget_blocked(budget_decision.scope);
         record_rejection(state, &auth_context, 402, "budget_exceeded").await;
@@ -630,7 +636,7 @@ async fn handle_chat(
     let outcome = execute(state, &auth_context, request, hint).await?;
 
     // ---- [10] Usage emission (non-blocking) --------------------------------------
-    let event = outcome.usage_event(&auth_context, 200);
+    let event = outcome.usage_event(&auth_context, 200, &state.config.region);
     let _ = usage::emit(state.store.as_ref(), &event).await;
     state.metrics.record_usage_event();
     state.metrics.record_request("/v1/chat/completions", 200);
@@ -1281,7 +1287,7 @@ mod tests {
             let outcome = execute(&state, &auth, request, RoutingHint::Auto)
                 .await
                 .unwrap();
-            let event = outcome.usage_event(&auth, 200);
+            let event = outcome.usage_event(&auth, 200, "test");
             usage::emit(state.store.as_ref(), &event).await.unwrap();
         }
 
@@ -1361,7 +1367,7 @@ mod tests {
             let outcome = execute(&state, &auth, request, RoutingHint::Auto)
                 .await
                 .unwrap();
-            let event = outcome.usage_event(&auth, 200);
+            let event = outcome.usage_event(&auth, 200, "test");
             usage::emit(state.store.as_ref(), &event).await.unwrap();
         }
 
@@ -1383,7 +1389,7 @@ mod tests {
         let outcome = execute(&state, &auth, request, RoutingHint::Auto)
             .await
             .unwrap();
-        let event = outcome.usage_event(&auth, 200);
+        let event = outcome.usage_event(&auth, 200, "test");
 
         assert_eq!(event.org_id, auth.org_id);
         assert_eq!(event.api_key_id, auth.api_key_id);

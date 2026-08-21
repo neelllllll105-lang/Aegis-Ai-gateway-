@@ -6,4 +6,5 @@
 
 pub mod budget_alerts;
 pub mod reconciliation;
+pub mod scheduler;
 pub mod usage_writer;

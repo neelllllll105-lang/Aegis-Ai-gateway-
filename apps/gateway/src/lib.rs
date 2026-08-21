@@ -59,6 +59,9 @@ pub struct AppState {
     /// PostgreSQL pool. `None` when running without a database, in which case endpoints
     /// that require persistence return 503 rather than panicking.
     pub db: Option<sqlx::PgPool>,
+
+    /// Read replica for analytics queries. `None` means "use the primary".
+    pub db_replica: Option<sqlx::PgPool>,
     /// Model pricing, refreshed periodically from the database.
     pub pricing: Arc<PricingTable>,
     /// Provider adapters, keyed by provider id.
@@ -87,6 +90,21 @@ impl AppState {
         })
     }
 
+    /// The pool analytics queries should use.
+    ///
+    /// The replica when one is configured, the primary otherwise. Callers do not branch
+    /// on this: a report reads from whatever this returns, so removing the replica from
+    /// the environment changes performance and nothing else.
+    ///
+    /// Never use this for anything a write depends on. Replication lag is real, and a
+    /// read-after-write against a replica can legitimately return the previous value.
+    pub fn analytics_db(&self) -> error::Result<&sqlx::PgPool> {
+        if let Some(replica) = self.db_replica.as_ref() {
+            return Ok(replica);
+        }
+        self.db()
+    }
+
     /// Build state for tests: in-memory store, no database, seeded pricing.
     pub fn for_tests() -> AppState {
         AppState {
@@ -94,6 +112,7 @@ impl AppState {
             store: Arc::new(store::MemoryStore::new()),
             metrics: Arc::new(Metrics::new()),
             db: None,
+            db_replica: None,
             pricing: Arc::new(PricingTable::with_seed_data()),
             providers: Arc::new(ProviderRegistry::with_builtins()),
             key_cache: Arc::new(KeyCache::default()),

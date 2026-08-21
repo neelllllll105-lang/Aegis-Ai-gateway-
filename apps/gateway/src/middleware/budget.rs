@@ -23,6 +23,19 @@ use crate::money::MicroCents;
 use crate::store::KvStore;
 use crate::types::NormalizedRequest;
 
+/// A spend limit that applies to one region only (`P7.2`).
+///
+/// Separate from the organisation budget because they answer different questions. The org
+/// budget bounds the total bill. This bounds how much of that total any single region may
+/// consume, which is what a multinational on one contract actually needs: "the EU burned
+/// the whole month by the 9th" is a real operational failure the org-level number cannot
+/// express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegionBudget<'a> {
+    pub region: &'a str,
+    pub limit_mc: i64,
+}
+
 /// The outcome of a budget check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BudgetDecision {
@@ -62,6 +75,7 @@ pub async fn check(
     auth: &AuthContext,
     org_budget_mc: Option<i64>,
     team_budget_mc: Option<i64>,
+    region_budget: Option<RegionBudget<'_>>,
 ) -> Result<BudgetDecision> {
     if let (Some(api_key_id), Some(limit)) = (auth.api_key_id, auth.monthly_budget_mc) {
         let spend = usage::current_key_spend(store, api_key_id).await;
@@ -83,6 +97,21 @@ pub async fn check(
                 spend,
                 limit: Some(MicroCents(limit)),
                 scope: "team",
+            });
+        }
+    }
+
+    // Regional limit. An organisation running in several regions has one spend figure but
+    // several exposures: the org budget stops the total and does nothing to stop one
+    // region consuming the whole allowance before the others wake up.
+    if let Some(RegionBudget { region, limit_mc }) = region_budget {
+        let spend = usage::current_region_spend(store, auth.org_id, region).await;
+        if spend.as_i64() >= limit_mc {
+            return Ok(BudgetDecision {
+                allowed: false,
+                spend,
+                limit: Some(MicroCents(limit_mc)),
+                scope: "region",
             });
         }
     }
@@ -203,7 +232,7 @@ mod tests {
     async fn requests_under_budget_are_allowed() {
         let store = MemoryStore::new();
         let context = auth("pro");
-        let decision = check(&store, &context, Some(1_000_000), None)
+        let decision = check(&store, &context, Some(1_000_000), None, None)
             .await
             .unwrap();
         assert!(decision.allowed);
@@ -216,7 +245,7 @@ mod tests {
         let context = auth("pro");
         spend(&store, &context, 1_500_000).await;
 
-        let decision = check(&store, &context, Some(1_000_000), None)
+        let decision = check(&store, &context, Some(1_000_000), None, None)
             .await
             .unwrap();
         assert!(!decision.allowed);
@@ -235,7 +264,7 @@ mod tests {
         context.monthly_budget_mc = Some(500_000);
         spend(&store, &context, 600_000).await;
 
-        let decision = check(&store, &context, Some(10_000_000), None)
+        let decision = check(&store, &context, Some(10_000_000), None, None)
             .await
             .unwrap();
         assert!(!decision.allowed);
@@ -250,7 +279,7 @@ mod tests {
         context.team_id = Some(Uuid::new_v4());
         spend(&store, &context, 2_000_000).await;
 
-        let decision = check(&store, &context, None, Some(1_000_000))
+        let decision = check(&store, &context, None, Some(1_000_000), None)
             .await
             .unwrap();
         assert!(!decision.allowed);
@@ -263,7 +292,7 @@ mod tests {
         let context = auth("enterprise");
         spend(&store, &context, 999_999_999).await;
 
-        let decision = check(&store, &context, None, None).await.unwrap();
+        let decision = check(&store, &context, None, None, None).await.unwrap();
         assert!(
             decision.allowed,
             "an org with no budget must not be blocked"
@@ -278,7 +307,7 @@ mod tests {
         let context = auth("pro");
         spend(&store, &context, 1_000_000).await;
 
-        let decision = check(&store, &context, Some(1_000_000), None)
+        let decision = check(&store, &context, Some(1_000_000), None, None)
             .await
             .unwrap();
         assert!(!decision.allowed);
@@ -292,13 +321,13 @@ mod tests {
         spend(&store, &heavy, 5_000_000).await;
 
         assert!(
-            !check(&store, &heavy, Some(1_000_000), None)
+            !check(&store, &heavy, Some(1_000_000), None, None)
                 .await
                 .unwrap()
                 .allowed
         );
         assert!(
-            check(&store, &light, Some(1_000_000), None)
+            check(&store, &light, Some(1_000_000), None, None)
                 .await
                 .unwrap()
                 .allowed
@@ -395,5 +424,131 @@ mod tests {
         let pricing = PricingTable::with_seed_data();
         let request = NormalizedRequest::simple("unknown-private-model", "hi");
         assert_eq!(project_cost(&request, &pricing), MicroCents::ZERO);
+    }
+
+    /// Record `cost` micro-cents of spend attributed to a region.
+    ///
+    /// Goes through the real `usage::emit` rather than writing the counter directly, so
+    /// the test fails if the regional counter is ever dropped from the emit path — which
+    /// is the failure that would silently disable every regional budget.
+    async fn spend_in_region(store: &MemoryStore, auth: &AuthContext, region: &str, cost: i64) {
+        let mut event = UsageEvent::new(
+            Uuid::new_v4(),
+            auth.org_id,
+            auth.api_key_id,
+            auth.team_id,
+            "gpt-4o".into(),
+            "gpt-4o".into(),
+            "openai".into(),
+            TokenUsage {
+                input_tokens: 10,
+                output_tokens: 10,
+                estimated: false,
+            },
+            SavingsBreakdown::compute(MicroCents(cost), MicroCents(cost), 2_000),
+            10,
+            0.1,
+            CacheOutcome::Miss,
+            RoutingReason::Passthrough,
+            None,
+            200,
+        );
+        event.actual_cost_mc = cost;
+        event.region = Some(region.to_string());
+        usage::emit(store, &event).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_regional_limit_blocks_only_the_region_that_breached_it() {
+        let store = MemoryStore::new();
+        let context = auth("pro");
+
+        spend_in_region(&store, &context, "eu-central", 2_000_000).await;
+
+        let breached = RegionBudget {
+            region: "eu-central",
+            limit_mc: 1_000_000,
+        };
+        let decision = check(&store, &context, None, None, Some(breached))
+            .await
+            .unwrap();
+        assert!(!decision.allowed);
+        assert_eq!(decision.scope, "region");
+
+        // The other region is untouched. That is the whole point: one region running hot
+        // must not take the rest of the organisation offline.
+        let other = RegionBudget {
+            region: "us-east",
+            limit_mc: 1_000_000,
+        };
+        let decision = check(&store, &context, None, None, Some(other))
+            .await
+            .unwrap();
+        assert!(decision.allowed);
+    }
+
+    #[tokio::test]
+    async fn regional_spend_does_not_leak_between_organisations() {
+        // A counter keyed by region alone would aggregate every tenant in the region into
+        // one number — useless to a customer, and a cross-tenant leak.
+        let store = MemoryStore::new();
+        let noisy = auth("pro");
+        let quiet = auth("pro");
+
+        spend_in_region(&store, &noisy, "eu-central", 9_000_000).await;
+
+        let limit = RegionBudget {
+            region: "eu-central",
+            limit_mc: 1_000_000,
+        };
+
+        assert!(
+            !check(&store, &noisy, None, None, Some(limit))
+                .await
+                .unwrap()
+                .allowed
+        );
+        assert!(
+            check(&store, &quiet, None, None, Some(limit))
+                .await
+                .unwrap()
+                .allowed,
+            "one organisation's regional spend must not block another's"
+        );
+    }
+
+    #[tokio::test]
+    async fn regions_are_matched_case_insensitively() {
+        // The region reaches the counter from config on one side and from a budget row on
+        // the other. Those two are typed by different people at different times.
+        let store = MemoryStore::new();
+        let context = auth("pro");
+
+        spend_in_region(&store, &context, "EU-Central", 2_000_000).await;
+
+        let limit = RegionBudget {
+            region: "eu-central",
+            limit_mc: 1_000_000,
+        };
+        assert!(
+            !check(&store, &context, None, None, Some(limit))
+                .await
+                .unwrap()
+                .allowed
+        );
+    }
+
+    #[tokio::test]
+    async fn no_regional_budget_means_no_regional_check() {
+        let store = MemoryStore::new();
+        let context = auth("pro");
+
+        spend_in_region(&store, &context, "eu-central", 500_000_000).await;
+
+        // Enormous regional spend, no regional limit configured: the request proceeds.
+        // Adding a scope must never start rejecting traffic for customers who did not
+        // opt in to it.
+        let decision = check(&store, &context, None, None, None).await.unwrap();
+        assert!(decision.allowed);
     }
 }

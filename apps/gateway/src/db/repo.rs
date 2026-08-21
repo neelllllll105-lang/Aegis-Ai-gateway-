@@ -1391,6 +1391,31 @@ pub async fn upsert_pricing(pool: &PgPool, row: &PricingRow) -> Result<()> {
     tx.commit().await.map_err(AegisError::Database)
 }
 
+/// Organisations that made at least one request in the last `days` days.
+///
+/// The weekly digest iterates this rather than every organisation, so a dormant account
+/// never receives an email saying it saved nothing. A weekly "you saved $0.00" teaches
+/// the recipient that Aegis mail is noise, and the budget alert that actually matters
+/// gets filtered along with it.
+pub async fn orgs_with_recent_usage(pool: &PgPool, days: i64) -> Result<Vec<Organization>> {
+    sqlx::query_as::<_, Organization>(
+        "SELECT o.id, o.name, o.slug, o.plan, o.savings_share_bp, o.billing_email,
+                o.zero_retention, o.content_capture, o.region, o.stripe_customer_id,
+                o.created_at
+         FROM organizations o
+         WHERE EXISTS (
+             SELECT 1 FROM usage_records u
+             WHERE u.org_id = o.id
+               AND u.created_at >= NOW() - ($1 || ' days')::INTERVAL
+         )
+         ORDER BY o.created_at",
+    )
+    .bind(days.to_string())
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
 /// Find an organisation by slug. Used to resolve a referral code.
 pub async fn find_org_by_slug(pool: &PgPool, slug: &str) -> Result<Option<Organization>> {
     sqlx::query_as::<_, Organization>(

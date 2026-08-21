@@ -83,6 +83,14 @@ pub struct Config {
     /// Region identifier for data residency (Phase 6), e.g. `eu-central`.
     pub region: String,
 
+    /// Optional read-replica connection string for analytics queries.
+    ///
+    /// Dashboard aggregates scan far more rows than the request path ever does, and a
+    /// finance user pulling a year of history should not be able to slow down request
+    /// authentication. When unset, analytics simply use the primary — a missing replica
+    /// degrades performance, never correctness.
+    pub read_replica_url: Option<String>,
+
     /// Hard ceiling on request body size. Part 9 item 7.
     pub max_body_bytes: usize,
     /// Hard ceiling on an upstream provider call.
@@ -138,6 +146,7 @@ impl Config {
             license_signing_secret: opt("AEGIS_LICENSE_SIGNING_SECRET"),
 
             region: opt("AEGIS_REGION").unwrap_or_else(|| "eu-central".to_string()),
+            read_replica_url: opt("DATABASE_REPLICA_URL"),
 
             max_body_bytes: num::<usize>("AEGIS_MAX_BODY_BYTES", 10 * 1024 * 1024)?,
             provider_timeout: Duration::from_secs(num("AEGIS_PROVIDER_TIMEOUT_SECS", 30)?),
@@ -176,6 +185,7 @@ impl Config {
             stripe_webhook_secret: None,
             license_signing_secret: Some("test-license-secret".to_string()),
             region: "test".to_string(),
+            read_replica_url: None,
             max_body_bytes: 10 * 1024 * 1024,
             provider_timeout: Duration::from_secs(30),
             provider_timeout_reasoning: Duration::from_secs(120),

@@ -46,6 +46,42 @@ pub async fn connect(config: &Config) -> Result<PgPool> {
         .map_err(AegisError::Database)
 }
 
+/// Connect to the read replica, if one is configured.
+///
+/// Returns `Ok(None)` when `DATABASE_REPLICA_URL` is unset — that is the normal
+/// single-database deployment, not an error. A replica that is configured but
+/// unreachable *is* an error, because silently falling back would hide a broken
+/// replication setup until someone noticed the primary was carrying all the load.
+///
+/// The pool is deliberately smaller than the primary's. Analytics queries are few and
+/// slow; sizing this like the request path would reserve connections that sit idle.
+pub async fn connect_replica(config: &Config) -> Result<Option<PgPool>> {
+    let Some(url) = config.read_replica_url.as_deref() else {
+        return Ok(None);
+    };
+
+    let mut options: sqlx::postgres::PgConnectOptions = url
+        .parse()
+        .map_err(|e| AegisError::Config(format!("invalid DATABASE_REPLICA_URL: {e}")))?;
+
+    if config.environment.is_production_like() {
+        options = options.ssl_mode(PgSslMode::Require);
+    }
+
+    let pool = PgPoolOptions::new()
+        .max_connections((config.database_max_connections / 2).max(2))
+        .min_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .idle_timeout(Duration::from_secs(600))
+        .max_lifetime(Duration::from_secs(1_800))
+        .test_before_acquire(true)
+        .connect_with(options)
+        .await
+        .map_err(AegisError::Database)?;
+
+    Ok(Some(pool))
+}
+
 /// Apply pending migrations.
 pub async fn migrate(pool: &PgPool) -> Result<()> {
     MIGRATOR

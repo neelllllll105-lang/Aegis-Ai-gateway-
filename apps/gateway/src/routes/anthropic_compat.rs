@@ -232,7 +232,8 @@ async fn handle_messages(
     }
 
     // [3] Budget.
-    let budget_decision = budget::check(state.store.as_ref(), &auth_context, None, None).await?;
+    let budget_decision =
+        budget::check(state.store.as_ref(), &auth_context, None, None, None).await?;
     if !budget_decision.allowed {
         state.metrics.record_budget_blocked(budget_decision.scope);
         return Err(budget_decision.into_error());
@@ -266,7 +267,7 @@ async fn handle_messages(
     let outcome = execute(state, &auth_context, request, hint).await?;
 
     // [10] Metering.
-    let event = outcome.usage_event(&auth_context, 200);
+    let event = outcome.usage_event(&auth_context, 200, &state.config.region);
     let _ = usage::emit(state.store.as_ref(), &event).await;
     state.metrics.record_usage_event();
     state.metrics.record_request("/v1/messages", 200);

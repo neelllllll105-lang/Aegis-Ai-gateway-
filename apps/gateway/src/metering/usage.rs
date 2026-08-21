@@ -72,6 +72,14 @@ pub struct UsageEvent {
     /// Tokens removed by context compression, if any.
     pub tokens_saved_by_compression: u64,
 
+    /// The region that served this request.
+    ///
+    /// Recorded on the event rather than read from config at write time, because the
+    /// usage writer may run in a different region from the gateway that served the
+    /// request, and attributing spend to the writer's region would be wrong.
+    #[serde(default)]
+    pub region: Option<String>,
+
     pub created_at: DateTime<Utc>,
 }
 
@@ -118,6 +126,7 @@ impl UsageEvent {
             complexity_score,
             status_code,
             error_type: None,
+            region: None,
             tokens_saved_by_compression: 0,
             created_at: Utc::now(),
         }
@@ -159,6 +168,7 @@ impl UsageEvent {
             complexity_score: None,
             status_code,
             error_type: Some(error_type.to_string()),
+            region: None,
             tokens_saved_by_compression: 0,
             created_at: Utc::now(),
         }
@@ -278,8 +288,38 @@ pub async fn emit(store: &dyn KvStore, event: &UsageEvent) -> Result<String> {
             )
             .await;
     }
+    // Regional counter. Always written, even for single-region organisations: the cost is
+    // one INCR, and without it a customer who adds a regional budget later would start
+    // from an empty counter and get a month of free overspend.
+    if let Some(region) = event.region.as_deref() {
+        let _ = store
+            .incr_by(
+                &org_region_spend_key(event.org_id, region, at),
+                event.actual_cost_mc,
+                Some(COUNTER_TTL),
+            )
+            .await;
+    }
 
     Ok(id)
+}
+
+/// Per-region spend counter key.
+///
+/// Scoped by organisation as well as region, exactly like every other counter here. A
+/// key of the form `region:eu-central` would aggregate every tenant in the region into
+/// one number, which is both useless to a customer and a cross-tenant leak.
+fn org_region_spend_key(org_id: Uuid, region: &str, at: DateTime<Utc>) -> String {
+    format!(
+        "aegis:spend:org:{org_id}:region:{}:{}",
+        region.to_ascii_lowercase(),
+        at.format("%Y-%m")
+    )
+}
+
+/// Read an organisation's current monthly spend within one region.
+pub async fn current_region_spend(store: &dyn KvStore, org_id: Uuid, region: &str) -> MicroCents {
+    read_counter(store, &org_region_spend_key(org_id, region, Utc::now())).await
 }
 
 /// Read an org's current monthly spend from the counters.

@@ -1381,7 +1381,8 @@ pub async fn usage_summary(
     match async {
         let context = require_reader(&state, &headers).await?;
         let (start, end) = range.resolve();
-        let summary = repo::usage_summary(state.db()?, context.org_id, start, end).await?;
+        let summary =
+            repo::usage_summary(state.analytics_db()?, context.org_id, start, end).await?;
 
         // Percentages are computed here rather than in the client so every surface —
         // dashboard, CSV, invoice — shows the same number.
@@ -1426,7 +1427,7 @@ pub async fn list_requests(
         let context = require_reader(&state, &headers).await?;
         let (start, end) = range.resolve();
         let rows = repo::list_requests(
-            state.db()?,
+            state.analytics_db()?,
             context.org_id,
             start,
             end,
@@ -1455,7 +1456,9 @@ pub async fn savings_report_csv(
     match async {
         let context = require_reader(&state, &headers).await?;
         let (start, end) = range.resolve();
-        let rows = repo::list_requests(state.db()?, context.org_id, start, end, 10_000, 0).await?;
+        let rows =
+            repo::list_requests(state.analytics_db()?, context.org_id, start, end, 10_000, 0)
+                .await?;
 
         let mut csv = String::from(
             "request_id,timestamp,requested_model,served_model,provider,input_tokens,\
@@ -1663,7 +1666,7 @@ pub async fn model_catalogue(State(state): State<AppState>, headers: HeaderMap) 
 pub async fn spend_anomalies(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match async {
         let context = require_reader(&state, &headers).await?;
-        let pool = state.db()?;
+        let pool = state.analytics_db()?;
 
         // Thirty days of history, judged against today.
         let history = repo::daily_spend_history(pool, context.org_id, 30).await?;
@@ -1703,7 +1706,8 @@ pub async fn chargeback_csv(
         let context = require_reader(&state, &headers).await?;
         let (start, end) = range.resolve();
 
-        let entries = repo::spend_by_cost_center(state.db()?, context.org_id, start, end).await?;
+        let entries =
+            repo::spend_by_cost_center(state.analytics_db()?, context.org_id, start, end).await?;
         let report = crate::engine::governance::ChargebackReport::build(
             context.org_id,
             &start.format("%Y-%m-%d").to_string(),
@@ -1743,7 +1747,8 @@ pub async fn chargeback_report(
         let context = require_reader(&state, &headers).await?;
         let (start, end) = range.resolve();
 
-        let entries = repo::spend_by_cost_center(state.db()?, context.org_id, start, end).await?;
+        let entries =
+            repo::spend_by_cost_center(state.analytics_db()?, context.org_id, start, end).await?;
         let report = crate::engine::governance::ChargebackReport::build(
             context.org_id,
             &start.format("%Y-%m-%d").to_string(),
@@ -2060,5 +2065,105 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(cookie.contains("Max-Age=0"));
+    }
+}
+
+#[cfg(test)]
+mod analytics_pool_tests {
+    /// Handler source, with the test modules cut off.
+    ///
+    /// Without this, the last handler in the file "extends" into these tests and picks
+    /// up every identifier they mention — which made the first version of this test fail
+    /// on a handler that was perfectly correct.
+    fn handlers() -> &'static str {
+        let source = include_str!("management.rs");
+        match source.find(
+            "
+#[cfg(test)]",
+        ) {
+            Some(offset) => &source[..offset],
+            None => source,
+        }
+    }
+
+    /// The body of one handler, from its signature to the start of the next.
+    fn body_of(handler: &str) -> &'static str {
+        let source = handlers();
+        let needle = format!("pub async fn {handler}(");
+        let start = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("handler {handler} no longer exists — update this list"));
+
+        let end = source[start + 1..]
+            .find(
+                "
+pub async fn ",
+            )
+            .map(|offset| start + 1 + offset)
+            .unwrap_or(source.len());
+
+        &source[start..end]
+    }
+
+    /// Reporting handlers must read from the analytics pool, not the primary.
+    ///
+    /// # Why this reads its own source
+    ///
+    /// The difference between `state.db()?` and `state.analytics_db()?` is invisible in
+    /// every environment without a replica configured — which is all of them, until
+    /// production. There is no runtime behaviour to assert against. What can be asserted
+    /// is the source text, and that is exactly where the mistake gets made: someone
+    /// copies an existing reporting handler, keeps `state.db()?`, and a query that scans
+    /// a year of usage lands on the pool serving request authentication.
+    ///
+    /// The same technique guards tenant isolation in `db::repo`.
+    #[test]
+    fn reporting_handlers_read_from_the_analytics_pool() {
+        for handler in [
+            "usage_summary",
+            "list_requests",
+            "savings_report_csv",
+            "spend_anomalies",
+            "chargeback_csv",
+            "chargeback_report",
+        ] {
+            let body = body_of(handler);
+
+            assert!(
+                !body.contains("state.db()?"),
+                "{handler} is a reporting handler but reads from the primary pool via                  state.db()?. Use state.analytics_db()? so the query lands on the read                  replica when one is configured."
+            );
+            assert!(
+                body.contains("state.analytics_db()?"),
+                "{handler} should read through state.analytics_db()?"
+            );
+        }
+    }
+
+    /// The converse: handlers whose result feeds a write must stay on the primary.
+    #[test]
+    fn mutating_handlers_do_not_read_from_a_replica() {
+        for handler in [
+            "create_key",
+            "revoke_key",
+            "create_provider",
+            "create_policy",
+            "create_budget",
+            "claim_referral",
+            "invite_member",
+        ] {
+            assert!(
+                !body_of(handler).contains("analytics_db"),
+                "{handler} performs a write. Reading from a replica first can return                  pre-replication state, so a uniqueness or existence check made against                  it is not a check at all."
+            );
+        }
+    }
+
+    /// The scan must actually find handlers, or both tests above pass vacuously.
+    #[test]
+    fn the_source_scan_finds_real_handler_bodies() {
+        let body = body_of("usage_summary");
+        assert!(body.len() > 100, "handler body looks truncated: {body:?}");
+        assert!(!handlers().contains("mod analytics_pool_tests"));
     }
 }
