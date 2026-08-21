@@ -126,7 +126,9 @@ impl KeyCache {
     /// A cache holding at most `capacity` entries.
     pub fn new(capacity: usize) -> KeyCache {
         let capacity = NonZeroUsize::new(capacity.max(1)).unwrap_or(NonZeroUsize::MIN);
-        KeyCache { inner: Mutex::new(LruCache::new(capacity)) }
+        KeyCache {
+            inner: Mutex::new(LruCache::new(capacity)),
+        }
     }
 
     /// Fetch a live entry.
@@ -145,7 +147,10 @@ impl KeyCache {
         if let Ok(mut cache) = self.inner.lock() {
             cache.put(
                 key_hash.to_string(),
-                CachedKey { context, cached_at: Instant::now() },
+                CachedKey {
+                    context,
+                    cached_at: Instant::now(),
+                },
             );
         }
     }
@@ -258,11 +263,7 @@ pub async fn authenticate_api_key(state: &AppState, token: &str) -> Result<AuthC
 ///
 /// Called on revocation and on any change to a key's limits. Without this a revoked key
 /// would keep working for up to [`KEY_CACHE_TTL`].
-pub async fn invalidate_key(
-    store: &dyn KvStore,
-    cache: &KeyCache,
-    key_hash: &str,
-) -> Result<()> {
+pub async fn invalidate_key(store: &dyn KvStore, cache: &KeyCache, key_hash: &str) -> Result<()> {
     cache.invalidate(key_hash);
     let _ = store.del(&redis_key(key_hash)).await;
     Ok(())
@@ -278,7 +279,9 @@ pub async fn authenticate_session(
     let token_hash = crypto::hash_token(token);
 
     let Some(user) = repo::find_user_by_session(pool, &token_hash).await? else {
-        return Err(AegisError::Unauthorized("session expired or invalid".into()));
+        return Err(AegisError::Unauthorized(
+            "session expired or invalid".into(),
+        ));
     };
 
     // Resolve which organisation this request is acting in. An explicit org must be one
@@ -336,7 +339,11 @@ pub async fn authenticate_management(state: &AppState, headers: &HeaderMap) -> R
 /// submission, and `Secure` is set outside development — where it would break plain-HTTP
 /// localhost.
 pub fn session_cookie(token: &str, config: &Config) -> String {
-    let secure = if config.secure_cookies() { "; Secure" } else { "" };
+    let secure = if config.secure_cookies() {
+        "; Secure"
+    } else {
+        ""
+    };
     format!(
         "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={}",
         SESSION_DURATION.as_secs()
@@ -345,7 +352,11 @@ pub fn session_cookie(token: &str, config: &Config) -> String {
 
 /// Build the `Set-Cookie` value that clears a session.
 pub fn clear_session_cookie(config: &Config) -> String {
-    let secure = if config.secure_cookies() { "; Secure" } else { "" };
+    let secure = if config.secure_cookies() {
+        "; Secure"
+    } else {
+        ""
+    };
     format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
 }
 
@@ -376,7 +387,10 @@ mod tests {
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Bearer aegis_sk_test123"),
         );
-        assert_eq!(extract_bearer(&headers).as_deref(), Some("aegis_sk_test123"));
+        assert_eq!(
+            extract_bearer(&headers).as_deref(),
+            Some("aegis_sk_test123")
+        );
     }
 
     #[test]
@@ -387,7 +401,11 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 HeaderValue::from_str(value).unwrap(),
             );
-            assert_eq!(extract_bearer(&headers).as_deref(), Some("token123"), "{value:?}");
+            assert_eq!(
+                extract_bearer(&headers).as_deref(),
+                Some("token123"),
+                "{value:?}"
+            );
         }
     }
 
@@ -497,7 +515,10 @@ mod tests {
         // A leaked gateway key must not be able to raise its own budget or mint new keys.
         let context = AuthContext::from_key(key_context());
         assert!(context.can_read());
-        assert!(!context.can_write(), "API keys must not have write authority");
+        assert!(
+            !context.can_write(),
+            "API keys must not have write authority"
+        );
     }
 
     #[test]

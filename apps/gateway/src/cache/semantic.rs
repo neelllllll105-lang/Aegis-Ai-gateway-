@@ -106,12 +106,7 @@ pub trait VectorStore: Send + Sync {
     ) -> Result<Option<SemanticHit>>;
 
     /// Store an entry.
-    async fn upsert(
-        &self,
-        org_id: Uuid,
-        embedding: Embedding,
-        entry: SemanticEntry,
-    ) -> Result<()>;
+    async fn upsert(&self, org_id: Uuid, embedding: Embedding, entry: SemanticEntry) -> Result<()>;
 
     /// Delete an organisation's collection.
     async fn drop_collection(&self, org_id: Uuid) -> Result<()>;
@@ -160,12 +155,7 @@ impl VectorStore for MemoryVectorStore {
         }))
     }
 
-    async fn upsert(
-        &self,
-        org_id: Uuid,
-        embedding: Embedding,
-        entry: SemanticEntry,
-    ) -> Result<()> {
+    async fn upsert(&self, org_id: Uuid, embedding: Embedding, entry: SemanticEntry) -> Result<()> {
         self.collections
             .entry(org_id)
             .or_default()
@@ -192,7 +182,10 @@ pub struct QdrantVectorStore {
 impl QdrantVectorStore {
     /// Point at a Qdrant instance.
     pub fn new(base_url: impl Into<String>, http: reqwest::Client) -> QdrantVectorStore {
-        QdrantVectorStore { base_url: base_url.into(), http }
+        QdrantVectorStore {
+            base_url: base_url.into(),
+            http,
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -257,12 +250,7 @@ impl VectorStore for QdrantVectorStore {
         }
     }
 
-    async fn upsert(
-        &self,
-        org_id: Uuid,
-        embedding: Embedding,
-        entry: SemanticEntry,
-    ) -> Result<()> {
+    async fn upsert(&self, org_id: Uuid, embedding: Embedding, entry: SemanticEntry) -> Result<()> {
         let collection = collection_name(org_id);
         // Create on first write; Qdrant treats an existing collection as a conflict,
         // which is fine to ignore.
@@ -407,7 +395,11 @@ mod tests {
             content: content.into(),
             finish_reason: Some("stop".into()),
             tool_calls: None,
-            usage: TokenUsage { input_tokens: 5, output_tokens: 5, estimated: false },
+            usage: TokenUsage {
+                input_tokens: 5,
+                output_tokens: 5,
+                estimated: false,
+            },
             raw: None,
         }
     }
@@ -442,7 +434,10 @@ mod tests {
     fn similarity_is_bounded_even_with_floating_point_error() {
         let v = vec![1e-3f32; 512];
         let similarity = cosine_similarity(&v, &v);
-        assert!((-1.0..=1.0).contains(&similarity), "out of range: {similarity}");
+        assert!(
+            (-1.0..=1.0).contains(&similarity),
+            "out of range: {similarity}"
+        );
     }
 
     #[test]
@@ -478,7 +473,13 @@ mod tests {
 
         let stored = vec![1.0, 0.0, 0.0];
         cache
-            .put(stored.clone(), org(), false, &response("Paris"), "openai/gpt-4o-mini")
+            .put(
+                stored.clone(),
+                org(),
+                false,
+                &response("Paris"),
+                "openai/gpt-4o-mini",
+            )
             .await
             .unwrap();
 
@@ -494,8 +495,15 @@ mod tests {
         let store = MemoryVectorStore::new();
         let cache = SemanticCache::new(&store, DEFAULT_SIMILARITY_THRESHOLD);
 
-        cache.put(vec![1.0, 0.0, 0.0], org(), false, &response("Paris"), "m").await.unwrap();
-        assert!(cache.get(&[0.0, 1.0, 0.0], org(), false).await.unwrap().is_none());
+        cache
+            .put(vec![1.0, 0.0, 0.0], org(), false, &response("Paris"), "m")
+            .await
+            .unwrap();
+        assert!(cache
+            .get(&[0.0, 1.0, 0.0], org(), false)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -507,11 +515,19 @@ mod tests {
         let angle = 0.94f32.acos();
         let just_below = vec![angle.cos(), angle.sin()];
         let strict = SemanticCache::new(&store, 0.95);
-        assert!(strict.get(&just_below, org(), false).await.unwrap().is_none());
+        assert!(strict
+            .get(&just_below, org(), false)
+            .await
+            .unwrap()
+            .is_none());
 
         // Relaxing the threshold lets the same vector through.
         let lenient = SemanticCache::new(&store, 0.90);
-        assert!(lenient.get(&just_below, org(), false).await.unwrap().is_some());
+        assert!(lenient
+            .get(&just_below, org(), false)
+            .await
+            .unwrap()
+            .is_some());
     }
 
     async fn cache_put(store: &MemoryVectorStore, embedding: Embedding) {
@@ -528,7 +544,13 @@ mod tests {
         let cache = SemanticCache::new(&store, DEFAULT_SIMILARITY_THRESHOLD);
 
         cache
-            .put(vec![1.0, 0.0, 0.0], org(), false, &response("confidential"), "m")
+            .put(
+                vec![1.0, 0.0, 0.0],
+                org(),
+                false,
+                &response("confidential"),
+                "m",
+            )
             .await
             .unwrap();
 
@@ -544,8 +566,14 @@ mod tests {
         let store = MemoryVectorStore::new();
         let cache = SemanticCache::new(&store, 0.5);
 
-        cache.put(vec![1.0, 0.0], org(), false, &response("closer"), "m").await.unwrap();
-        cache.put(vec![0.7, 0.7], org(), false, &response("further"), "m").await.unwrap();
+        cache
+            .put(vec![1.0, 0.0], org(), false, &response("closer"), "m")
+            .await
+            .unwrap();
+        cache
+            .put(vec![0.7, 0.7], org(), false, &response("further"), "m")
+            .await
+            .unwrap();
 
         let hit = cache.get(&[1.0, 0.0], org(), false).await.unwrap().unwrap();
         assert_eq!(hit.entry.response.content, "closer");
@@ -556,7 +584,10 @@ mod tests {
         let store = MemoryVectorStore::new();
         let cache = SemanticCache::new(&store, DEFAULT_SIMILARITY_THRESHOLD);
 
-        assert!(!cache.put(vec![1.0, 0.0], org(), true, &response("x"), "m").await.unwrap());
+        assert!(!cache
+            .put(vec![1.0, 0.0], org(), true, &response("x"), "m")
+            .await
+            .unwrap());
         assert_eq!(store.count(org()).await.unwrap(), 0);
         assert!(cache.get(&[1.0, 0.0], org(), true).await.unwrap().is_none());
     }
@@ -566,8 +597,14 @@ mod tests {
         let store = MemoryVectorStore::new();
         let cache = SemanticCache::new(&store, 0.5);
 
-        cache.put(vec![1.0, 0.0], org(), false, &response("a"), "m").await.unwrap();
-        cache.put(vec![1.0, 0.0], other_org(), false, &response("b"), "m").await.unwrap();
+        cache
+            .put(vec![1.0, 0.0], org(), false, &response("a"), "m")
+            .await
+            .unwrap();
+        cache
+            .put(vec![1.0, 0.0], other_org(), false, &response("b"), "m")
+            .await
+            .unwrap();
 
         cache.invalidate_org(org()).await.unwrap();
         assert_eq!(store.count(org()).await.unwrap(), 0);
@@ -578,6 +615,10 @@ mod tests {
     async fn an_empty_collection_is_a_miss_not_an_error() {
         let store = MemoryVectorStore::new();
         let cache = SemanticCache::new(&store, DEFAULT_SIMILARITY_THRESHOLD);
-        assert!(cache.get(&[1.0, 0.0], org(), false).await.unwrap().is_none());
+        assert!(cache
+            .get(&[1.0, 0.0], org(), false)
+            .await
+            .unwrap()
+            .is_none());
     }
 }

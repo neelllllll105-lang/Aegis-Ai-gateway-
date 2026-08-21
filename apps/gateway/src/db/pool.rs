@@ -106,7 +106,10 @@ mod tests {
         // Guards against a migration file added to the directory but never shipped,
         // which would leave production on an older schema than the code expects.
         let migrations = MIGRATOR.migrations.len();
-        assert!(migrations >= 2, "expected at least 2 migrations, found {migrations}");
+        assert!(
+            migrations >= 2,
+            "expected at least 2 migrations, found {migrations}"
+        );
     }
 
     #[test]

@@ -211,7 +211,10 @@ mod tests {
 
     #[test]
     fn complexity_conditions_match_the_band() {
-        let condition = Condition { complexity: Some("simple".into()), ..Default::default() };
+        let condition = Condition {
+            complexity: Some("simple".into()),
+            ..Default::default()
+        };
         assert!(condition.matches(&context()));
 
         let mut other = context();
@@ -225,13 +228,22 @@ mod tests {
 
     #[test]
     fn model_patterns_support_a_trailing_wildcard() {
-        let exact = Condition { model_requested: Some("gpt-4o".into()), ..Default::default() };
+        let exact = Condition {
+            model_requested: Some("gpt-4o".into()),
+            ..Default::default()
+        };
         assert!(exact.matches(&context()));
 
-        let wildcard = Condition { model_requested: Some("gpt-4*".into()), ..Default::default() };
+        let wildcard = Condition {
+            model_requested: Some("gpt-4*".into()),
+            ..Default::default()
+        };
         assert!(wildcard.matches(&context()));
 
-        let miss = Condition { model_requested: Some("claude-*".into()), ..Default::default() };
+        let miss = Condition {
+            model_requested: Some("claude-*".into()),
+            ..Default::default()
+        };
         assert!(!miss.matches(&context()));
     }
 
@@ -246,7 +258,10 @@ mod tests {
 
     #[test]
     fn team_conditions_are_case_insensitive() {
-        let condition = Condition { team: Some("ENGINEERING".into()), ..Default::default() };
+        let condition = Condition {
+            team: Some("ENGINEERING".into()),
+            ..Default::default()
+        };
         assert!(condition.matches(&context()));
 
         let mut no_team = context();
@@ -256,7 +271,10 @@ mod tests {
 
     #[test]
     fn token_threshold_conditions_work() {
-        let condition = Condition { min_input_tokens: Some(1_000), ..Default::default() };
+        let condition = Condition {
+            min_input_tokens: Some(1_000),
+            ..Default::default()
+        };
         assert!(!condition.matches(&context()));
 
         let mut large = context();
@@ -276,7 +294,10 @@ mod tests {
 
         let mut wrong_team = context();
         wrong_team.team = Some("marketing".into());
-        assert!(!condition.matches(&wrong_team), "conditions must AND, not OR");
+        assert!(
+            !condition.matches(&wrong_team),
+            "conditions must AND, not OR"
+        );
     }
 
     #[test]
@@ -290,14 +311,16 @@ mod tests {
         );
         let action = policy.evaluate(&context()).unwrap();
         assert_eq!(action.pin_model.as_deref(), Some("openai/gpt-4o"));
-        assert!(action.model_tier.is_none(), "the second rule must not also apply");
+        assert!(
+            action.model_tier.is_none(),
+            "the second rule must not also apply"
+        );
     }
 
     #[test]
     fn non_matching_policies_yield_nothing() {
-        let policy = RoutingPolicy::from_json(
-            r#"[{"when": {"team": "finance"}, "then": {"deny": true}}]"#,
-        );
+        let policy =
+            RoutingPolicy::from_json(r#"[{"when": {"team": "finance"}, "then": {"deny": true}}]"#);
         assert!(policy.evaluate(&context()).is_none());
     }
 
@@ -336,7 +359,10 @@ mod tests {
         // A broken rule set must degrade to default routing, never to an error page.
         for broken in ["not json at all", "{}", "[{\"when\": 5}]", ""] {
             let policy = RoutingPolicy::from_json(broken);
-            assert!(policy.is_empty(), "{broken:?} should have produced an empty policy");
+            assert!(
+                policy.is_empty(),
+                "{broken:?} should have produced an empty policy"
+            );
             assert!(policy.evaluate(&context()).is_none());
         }
     }
@@ -349,7 +375,10 @@ mod tests {
                     complexity: Some("complex".into()),
                     ..Default::default()
                 },
-                action: Action { passthrough: Some(true), ..Default::default() },
+                action: Action {
+                    passthrough: Some(true),
+                    ..Default::default()
+                },
             }],
         };
         let json = serde_json::to_string(&policy.rules).unwrap();

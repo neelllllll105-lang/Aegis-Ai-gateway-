@@ -153,7 +153,10 @@ mod tests {
     #[test]
     fn generated_adapter_uses_bearer_auth() {
         let headers = TestProvider.auth_headers(&Credential::new("key-123"));
-        assert_eq!(headers[0], ("authorization".to_string(), "Bearer key-123".to_string()));
+        assert_eq!(
+            headers[0],
+            ("authorization".to_string(), "Bearer key-123".to_string())
+        );
     }
 
     #[test]

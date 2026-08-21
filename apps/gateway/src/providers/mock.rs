@@ -20,7 +20,11 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub enum MockBehavior {
     /// Return a successful response with this content and token counts.
-    Succeed { content: String, input_tokens: u64, output_tokens: u64 },
+    Succeed {
+        content: String,
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     /// Fail with a provider error of this status.
     Fail { status: u16, message: String },
     /// Time out.
@@ -75,7 +79,10 @@ impl MockProvider {
     /// A mock that always fails with `status`.
     pub fn failing(status: u16, message: &str) -> MockProvider {
         let mock = MockProvider::new();
-        mock.set_behavior(MockBehavior::Fail { status, message: message.to_string() });
+        mock.set_behavior(MockBehavior::Fail {
+            status,
+            message: message.to_string(),
+        });
         mock
     }
 
@@ -122,7 +129,10 @@ impl MockProvider {
     fn record(&self, model: &str, streamed: bool) {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut calls) = self.calls.lock() {
-            calls.push(RecordedCall { model: model.to_string(), streamed });
+            calls.push(RecordedCall {
+                model: model.to_string(),
+                streamed,
+            });
         }
     }
 
@@ -198,17 +208,23 @@ impl Provider for MockProvider {
     ) -> Result<NormalizedResponse> {
         self.record(model, false);
         match self.next_outcome() {
-            MockBehavior::Succeed { content, input_tokens, output_tokens } => {
-                Ok(NormalizedResponse {
-                    id: format!("mock-{}", self.call_count()),
-                    model: model.to_string(),
-                    content,
-                    finish_reason: Some("stop".to_string()),
-                    tool_calls: None,
-                    usage: TokenUsage { input_tokens, output_tokens, estimated: false },
-                    raw: None,
-                })
-            }
+            MockBehavior::Succeed {
+                content,
+                input_tokens,
+                output_tokens,
+            } => Ok(NormalizedResponse {
+                id: format!("mock-{}", self.call_count()),
+                model: model.to_string(),
+                content,
+                finish_reason: Some("stop".to_string()),
+                tool_calls: None,
+                usage: TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    estimated: false,
+                },
+                raw: None,
+            }),
             MockBehavior::Fail { status, message } => Err(AegisError::Provider {
                 provider: "mock".to_string(),
                 status,
@@ -229,7 +245,11 @@ impl Provider for MockProvider {
     ) -> Result<ChunkStream> {
         self.record(model, true);
         match self.next_outcome() {
-            MockBehavior::Succeed { content, input_tokens, output_tokens } => {
+            MockBehavior::Succeed {
+                content,
+                input_tokens,
+                output_tokens,
+            } => {
                 // Emit one chunk per word plus a final usage chunk, mirroring how real
                 // providers deliver tokens and report usage only at the end.
                 let mut chunks: Vec<Result<StreamChunk>> = content
@@ -246,7 +266,11 @@ impl Provider for MockProvider {
                 chunks.push(Ok(StreamChunk {
                     delta: String::new(),
                     finish_reason: Some("stop".to_string()),
-                    usage: Some(TokenUsage { input_tokens, output_tokens, estimated: false }),
+                    usage: Some(TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                        estimated: false,
+                    }),
                     raw: None,
                 }));
                 Ok(Box::pin(futures::stream::iter(chunks)))
@@ -275,9 +299,15 @@ mod tests {
     async fn records_the_model_it_was_asked_for() {
         let mock = MockProvider::new();
         let request = NormalizedRequest::simple("gpt-4o", "hi");
-        mock.chat(&http(), &request, "gpt-4o-mini", &Credential::new(""), Duration::from_secs(1))
-            .await
-            .unwrap();
+        mock.chat(
+            &http(),
+            &request,
+            "gpt-4o-mini",
+            &Credential::new(""),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(mock.call_count(), 1);
         assert_eq!(mock.last_model().as_deref(), Some("gpt-4o-mini"));
@@ -326,12 +356,24 @@ mod tests {
 
         for attempt in 0..2 {
             let result = mock
-                .chat(&http(), &request, "mock-model", &Credential::new(""), Duration::from_secs(1))
+                .chat(
+                    &http(),
+                    &request,
+                    "mock-model",
+                    &Credential::new(""),
+                    Duration::from_secs(1),
+                )
                 .await;
             assert!(result.is_err(), "attempt {attempt} should have failed");
         }
         let recovered = mock
-            .chat(&http(), &request, "mock-model", &Credential::new(""), Duration::from_secs(1))
+            .chat(
+                &http(),
+                &request,
+                "mock-model",
+                &Credential::new(""),
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
         assert_eq!(recovered.content, "recovered");

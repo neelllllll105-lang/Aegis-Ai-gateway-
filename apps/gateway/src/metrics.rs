@@ -15,8 +15,7 @@ use std::sync::RwLock;
 ///
 /// Dense below 1ms because that is the number we are held to: Principle 1 sets a P99
 /// budget of 1ms, so we need resolution to see it degrade, not just to see it breached.
-const OVERHEAD_BUCKETS_MS: &[f64] =
-    &[0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0];
+const OVERHEAD_BUCKETS_MS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0];
 
 /// Histogram buckets for **total request latency**, in milliseconds. Dominated by the
 /// upstream provider, so the range runs to a minute.
@@ -199,7 +198,8 @@ impl Metrics {
 
     /// Record a cache lookup outcome: `exact`, `semantic`, `miss`, or `skipped`.
     pub fn record_cache(&self, outcome: &str) {
-        self.cache_events_total.inc(&format!("outcome=\"{outcome}\""), 1);
+        self.cache_events_total
+            .inc(&format!("outcome=\"{outcome}\""), 1);
     }
 
     /// Record why a request was routed the way it was.
@@ -210,12 +210,14 @@ impl Metrics {
 
     /// Record a rate-limit rejection.
     pub fn record_rate_limited(&self, scope: &str) {
-        self.rate_limited_total.inc(&format!("scope=\"{scope}\""), 1);
+        self.rate_limited_total
+            .inc(&format!("scope=\"{scope}\""), 1);
     }
 
     /// Record a budget rejection.
     pub fn record_budget_blocked(&self, scope: &str) {
-        self.budget_blocked_total.inc(&format!("scope=\"{scope}\""), 1);
+        self.budget_blocked_total
+            .inc(&format!("scope=\"{scope}\""), 1);
     }
 
     /// Record that a usage event was emitted. Principle 2 says this must equal the
@@ -260,8 +262,11 @@ impl Metrics {
     /// Render the whole registry in Prometheus text exposition format.
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(4096);
-        self.requests_total
-            .render("aegis_requests_total", "Requests handled by the gateway", &mut out);
+        self.requests_total.render(
+            "aegis_requests_total",
+            "Requests handled by the gateway",
+            &mut out,
+        );
         self.provider_errors_total.render(
             "aegis_provider_errors_total",
             "Upstream provider failures by provider and kind",
@@ -307,8 +312,11 @@ impl Metrics {
             "Latency added by Aegis itself, excluding the provider call",
             &mut out,
         );
-        self.latency
-            .render("aegis_request_latency_ms", "End-to-end request latency", &mut out);
+        self.latency.render(
+            "aegis_request_latency_ms",
+            "End-to-end request latency",
+            &mut out,
+        );
         out
     }
 }
@@ -324,8 +332,14 @@ mod tests {
         m.record_request("/v1/chat/completions", 200);
         m.record_request("/v1/chat/completions", 429);
         let out = m.render();
-        assert!(out.contains(r#"aegis_requests_total{route="/v1/chat/completions",status="200"} 2"#), "{out}");
-        assert!(out.contains(r#"aegis_requests_total{route="/v1/chat/completions",status="429"} 1"#), "{out}");
+        assert!(
+            out.contains(r#"aegis_requests_total{route="/v1/chat/completions",status="200"} 2"#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"aegis_requests_total{route="/v1/chat/completions",status="429"} 1"#),
+            "{out}"
+        );
     }
 
     #[test]
@@ -336,9 +350,18 @@ mod tests {
         m.record_overhead_ms(20.0);
         let out = m.render();
         // 0.04 falls in le=0.05; cumulative at le=0.5 must include both sub-ms samples.
-        assert!(out.contains(r#"aegis_gateway_overhead_ms_bucket{le="0.05"} 1"#), "{out}");
-        assert!(out.contains(r#"aegis_gateway_overhead_ms_bucket{le="0.5"} 2"#), "{out}");
-        assert!(out.contains(r#"aegis_gateway_overhead_ms_bucket{le="+Inf"} 3"#), "{out}");
+        assert!(
+            out.contains(r#"aegis_gateway_overhead_ms_bucket{le="0.05"} 1"#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"aegis_gateway_overhead_ms_bucket{le="0.5"} 2"#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"aegis_gateway_overhead_ms_bucket{le="+Inf"} 3"#),
+            "{out}"
+        );
         assert!(out.contains("aegis_gateway_overhead_ms_count 3"), "{out}");
     }
 
@@ -350,8 +373,16 @@ mod tests {
             m.record_overhead_ms(0.2);
         }
         m.record_overhead_ms(50.0);
-        assert!(m.overhead_p50_ms() <= 0.25, "p50 was {}", m.overhead_p50_ms());
-        assert!(m.overhead_p99_ms() <= 1.0, "p99 was {}", m.overhead_p99_ms());
+        assert!(
+            m.overhead_p50_ms() <= 0.25,
+            "p50 was {}",
+            m.overhead_p50_ms()
+        );
+        assert!(
+            m.overhead_p99_ms() <= 1.0,
+            "p99 was {}",
+            m.overhead_p99_ms()
+        );
     }
 
     #[test]
@@ -366,7 +397,10 @@ mod tests {
         m.record_savings(1_000);
         m.record_savings(-500); // a routing decision that cost more must not subtract
         let out = m.render();
-        assert!(out.contains("aegis_savings_micro_cents_total 1000"), "{out}");
+        assert!(
+            out.contains("aegis_savings_micro_cents_total 1000"),
+            "{out}"
+        );
     }
 
     #[test]

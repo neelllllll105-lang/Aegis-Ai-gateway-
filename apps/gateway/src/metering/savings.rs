@@ -81,7 +81,10 @@ impl SavingsBreakdown {
 
     /// Attribution for a cache hit: the customer pays nothing, so the entire baseline is
     /// a saving.
-    pub fn cache_hit(baseline_cost: MicroCents, savings_share_basis_points: u32) -> SavingsBreakdown {
+    pub fn cache_hit(
+        baseline_cost: MicroCents,
+        savings_share_basis_points: u32,
+    ) -> SavingsBreakdown {
         SavingsBreakdown::compute(baseline_cost, MicroCents::ZERO, savings_share_basis_points)
     }
 
@@ -165,7 +168,10 @@ mod tests {
         assert_eq!(breakdown.aegis_fee, MicroCents(1_410)); // 20% of 7_050
         assert_eq!(breakdown.customer_net, MicroCents(5_640));
         // The three parts must reconstitute the whole, exactly.
-        assert_eq!(breakdown.aegis_fee + breakdown.customer_net, breakdown.gross_savings);
+        assert_eq!(
+            breakdown.aegis_fee + breakdown.customer_net,
+            breakdown.gross_savings
+        );
     }
 
     #[test]
@@ -215,13 +221,17 @@ mod tests {
     fn every_plan_rate_produces_a_consistent_split() {
         for plan in ["free", "pro", "team", "enterprise", "api"] {
             let rate = savings_share_basis_points(plan);
-            let breakdown = SavingsBreakdown::compute(MicroCents(1_000_000), MicroCents(100_000), rate);
+            let breakdown =
+                SavingsBreakdown::compute(MicroCents(1_000_000), MicroCents(100_000), rate);
             assert_eq!(
                 breakdown.aegis_fee + breakdown.customer_net,
                 breakdown.gross_savings,
                 "split does not reconstitute for plan {plan}"
             );
-            assert!(breakdown.aegis_fee <= breakdown.gross_savings, "fee exceeds savings on {plan}");
+            assert!(
+                breakdown.aegis_fee <= breakdown.gross_savings,
+                "fee exceeds savings on {plan}"
+            );
         }
     }
 
@@ -246,11 +256,8 @@ mod tests {
         for baseline in (0..=200_000).step_by(4_999) {
             for actual in (0..=200_000).step_by(7_919) {
                 for rate in [0, 1_000, 1_500, 2_000, 10_000] {
-                    let b = SavingsBreakdown::compute(
-                        MicroCents(baseline),
-                        MicroCents(actual),
-                        rate,
-                    );
+                    let b =
+                        SavingsBreakdown::compute(MicroCents(baseline), MicroCents(actual), rate);
                     assert!(b.gross_savings >= MicroCents::ZERO);
                     assert!(b.aegis_fee >= MicroCents::ZERO);
                     assert!(b.customer_net >= MicroCents::ZERO);

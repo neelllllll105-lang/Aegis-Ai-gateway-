@@ -118,11 +118,23 @@ mod tests {
             .insert("google".into(), vec!["g-1".into(), "g-2".into()]);
         let pool = SharedKeyPool::new();
 
-        assert_eq!(pool.next_credential(&config, "openai").unwrap().api_key, "oa-1");
+        assert_eq!(
+            pool.next_credential(&config, "openai").unwrap().api_key,
+            "oa-1"
+        );
         // Advancing one provider must not skip another forward.
-        assert_eq!(pool.next_credential(&config, "google").unwrap().api_key, "g-1");
-        assert_eq!(pool.next_credential(&config, "openai").unwrap().api_key, "oa-2");
-        assert_eq!(pool.next_credential(&config, "google").unwrap().api_key, "g-2");
+        assert_eq!(
+            pool.next_credential(&config, "google").unwrap().api_key,
+            "g-1"
+        );
+        assert_eq!(
+            pool.next_credential(&config, "openai").unwrap().api_key,
+            "oa-2"
+        );
+        assert_eq!(
+            pool.next_credential(&config, "google").unwrap().api_key,
+            "g-2"
+        );
     }
 
     #[test]

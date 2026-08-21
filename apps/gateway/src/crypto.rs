@@ -53,7 +53,11 @@ pub fn generate_api_key() -> GeneratedKey {
     let plaintext = format!("{API_KEY_PREFIX}{random}");
     let prefix = plaintext.chars().take(KEY_PREFIX_DISPLAY_LEN).collect();
     let hash = hash_token(&plaintext);
-    GeneratedKey { plaintext, prefix, hash }
+    GeneratedKey {
+        plaintext,
+        prefix,
+        hash,
+    }
 }
 
 /// Generate a session token. Same construction as an API key, different prefix so the two
@@ -63,7 +67,11 @@ pub fn generate_session_token() -> GeneratedKey {
     let plaintext = format!("{SESSION_TOKEN_PREFIX}{random}");
     let prefix = plaintext.chars().take(KEY_PREFIX_DISPLAY_LEN).collect();
     let hash = hash_token(&plaintext);
-    GeneratedKey { plaintext, prefix, hash }
+    GeneratedKey {
+        plaintext,
+        prefix,
+        hash,
+    }
 }
 
 fn random_base62(len: usize) -> String {
@@ -130,7 +138,9 @@ pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    let ciphertext = cipher.encrypt(nonce, plaintext).map_err(|_| AegisError::Crypto)?;
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|_| AegisError::Crypto)?;
 
     let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
     out.extend_from_slice(&nonce_bytes);
@@ -215,7 +225,10 @@ mod tests {
     fn api_keys_have_the_specified_shape() {
         let key = generate_api_key();
         assert!(key.plaintext.starts_with(API_KEY_PREFIX));
-        assert_eq!(key.plaintext.len(), API_KEY_PREFIX.len() + API_KEY_RANDOM_LEN);
+        assert_eq!(
+            key.plaintext.len(),
+            API_KEY_PREFIX.len() + API_KEY_RANDOM_LEN
+        );
         assert_eq!(key.prefix.len(), KEY_PREFIX_DISPLAY_LEN);
         assert!(key.plaintext.starts_with(&key.prefix));
         assert_eq!(key.hash.len(), 64, "sha256 hex is 64 characters");
@@ -236,7 +249,10 @@ mod tests {
         let mut counts = [0usize; 62];
         let sample = random_base62(62_000);
         for ch in sample.chars() {
-            let idx = BASE62.iter().position(|&b| b as char == ch).expect("in alphabet");
+            let idx = BASE62
+                .iter()
+                .position(|&b| b as char == ch)
+                .expect("in alphabet");
             counts[idx] += 1;
         }
         let min = *counts.iter().min().unwrap();
@@ -259,9 +275,15 @@ mod tests {
         assert!(!looks_like_api_key(""));
         assert!(!looks_like_api_key("aegis_sk_"));
         assert!(!looks_like_api_key("sk-openai-style-key"));
-        assert!(!looks_like_api_key(&format!("{API_KEY_PREFIX}{}", "a".repeat(10))));
+        assert!(!looks_like_api_key(&format!(
+            "{API_KEY_PREFIX}{}",
+            "a".repeat(10)
+        )));
         // Right length, wrong characters.
-        assert!(!looks_like_api_key(&format!("{API_KEY_PREFIX}{}", "-".repeat(43))));
+        assert!(!looks_like_api_key(&format!(
+            "{API_KEY_PREFIX}{}",
+            "-".repeat(43)
+        )));
     }
 
     #[test]
@@ -341,7 +363,10 @@ mod tests {
         let key = [7u8; 32];
         let encoded = encrypt_string(&key, "sk-ant-api03-value").unwrap();
         assert!(!encoded.contains("sk-ant"));
-        assert_eq!(decrypt_string(&key, &encoded).unwrap(), "sk-ant-api03-value");
+        assert_eq!(
+            decrypt_string(&key, &encoded).unwrap(),
+            "sk-ant-api03-value"
+        );
         assert!(decrypt_string(&key, "not-base64!!").is_err());
     }
 
@@ -351,8 +376,14 @@ mod tests {
         let org_a = "11111111-1111-1111-1111-111111111111";
         let org_b = "22222222-2222-2222-2222-222222222222";
 
-        assert_eq!(derive_tenant_key(&master, org_a), derive_tenant_key(&master, org_a));
-        assert_ne!(derive_tenant_key(&master, org_a), derive_tenant_key(&master, org_b));
+        assert_eq!(
+            derive_tenant_key(&master, org_a),
+            derive_tenant_key(&master, org_a)
+        );
+        assert_ne!(
+            derive_tenant_key(&master, org_a),
+            derive_tenant_key(&master, org_b)
+        );
         assert_ne!(derive_tenant_key(&master, org_a), master);
     }
 
@@ -385,7 +416,10 @@ mod tests {
     #[test]
     fn password_hash_is_argon2id() {
         let hash = hash_password("x").unwrap();
-        assert!(hash.starts_with("$argon2id$"), "unexpected algorithm: {hash}");
+        assert!(
+            hash.starts_with("$argon2id$"),
+            "unexpected algorithm: {hash}"
+        );
     }
 
     #[test]

@@ -177,7 +177,10 @@ mod tests {
         let err = CustomProvider::base_url(&Credential::new("key")).unwrap_err();
         let message = format!("{err}");
         assert!(message.contains("base_url"), "{message}");
-        assert!(message.contains("https://"), "the error should show the expected shape");
+        assert!(
+            message.contains("https://"),
+            "the error should show the expected shape"
+        );
     }
 
     #[test]

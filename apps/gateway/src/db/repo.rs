@@ -266,7 +266,9 @@ pub async fn create_user(
     .bind(name)
     .fetch_one(pool)
     .await
-    .map_err(map_unique_violation("an account with this email already exists"))
+    .map_err(map_unique_violation(
+        "an account with this email already exists",
+    ))
 }
 
 /// Find a user by email.
@@ -621,13 +623,12 @@ pub async fn add_member(
 pub async fn remove_member(pool: &PgPool, org_id: Uuid, user_id: Uuid) -> Result<bool> {
     let mut tx = pool.begin().await.map_err(AegisError::Database)?;
 
-    let owners: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM org_memberships WHERE org_id = $1 AND role = 'owner'",
-    )
-    .bind(org_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(AegisError::Database)?;
+    let owners: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM org_memberships WHERE org_id = $1 AND role = 'owner'")
+            .bind(org_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AegisError::Database)?;
 
     let target_role: Option<(String,)> =
         sqlx::query_as("SELECT role FROM org_memberships WHERE org_id = $1 AND user_id = $2")
@@ -814,6 +815,7 @@ pub async fn touch_api_key(pool: &PgPool, key_id: Uuid) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Store an encrypted BYOK credential.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_credential(
     pool: &PgPool,
     org_id: Uuid,
@@ -1451,7 +1453,10 @@ mod tests {
         };
         assert!(base.is_usable());
 
-        let revoked = ApiKey { revoked_at: Some(Utc::now()), ..base.clone() };
+        let revoked = ApiKey {
+            revoked_at: Some(Utc::now()),
+            ..base.clone()
+        };
         assert!(!revoked.is_usable());
 
         let expired = ApiKey {
@@ -1489,12 +1494,18 @@ mod tests {
             Some(vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()])
         );
 
-        let unrestricted = ApiKey { allowed_models: None, ..key.clone() };
+        let unrestricted = ApiKey {
+            allowed_models: None,
+            ..key.clone()
+        };
         assert_eq!(unrestricted.allowed_model_list(), None);
 
         // A malformed value must not be read as "allow nothing", which would break every
         // request for that key.
-        let malformed = ApiKey { allowed_models: Some(serde_json::json!("oops")), ..key };
+        let malformed = ApiKey {
+            allowed_models: Some(serde_json::json!("oops")),
+            ..key
+        };
         assert_eq!(malformed.allowed_model_list(), None);
     }
 
@@ -1603,7 +1614,9 @@ mod tests {
             "fn find_org_for_user",
         ];
         for name in scoped_fns {
-            let start = source.find(name).unwrap_or_else(|| panic!("{name} not found"));
+            let start = source
+                .find(name)
+                .unwrap_or_else(|| panic!("{name} not found"));
             // Look at the function body that follows, bounded generously.
             let body: String = source[start..].chars().take(1_400).collect();
             let sql_end = body.find("\n}").unwrap_or(body.len());

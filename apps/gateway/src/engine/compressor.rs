@@ -98,10 +98,7 @@ impl CompressorConfig {
 }
 
 /// Compress a request in place, returning what was achieved.
-pub fn compress(
-    request: &mut NormalizedRequest,
-    config: &CompressorConfig,
-) -> CompressionResult {
+pub fn compress(request: &mut NormalizedRequest, config: &CompressorConfig) -> CompressionResult {
     let mut result = CompressionResult {
         tokens_before: request.estimated_input_tokens(),
         ..Default::default()
@@ -160,7 +157,9 @@ fn dedupe_system_messages(messages: &mut Vec<Message>) -> usize {
 fn collapse_whitespace(messages: &mut [Message]) -> usize {
     let mut removed = 0;
     for message in messages.iter_mut() {
-        let Some(content) = &message.content else { continue };
+        let Some(content) = &message.content else {
+            continue;
+        };
         let original = content.as_text();
         if original.is_empty() {
             continue;
@@ -294,7 +293,11 @@ mod tests {
         let result = compress(&mut request, &CompressorConfig::default());
         assert_eq!(result.duplicate_system_messages_removed, 2);
         assert_eq!(
-            request.messages.iter().filter(|m| m.role == Role::System).count(),
+            request
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::System)
+                .count(),
             1
         );
         assert!(result.tokens_saved() > 0);
@@ -328,7 +331,10 @@ mod tests {
 
         let text = request.messages[0].text_content();
         assert!(text.contains("    if x:"), "indentation lost:\n{text}");
-        assert!(text.contains("        return 1"), "indentation lost:\n{text}");
+        assert!(
+            text.contains("        return 1"),
+            "indentation lost:\n{text}"
+        );
     }
 
     #[test]
@@ -343,7 +349,10 @@ mod tests {
         let result = compress(&mut request, &CompressorConfig::default());
         let text = request.messages[0].text_content();
         assert!(!text.contains("  "), "runs remain: {text:?}");
-        assert!(text.ends_with("ones."), "trailing whitespace remains: {text:?}");
+        assert!(
+            text.ends_with("ones."),
+            "trailing whitespace remains: {text:?}"
+        );
         assert!(result.whitespace_chars_removed > 0);
     }
 
@@ -360,7 +369,9 @@ mod tests {
     #[test]
     fn short_conversations_are_not_truncated() {
         let mut request = NormalizedRequest {
-            messages: (0..10).map(|i| message(Role::User, &format!("turn {i}"))).collect(),
+            messages: (0..10)
+                .map(|i| message(Role::User, &format!("turn {i}")))
+                .collect(),
             ..NormalizedRequest::simple("gpt-4o", "")
         };
         let result = compress(&mut request, &CompressorConfig::default());
@@ -405,11 +416,16 @@ mod tests {
     fn truncation_marker_prevents_false_confidence() {
         // Without the marker the model believes it can see the whole conversation.
         let mut request = NormalizedRequest {
-            messages: (0..60).map(|i| message(Role::User, &format!("t{i}"))).collect(),
+            messages: (0..60)
+                .map(|i| message(Role::User, &format!("t{i}")))
+                .collect(),
             ..NormalizedRequest::simple("gpt-4o", "")
         };
         compress(&mut request, &CompressorConfig::default());
-        assert!(request.messages.iter().any(|m| m.text_content() == TRUNCATION_MARKER));
+        assert!(request
+            .messages
+            .iter()
+            .any(|m| m.text_content() == TRUNCATION_MARKER));
     }
 
     #[test]
@@ -445,7 +461,11 @@ mod tests {
         assert_eq!(result.tokens_before, before);
         assert_eq!(result.tokens_after, request.estimated_input_tokens());
         assert!(result.tokens_after < result.tokens_before);
-        assert!(result.savings_percent() > 30.0, "{}%", result.savings_percent());
+        assert!(
+            result.savings_percent() > 30.0,
+            "{}%",
+            result.savings_percent()
+        );
     }
 
     #[test]
@@ -455,7 +475,9 @@ mod tests {
             vec![message(Role::User, "short")],
             vec![message(Role::User, "```\ncode\n```")],
             vec![message(Role::System, "s"), message(Role::User, "u")],
-            (0..80).map(|i| message(Role::User, &format!("m{i}"))).collect(),
+            (0..80)
+                .map(|i| message(Role::User, &format!("m{i}")))
+                .collect(),
             vec![message(Role::User, "")],
         ];
         for messages in cases {
@@ -493,7 +515,10 @@ mod tests {
         };
         compress(&mut request, &CompressorConfig::default());
         let text = request.messages[0].text_content();
-        assert!(text.contains("code    here"), "content inside the fence was altered: {text:?}");
+        assert!(
+            text.contains("code    here"),
+            "content inside the fence was altered: {text:?}"
+        );
         assert!(text.contains("more   code"));
     }
 
@@ -505,7 +530,9 @@ mod tests {
         // Long in turns but not in tokens: summarization would cost a model call to save
         // very little, so it must not fire.
         let chatty = NormalizedRequest {
-            messages: (0..150).map(|i| message(Role::User, &format!("turn {i}"))).collect(),
+            messages: (0..150)
+                .map(|i| message(Role::User, &format!("turn {i}")))
+                .collect(),
             ..NormalizedRequest::simple("gpt-4o", "")
         };
         assert!(!warrants_summarization(&chatty));
@@ -517,7 +544,11 @@ mod tests {
                 .collect(),
             ..NormalizedRequest::simple("gpt-4o", "")
         };
-        assert!(long.estimated_input_tokens() > 20_000, "{}", long.estimated_input_tokens());
+        assert!(
+            long.estimated_input_tokens() > 20_000,
+            "{}",
+            long.estimated_input_tokens()
+        );
         assert!(warrants_summarization(&long));
     }
 }

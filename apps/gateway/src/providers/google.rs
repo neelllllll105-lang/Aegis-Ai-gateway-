@@ -69,7 +69,10 @@ pub fn build_body(request: &NormalizedRequest, _model: &str) -> serde_json::Valu
         generation_config.insert("stopSequences".into(), sequences);
     }
     if !generation_config.is_empty() {
-        map.insert("generationConfig".into(), serde_json::Value::Object(generation_config));
+        map.insert(
+            "generationConfig".into(),
+            serde_json::Value::Object(generation_config),
+        );
     }
 
     if !request.tools.is_empty() {
@@ -109,14 +112,21 @@ pub fn parse_response(body: &serde_json::Value) -> Result<NormalizedResponse> {
     let usage = body
         .get("usageMetadata")
         .map(|u| TokenUsage {
-            input_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0),
+            input_tokens: u
+                .get("promptTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
             output_tokens: u
                 .get("candidatesTokenCount")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
             estimated: false,
         })
-        .unwrap_or(TokenUsage { input_tokens: 0, output_tokens: 0, estimated: true });
+        .unwrap_or(TokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            estimated: true,
+        });
 
     Ok(NormalizedResponse {
         id: body
@@ -192,7 +202,10 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
         .map(normalize_finish_reason);
 
     let usage = json.get("usageMetadata").map(|u| TokenUsage {
-        input_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0),
+        input_tokens: u
+            .get("promptTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
         output_tokens: u
             .get("candidatesTokenCount")
             .and_then(|v| v.as_u64())
@@ -204,7 +217,12 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
         return Ok(None);
     }
 
-    Ok(Some(StreamChunk { delta, finish_reason, usage, raw: Some(data.to_string()) }))
+    Ok(Some(StreamChunk {
+        delta,
+        finish_reason,
+        usage,
+        raw: Some(data.to_string()),
+    }))
 }
 
 fn malformed(message: &str) -> AegisError {
@@ -310,7 +328,11 @@ mod tests {
     fn messages_become_contents_with_parts() {
         let body = build_body(&request(), "gemini-2.5-flash");
         let contents = body["contents"].as_array().unwrap();
-        assert_eq!(contents.len(), 3, "the system message must not appear in contents");
+        assert_eq!(
+            contents.len(),
+            3,
+            "the system message must not appear in contents"
+        );
         assert_eq!(contents[0]["role"], "user");
         assert_eq!(contents[0]["parts"][0]["text"], "Hello");
     }
@@ -358,7 +380,10 @@ mod tests {
             "/models/gemini-2.5-pro:generateContent"
         );
         let body = build_body(&request(), "gemini-2.5-flash");
-        assert!(body.get("model").is_none(), "Gemini rejects a model field in the body");
+        assert!(
+            body.get("model").is_none(),
+            "Gemini rejects a model field in the body"
+        );
     }
 
     #[test]
@@ -386,7 +411,10 @@ mod tests {
         assert_eq!(normalize_finish_reason("STOP"), "stop");
         assert_eq!(normalize_finish_reason("MAX_TOKENS"), "length");
         assert_eq!(normalize_finish_reason("SAFETY"), "content_filter");
-        assert_eq!(normalize_finish_reason("PROHIBITED_CONTENT"), "content_filter");
+        assert_eq!(
+            normalize_finish_reason("PROHIBITED_CONTENT"),
+            "content_filter"
+        );
         assert_eq!(normalize_finish_reason("OTHER"), "other");
     }
 
@@ -416,11 +444,10 @@ mod tests {
 
     #[test]
     fn stream_chunks_decode_text_and_final_usage() {
-        let chunk = parse_stream_chunk(
-            r#"{"candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}"#,
-        )
-        .unwrap()
-        .unwrap();
+        let chunk =
+            parse_stream_chunk(r#"{"candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}"#)
+                .unwrap()
+                .unwrap();
         assert_eq!(chunk.delta, "Hel");
 
         let final_chunk = parse_stream_chunk(
@@ -435,7 +462,9 @@ mod tests {
 
     #[test]
     fn empty_stream_chunks_yield_nothing() {
-        assert!(parse_stream_chunk(r#"{"candidates":[]}"#).unwrap().is_none());
+        assert!(parse_stream_chunk(r#"{"candidates":[]}"#)
+            .unwrap()
+            .is_none());
         assert!(parse_stream_chunk("").unwrap().is_none());
         assert!(parse_stream_chunk("{bad json").unwrap().is_none());
     }
@@ -446,7 +475,9 @@ mod tests {
         let headers = GoogleProvider.auth_headers(&Credential::new("AIzaTestKey"));
         assert_eq!(headers[0].0, "x-goog-api-key");
         assert_eq!(headers[0].1, "AIzaTestKey");
-        assert!(!GoogleProvider.chat_path("gemini-2.5-flash").contains("key="));
+        assert!(!GoogleProvider
+            .chat_path("gemini-2.5-flash")
+            .contains("key="));
     }
 
     #[test]
@@ -457,6 +488,9 @@ mod tests {
             "function": {"name": "lookup", "parameters": {"type": "object"}}
         })];
         let body = build_body(&req, "gemini-2.5-flash");
-        assert_eq!(body["tools"][0]["functionDeclarations"][0]["name"], "lookup");
+        assert_eq!(
+            body["tools"][0]["functionDeclarations"][0]["name"],
+            "lookup"
+        );
     }
 }

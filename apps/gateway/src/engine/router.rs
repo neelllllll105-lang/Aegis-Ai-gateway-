@@ -194,8 +194,8 @@ impl Router {
             Complexity::Simple => ModelTier::Cheap,
         };
 
-        let ceiling = combine_ceilings(Some(target_tier), inputs.plan_tier_ceiling)
-            .unwrap_or(target_tier);
+        let ceiling =
+            combine_ceilings(Some(target_tier), inputs.plan_tier_ceiling).unwrap_or(target_tier);
 
         // Never route *up*: if the caller asked for something cheap, a "cheap tier"
         // target must not promote them to a pricier model.
@@ -408,7 +408,12 @@ mod tests {
     #[test]
     fn simple_requests_route_to_a_cheaper_model() {
         let decision = Router::new()
-            .route(&simple_request(), &pricing(), &healthy(), &RoutingInputs::default())
+            .route(
+                &simple_request(),
+                &pricing(),
+                &healthy(),
+                &RoutingInputs::default(),
+            )
             .unwrap();
         assert_ne!(decision.served_model, "openai/gpt-4o");
         assert_eq!(decision.reason, RoutingReason::Complexity);
@@ -419,7 +424,12 @@ mod tests {
     fn complex_requests_are_never_downgraded() {
         // The quality guarantee. This is the single most important test in the router.
         let decision = Router::new()
-            .route(&complex_request(), &pricing(), &healthy(), &RoutingInputs::default())
+            .route(
+                &complex_request(),
+                &pricing(),
+                &healthy(),
+                &RoutingInputs::default(),
+            )
             .unwrap();
         assert_eq!(decision.served_model, "openai/gpt-4o");
         assert!(decision.is_passthrough());
@@ -438,7 +448,10 @@ mod tests {
     #[test]
     fn the_passthrough_hint_always_wins() {
         // Part 13 item 5: the escape hatch must always be available.
-        let inputs = RoutingInputs { hint: RoutingHint::Passthrough, ..Default::default() };
+        let inputs = RoutingInputs {
+            hint: RoutingHint::Passthrough,
+            ..Default::default()
+        };
         let decision = Router::new()
             .route(&simple_request(), &pricing(), &healthy(), &inputs)
             .unwrap();
@@ -478,7 +491,10 @@ mod tests {
         let policy = RoutingPolicy::from_json(
             r#"[{"when": {"complexity": "simple"}, "then": {"pin_model": "google/gemini-2.5-flash"}}]"#,
         );
-        let inputs = RoutingInputs { policy: Some(&policy), ..Default::default() };
+        let inputs = RoutingInputs {
+            policy: Some(&policy),
+            ..Default::default()
+        };
         let decision = Router::new()
             .route(&simple_request(), &pricing(), &healthy(), &inputs)
             .unwrap();
@@ -488,9 +504,13 @@ mod tests {
 
     #[test]
     fn policies_can_deny_a_request() {
-        let policy =
-            RoutingPolicy::from_json(r#"[{"when": {"model_requested": "gpt-4o"}, "then": {"deny": true}}]"#);
-        let inputs = RoutingInputs { policy: Some(&policy), ..Default::default() };
+        let policy = RoutingPolicy::from_json(
+            r#"[{"when": {"model_requested": "gpt-4o"}, "then": {"deny": true}}]"#,
+        );
+        let inputs = RoutingInputs {
+            policy: Some(&policy),
+            ..Default::default()
+        };
         let err = Router::new()
             .route(&simple_request(), &pricing(), &healthy(), &inputs)
             .unwrap_err();
@@ -502,7 +522,10 @@ mod tests {
         let policy = RoutingPolicy::from_json(
             r#"[{"when": {"model_requested": "gpt-4*"}, "then": {"passthrough": true}}]"#,
         );
-        let inputs = RoutingInputs { policy: Some(&policy), ..Default::default() };
+        let inputs = RoutingInputs {
+            policy: Some(&policy),
+            ..Default::default()
+        };
         let decision = Router::new()
             .route(&simple_request(), &pricing(), &healthy(), &inputs)
             .unwrap();
@@ -514,7 +537,10 @@ mod tests {
     fn a_policy_pinning_an_unknown_model_passes_through_rather_than_failing() {
         let policy =
             RoutingPolicy::from_json(r#"[{"when": {}, "then": {"pin_model": "does/not-exist"}}]"#);
-        let inputs = RoutingInputs { policy: Some(&policy), ..Default::default() };
+        let inputs = RoutingInputs {
+            policy: Some(&policy),
+            ..Default::default()
+        };
         let decision = Router::new()
             .route(&simple_request(), &pricing(), &healthy(), &inputs)
             .unwrap();
@@ -570,9 +596,17 @@ mod tests {
         assert!(!health.is_available("openai"));
 
         let decision = Router::new()
-            .route(&simple_request(), &pricing(), &health, &RoutingInputs::default())
+            .route(
+                &simple_request(),
+                &pricing(),
+                &health,
+                &RoutingInputs::default(),
+            )
             .unwrap();
-        assert_ne!(decision.provider, "openai", "routed to a provider with an open circuit");
+        assert_ne!(
+            decision.provider, "openai",
+            "routed to a provider with an open circuit"
+        );
     }
 
     #[test]
@@ -585,7 +619,10 @@ mod tests {
             .unwrap();
 
         let requested_price = table.get("gpt-4o-mini").unwrap().blended_per_mtok();
-        let served_price = table.get(&decision.served_model).unwrap().blended_per_mtok();
+        let served_price = table
+            .get(&decision.served_model)
+            .unwrap()
+            .blended_per_mtok();
         assert!(
             served_price <= requested_price,
             "routed from {} to a pricier {}",
@@ -624,11 +661,21 @@ mod tests {
         let table = pricing();
         let health = healthy();
         let first = Router::new()
-            .route(&simple_request(), &table, &health, &RoutingInputs::default())
+            .route(
+                &simple_request(),
+                &table,
+                &health,
+                &RoutingInputs::default(),
+            )
             .unwrap();
         for _ in 0..10 {
             let again = Router::new()
-                .route(&simple_request(), &table, &health, &RoutingInputs::default())
+                .route(
+                    &simple_request(),
+                    &table,
+                    &health,
+                    &RoutingInputs::default(),
+                )
                 .unwrap();
             assert_eq!(first, again);
         }
@@ -650,8 +697,14 @@ mod tests {
             combine_ceilings(Some(ModelTier::Premium), Some(ModelTier::Cheap)),
             Some(ModelTier::Cheap)
         );
-        assert_eq!(combine_ceilings(Some(ModelTier::Mid), None), Some(ModelTier::Mid));
-        assert_eq!(combine_ceilings(None, Some(ModelTier::Mid)), Some(ModelTier::Mid));
+        assert_eq!(
+            combine_ceilings(Some(ModelTier::Mid), None),
+            Some(ModelTier::Mid)
+        );
+        assert_eq!(
+            combine_ceilings(None, Some(ModelTier::Mid)),
+            Some(ModelTier::Mid)
+        );
         assert_eq!(combine_ceilings(None, None), None);
     }
 
@@ -661,11 +714,19 @@ mod tests {
         // the requested one for a representative simple request.
         let table = pricing();
         let decision = Router::new()
-            .route(&simple_request(), &table, &healthy(), &RoutingInputs::default())
+            .route(
+                &simple_request(),
+                &table,
+                &healthy(),
+                &RoutingInputs::default(),
+            )
             .unwrap();
 
         let baseline = table.cost("gpt-4o", 1_000, 500).unwrap();
         let actual = table.cost(&decision.served_model, 1_000, 500).unwrap();
-        assert!(actual < baseline, "routing produced no saving: {actual} vs {baseline}");
+        assert!(
+            actual < baseline,
+            "routing produced no saving: {actual} vs {baseline}"
+        );
     }
 }

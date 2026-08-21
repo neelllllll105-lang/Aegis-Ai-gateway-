@@ -109,7 +109,9 @@ impl<'a> ExactCache<'a> {
     /// so a customer can clear their own cache on demand. Scoped by prefix, so no other
     /// tenant is affected.
     pub async fn invalidate_org(&self, org_id: Uuid) -> Result<u64> {
-        self.store.del_prefix(&Fingerprint::org_prefix(org_id)).await
+        self.store
+            .del_prefix(&Fingerprint::org_prefix(org_id))
+            .await
     }
 
     /// Why a request was not cached, for the request log.
@@ -139,7 +141,11 @@ mod tests {
             content: content.to_string(),
             finish_reason: Some("stop".to_string()),
             tool_calls: None,
-            usage: TokenUsage { input_tokens: 10, output_tokens: 5, estimated: false },
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                estimated: false,
+            },
             raw: None,
         }
     }
@@ -170,7 +176,13 @@ mod tests {
         let request = NormalizedRequest::simple("gpt-4o", "our confidential roadmap");
 
         cache
-            .put(&request, org(), false, &response("secret answer"), "openai/gpt-4o")
+            .put(
+                &request,
+                org(),
+                false,
+                &response("secret answer"),
+                "openai/gpt-4o",
+            )
             .await
             .unwrap();
 
@@ -184,14 +196,24 @@ mod tests {
         let cache = ExactCache::new(&store, Duration::from_secs(60));
         let request = NormalizedRequest::simple("gpt-4o", "shared question");
 
-        cache.put(&request, org(), false, &response("a"), "m").await.unwrap();
-        cache.put(&request, other_org(), false, &response("b"), "m").await.unwrap();
+        cache
+            .put(&request, org(), false, &response("a"), "m")
+            .await
+            .unwrap();
+        cache
+            .put(&request, other_org(), false, &response("b"), "m")
+            .await
+            .unwrap();
 
         let removed = cache.invalidate_org(org()).await.unwrap();
         assert_eq!(removed, 1);
 
         assert!(cache.get(&request, org(), false).await.unwrap().is_none());
-        assert!(cache.get(&request, other_org(), false).await.unwrap().is_some());
+        assert!(cache
+            .get(&request, other_org(), false)
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
@@ -200,7 +222,10 @@ mod tests {
         let cache = ExactCache::new(&store, Duration::from_secs(60));
 
         let first = NormalizedRequest::simple("gpt-4o", "What is 2+2?");
-        cache.put(&first, org(), false, &response("4"), "m").await.unwrap();
+        cache
+            .put(&first, org(), false, &response("4"), "m")
+            .await
+            .unwrap();
 
         let second = NormalizedRequest::simple("gpt-4o", "What is 2+3?");
         assert!(cache.get(&second, org(), false).await.unwrap().is_none());
@@ -212,7 +237,10 @@ mod tests {
         let cache = ExactCache::new(&store, Duration::from_millis(20));
         let request = NormalizedRequest::simple("gpt-4o", "hi");
 
-        cache.put(&request, org(), false, &response("hello"), "m").await.unwrap();
+        cache
+            .put(&request, org(), false, &response("hello"), "m")
+            .await
+            .unwrap();
         assert!(cache.get(&request, org(), false).await.unwrap().is_some());
 
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -225,7 +253,10 @@ mod tests {
         let cache = ExactCache::new(&store, Duration::from_secs(60));
         let request = NormalizedRequest::simple("gpt-4o", "hi");
 
-        assert!(!cache.put(&request, org(), true, &response("x"), "m").await.unwrap());
+        assert!(!cache
+            .put(&request, org(), true, &response("x"), "m")
+            .await
+            .unwrap());
         assert!(cache.get(&request, org(), true).await.unwrap().is_none());
 
         // And nothing was written that a later non-zero-retention read could find.
@@ -239,11 +270,17 @@ mod tests {
 
         let mut tools = NormalizedRequest::simple("gpt-4o", "book a flight");
         tools.tools = vec![serde_json::json!({"type": "function", "function": {"name": "b"}})];
-        assert!(!cache.put(&tools, org(), false, &response("booked"), "m").await.unwrap());
+        assert!(!cache
+            .put(&tools, org(), false, &response("booked"), "m")
+            .await
+            .unwrap());
 
         let mut creative = NormalizedRequest::simple("gpt-4o", "write a poem");
         creative.temperature = Some(0.95);
-        assert!(!cache.put(&creative, org(), false, &response("poem"), "m").await.unwrap());
+        assert!(!cache
+            .put(&creative, org(), false, &response("poem"), "m")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -252,7 +289,10 @@ mod tests {
         let store = MemoryStore::new();
         let request = NormalizedRequest::simple("gpt-4o", "hi");
         let key = compute(&request, org()).cache_key(org());
-        store.set_ex(&key, "{not valid json", Duration::from_secs(60)).await.unwrap();
+        store
+            .set_ex(&key, "{not valid json", Duration::from_secs(60))
+            .await
+            .unwrap();
 
         let cache = ExactCache::new(&store, Duration::from_secs(60));
         assert!(cache.get(&request, org(), false).await.unwrap().is_none());
@@ -266,7 +306,10 @@ mod tests {
         let cache = ExactCache::new(&store, Duration::from_secs(60));
         let request = NormalizedRequest::simple("gpt-4o", "hi");
 
-        cache.put(&request, org(), false, &response("x"), "m").await.unwrap();
+        cache
+            .put(&request, org(), false, &response("x"), "m")
+            .await
+            .unwrap();
         let hit = cache.get(&request, org(), false).await.unwrap().unwrap();
         assert!(hit.age_seconds() >= 0);
         assert!(hit.age_seconds() < 5);
@@ -283,7 +326,10 @@ mod tests {
         original.raw = Some(serde_json::json!({"system_fingerprint": "fp_1"}));
         original.tool_calls = Some(serde_json::json!([{"id": "call_1"}]));
 
-        cache.put(&request, org(), false, &original, "openai/gpt-4o").await.unwrap();
+        cache
+            .put(&request, org(), false, &original, "openai/gpt-4o")
+            .await
+            .unwrap();
         let hit = cache.get(&request, org(), false).await.unwrap().unwrap();
 
         assert_eq!(hit.response, original);

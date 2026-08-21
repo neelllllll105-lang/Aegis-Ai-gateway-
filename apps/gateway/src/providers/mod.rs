@@ -52,12 +52,18 @@ pub struct Credential {
 impl Credential {
     /// Construct from a plaintext key.
     pub fn new(api_key: impl Into<String>) -> Credential {
-        Credential { api_key: api_key.into(), base_url: None }
+        Credential {
+            api_key: api_key.into(),
+            base_url: None,
+        }
     }
 
     /// Construct with a custom base URL.
     pub fn with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Credential {
-        Credential { api_key: api_key.into(), base_url: Some(base_url.into()) }
+        Credential {
+            api_key: api_key.into(),
+            base_url: Some(base_url.into()),
+        }
     }
 }
 
@@ -104,7 +110,7 @@ pub trait Provider: Send + Sync {
     /// True when this adapter can serve `model`.
     fn supports(&self, model: &str) -> bool {
         let bare = model.split_once('/').map(|(_, m)| m).unwrap_or(model);
-        self.supported_models().iter().any(|m| *m == bare)
+        self.supported_models().contains(&bare)
     }
 
     /// Execute a non-streaming chat completion.
@@ -154,11 +160,12 @@ pub trait Provider: Send + Sync {
             });
         }
 
-        let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| AegisError::Provider {
-            provider: self.id().to_string(),
-            status: 502,
-            message: format!("unparseable response: {e}"),
-        })?;
+        let json: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| AegisError::Provider {
+                provider: self.id().to_string(),
+                status: 502,
+                message: format!("unparseable response: {e}"),
+            })?;
 
         self.parse_response(&json)
     }
@@ -279,10 +286,20 @@ mod tests {
     fn builtin_registry_has_every_shipped_provider() {
         let registry = ProviderRegistry::with_builtins();
         for expected in [
-            "openai", "anthropic", "google", "custom", "openrouter", "moonshot", "deepseek",
-            "mistral", "groq",
+            "openai",
+            "anthropic",
+            "google",
+            "custom",
+            "openrouter",
+            "moonshot",
+            "deepseek",
+            "mistral",
+            "groq",
         ] {
-            assert!(registry.get(expected).is_some(), "missing provider: {expected}");
+            assert!(
+                registry.get(expected).is_some(),
+                "missing provider: {expected}"
+            );
         }
         assert_eq!(registry.len(), 9);
     }
@@ -292,10 +309,16 @@ mod tests {
         let registry = ProviderRegistry::with_builtins();
         assert_eq!(registry.for_model("openai/gpt-4o").unwrap().id(), "openai");
         assert_eq!(
-            registry.for_model("anthropic/claude-sonnet-4-5").unwrap().id(),
+            registry
+                .for_model("anthropic/claude-sonnet-4-5")
+                .unwrap()
+                .id(),
             "anthropic"
         );
-        assert_eq!(registry.for_model("google/gemini-2.5-flash").unwrap().id(), "google");
+        assert_eq!(
+            registry.for_model("google/gemini-2.5-flash").unwrap().id(),
+            "google"
+        );
     }
 
     #[test]
@@ -325,15 +348,25 @@ mod tests {
             extract_provider_error(r#"{"error":{"message":"invalid model"}}"#),
             "invalid model"
         );
-        assert_eq!(extract_provider_error(r#"{"error":"quota exceeded"}"#), "quota exceeded");
-        assert_eq!(extract_provider_error(r#"{"message":"bad request"}"#), "bad request");
-        assert_eq!(extract_provider_error(r#"{"detail":"not found"}"#), "not found");
+        assert_eq!(
+            extract_provider_error(r#"{"error":"quota exceeded"}"#),
+            "quota exceeded"
+        );
+        assert_eq!(
+            extract_provider_error(r#"{"message":"bad request"}"#),
+            "bad request"
+        );
+        assert_eq!(
+            extract_provider_error(r#"{"detail":"not found"}"#),
+            "not found"
+        );
     }
 
     #[test]
     fn provider_error_extraction_redacts_leaked_credentials() {
         // Providers sometimes echo the offending key back in the error message.
-        let body = r#"{"error":{"message":"Incorrect API key provided: sk-proj-abcdefghijklmnop123456"}}"#;
+        let body =
+            r#"{"error":{"message":"Incorrect API key provided: sk-proj-abcdefghijklmnop123456"}}"#;
         let extracted = extract_provider_error(body);
         assert!(!extracted.contains("abcdefghijklmnop"), "{extracted}");
         assert!(extracted.contains("[REDACTED]"));
@@ -346,7 +379,10 @@ mod tests {
         assert!(extracted.len() <= 500);
 
         assert_eq!(extract_provider_error(""), "");
-        assert_eq!(extract_provider_error("<html>502 Bad Gateway</html>"), "<html>502 Bad Gateway</html>");
+        assert_eq!(
+            extract_provider_error("<html>502 Bad Gateway</html>"),
+            "<html>502 Bad Gateway</html>"
+        );
     }
 
     #[test]

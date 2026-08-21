@@ -104,7 +104,10 @@ impl Message {
 
     /// Textual content, or an empty string.
     pub fn text_content(&self) -> String {
-        self.content.as_ref().map(|c| c.as_text()).unwrap_or_default()
+        self.content
+            .as_ref()
+            .map(|c| c.as_text())
+            .unwrap_or_default()
     }
 }
 
@@ -450,8 +453,14 @@ mod tests {
 
     #[test]
     fn routing_hint_parsing_is_forgiving() {
-        assert_eq!(RoutingHint::parse(Some("passthrough")), RoutingHint::Passthrough);
-        assert_eq!(RoutingHint::parse(Some("  PASSTHROUGH ")), RoutingHint::Passthrough);
+        assert_eq!(
+            RoutingHint::parse(Some("passthrough")),
+            RoutingHint::Passthrough
+        );
+        assert_eq!(
+            RoutingHint::parse(Some("  PASSTHROUGH ")),
+            RoutingHint::Passthrough
+        );
         assert_eq!(RoutingHint::parse(Some("cheap")), RoutingHint::Cheap);
         assert_eq!(RoutingHint::parse(Some("nonsense")), RoutingHint::Auto);
         assert_eq!(RoutingHint::parse(None), RoutingHint::Auto);
@@ -490,7 +499,10 @@ mod tests {
         });
         let req: NormalizedRequest = serde_json::from_value(body).unwrap();
         assert!(req.requires_vision());
-        assert_eq!(req.last_user_message().as_deref(), Some("What is in this picture?"));
+        assert_eq!(
+            req.last_user_message().as_deref(),
+            Some("What is in this picture?")
+        );
     }
 
     #[test]

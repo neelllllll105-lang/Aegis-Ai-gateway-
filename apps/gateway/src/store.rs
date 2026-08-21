@@ -440,7 +440,10 @@ impl KvStore for MemoryStore {
         };
         state.values.insert(
             key.to_string(),
-            Entry { value: updated.to_string(), expires_at_ms },
+            Entry {
+                value: updated.to_string(),
+                expires_at_ms,
+            },
         );
         Ok(updated)
     }
@@ -480,7 +483,10 @@ impl KvStore for MemoryStore {
         state.stream_seq += 1;
         let id = format!("{}-{}", now_millis(), state.stream_seq);
         let entries = state.streams.entry(stream.to_string()).or_default();
-        entries.push(StreamEntry { id: id.clone(), payload: payload.to_string() });
+        entries.push(StreamEntry {
+            id: id.clone(),
+            payload: payload.to_string(),
+        });
         if entries.len() > max_len {
             let excess = entries.len() - max_len;
             entries.drain(0..excess);
@@ -548,20 +554,39 @@ mod tests {
         // This is how a tenant's cache is invalidated. Deleting one org's keys must
         // never touch another's.
         let s = store();
-        s.set_ex("cache:org-a:one", "1", Duration::from_secs(60)).await.unwrap();
-        s.set_ex("cache:org-a:two", "2", Duration::from_secs(60)).await.unwrap();
-        s.set_ex("cache:org-b:one", "3", Duration::from_secs(60)).await.unwrap();
+        s.set_ex("cache:org-a:one", "1", Duration::from_secs(60))
+            .await
+            .unwrap();
+        s.set_ex("cache:org-a:two", "2", Duration::from_secs(60))
+            .await
+            .unwrap();
+        s.set_ex("cache:org-b:one", "3", Duration::from_secs(60))
+            .await
+            .unwrap();
 
         assert_eq!(s.del_prefix("cache:org-a:").await.unwrap(), 2);
         assert_eq!(s.get("cache:org-a:one").await.unwrap(), None);
-        assert_eq!(s.get("cache:org-b:one").await.unwrap(), Some("3".to_string()));
+        assert_eq!(
+            s.get("cache:org-b:one").await.unwrap(),
+            Some("3".to_string())
+        );
     }
 
     #[tokio::test]
     async fn counters_accumulate_and_keep_their_original_ttl() {
         let s = store();
-        assert_eq!(s.incr_by("spend", 100, Some(Duration::from_secs(60))).await.unwrap(), 100);
-        assert_eq!(s.incr_by("spend", 50, Some(Duration::from_secs(60))).await.unwrap(), 150);
+        assert_eq!(
+            s.incr_by("spend", 100, Some(Duration::from_secs(60)))
+                .await
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            s.incr_by("spend", 50, Some(Duration::from_secs(60)))
+                .await
+                .unwrap(),
+            150
+        );
         // A monthly spend counter must not have its expiry pushed forward on every
         // request, or it would never roll over.
         assert_eq!(s.incr_by("spend", -50, None).await.unwrap(), 100);
@@ -579,7 +604,10 @@ mod tests {
         let blocked = s.rate_limit("key:abc", 5, window).await.unwrap();
         assert!(!blocked.allowed);
         assert_eq!(blocked.remaining, 0);
-        assert!(blocked.retry_after_secs >= 1, "must give a usable retry hint");
+        assert!(
+            blocked.retry_after_secs >= 1,
+            "must give a usable retry hint"
+        );
     }
 
     #[tokio::test]
@@ -632,13 +660,20 @@ mod tests {
         }
         let entries = s.stream_read("usage", "0", 100).await.unwrap();
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].payload, "7", "oldest entries should be dropped first");
+        assert_eq!(
+            entries[0].payload, "7",
+            "oldest entries should be dropped first"
+        );
     }
 
     #[tokio::test]
     async fn reading_an_unknown_stream_is_empty_not_an_error() {
         let s = store();
-        assert!(s.stream_read("nothing-here", "0", 10).await.unwrap().is_empty());
+        assert!(s
+            .stream_read("nothing-here", "0", 10)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -651,7 +686,10 @@ mod tests {
         for _ in 0..50 {
             let s = Arc::clone(&s);
             handles.push(tokio::spawn(async move {
-                s.rate_limit("burst", 10, Duration::from_secs(60)).await.unwrap().allowed
+                s.rate_limit("burst", 10, Duration::from_secs(60))
+                    .await
+                    .unwrap()
+                    .allowed
             }));
         }
         let mut admitted = 0;

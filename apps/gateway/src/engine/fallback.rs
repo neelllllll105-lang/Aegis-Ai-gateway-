@@ -54,18 +54,12 @@ impl CircuitState {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct BreakerEntry {
     consecutive_failures: u32,
     opened_at: Option<Instant>,
     /// A probe is in flight, so no other request should also probe.
     probing: bool,
-}
-
-impl Default for BreakerEntry {
-    fn default() -> Self {
-        BreakerEntry { consecutive_failures: 0, opened_at: None, probing: false }
-    }
 }
 
 /// Per-provider circuit breakers.
@@ -102,17 +96,15 @@ impl ProviderHealth {
 
     /// Record a successful call, closing the circuit.
     pub fn record_success(&self, provider: &str) {
-        self.breakers.insert(provider.to_string(), BreakerEntry::default());
+        self.breakers
+            .insert(provider.to_string(), BreakerEntry::default());
     }
 
     /// Record a failed call, opening the circuit once the threshold is reached.
     ///
     /// Returns the state after recording.
     pub fn record_failure(&self, provider: &str) -> CircuitState {
-        let mut entry = self
-            .breakers
-            .entry(provider.to_string())
-            .or_default();
+        let mut entry = self.breakers.entry(provider.to_string()).or_default();
 
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         entry.probing = false;
@@ -277,7 +269,10 @@ mod tests {
         let health = ProviderHealth::new();
         for i in 1..FAILURE_THRESHOLD {
             assert_eq!(health.record_failure("openai"), CircuitState::Closed);
-            assert!(health.is_available("openai"), "opened early after {i} failures");
+            assert!(
+                health.is_available("openai"),
+                "opened early after {i} failures"
+            );
         }
         assert_eq!(health.record_failure("openai"), CircuitState::Open);
         assert!(!health.is_available("openai"));
@@ -306,7 +301,10 @@ mod tests {
             health.record_failure("openai");
         }
         assert!(!health.is_available("openai"));
-        assert!(health.is_available("anthropic"), "one provider took down another");
+        assert!(
+            health.is_available("anthropic"),
+            "one provider took down another"
+        );
         assert!(health.is_available("google"));
     }
 
@@ -327,7 +325,10 @@ mod tests {
         assert_eq!(health.state("openai"), CircuitState::HalfOpen);
         assert!(health.try_probe("openai"), "the first caller should probe");
         for _ in 0..10 {
-            assert!(!health.try_probe("openai"), "a second caller must not also probe");
+            assert!(
+                !health.try_probe("openai"),
+                "a second caller must not also probe"
+            );
         }
     }
 
@@ -366,7 +367,11 @@ mod tests {
         );
         assert_eq!(health.state("openai"), CircuitState::HalfOpen);
         assert_eq!(health.record_failure("openai"), CircuitState::Open);
-        assert_eq!(health.state("openai"), CircuitState::Open, "window did not restart");
+        assert_eq!(
+            health.state("openai"),
+            CircuitState::Open,
+            "window did not restart"
+        );
     }
 
     #[test]

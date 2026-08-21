@@ -115,8 +115,7 @@ impl Config {
         let config = Config {
             environment,
             bind_address: opt("AEGIS_BIND").unwrap_or_else(|| "0.0.0.0:8080".to_string()),
-            base_url: opt("AEGIS_BASE_URL")
-                .unwrap_or_else(|| "http://localhost:8080".to_string()),
+            base_url: opt("AEGIS_BASE_URL").unwrap_or_else(|| "http://localhost:8080".to_string()),
             app_url: opt("AEGIS_APP_URL").unwrap_or_else(|| "http://localhost:3000".to_string()),
 
             database_url: opt("DATABASE_URL"),
@@ -130,7 +129,8 @@ impl Config {
             shared_provider_keys: load_shared_keys(),
 
             resend_api_key: opt("RESEND_API_KEY"),
-            email_from: opt("AEGIS_EMAIL_FROM").unwrap_or_else(|| "Aegis <noreply@aegis.dev>".into()),
+            email_from: opt("AEGIS_EMAIL_FROM")
+                .unwrap_or_else(|| "Aegis <noreply@aegis.dev>".into()),
 
             stripe_secret_key: opt("STRIPE_SECRET_KEY"),
             stripe_webhook_secret: opt("STRIPE_WEBHOOK_SECRET"),
@@ -239,9 +239,7 @@ fn load_master_key(environment: Environment) -> Result<[u8; 32]> {
         Ok(encoded) if !encoded.trim().is_empty() => {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(encoded.trim())
-                .map_err(|_| {
-                    AegisError::Config("AEGIS_MASTER_KEY must be valid base64".into())
-                })?;
+                .map_err(|_| AegisError::Config("AEGIS_MASTER_KEY must be valid base64".into()))?;
             let len = bytes.len();
             <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
                 AegisError::Config(format!(
@@ -263,8 +261,15 @@ fn load_master_key(environment: Environment) -> Result<[u8; 32]> {
 /// Collect `SHARED_<PROVIDER>_KEYS` for every provider we ship an adapter for.
 fn load_shared_keys() -> std::collections::HashMap<String, Vec<String>> {
     let providers = [
-        "openai", "anthropic", "google", "openrouter", "moonshot", "deepseek", "mistral",
-        "groq", "custom",
+        "openai",
+        "anthropic",
+        "google",
+        "openrouter",
+        "moonshot",
+        "deepseek",
+        "mistral",
+        "groq",
+        "custom",
     ];
     providers
         .iter()

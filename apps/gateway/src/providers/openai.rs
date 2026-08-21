@@ -88,10 +88,17 @@ pub fn parse_response(body: &serde_json::Value) -> Result<NormalizedResponse> {
         .get("usage")
         .map(|u| TokenUsage {
             input_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            output_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            output_tokens: u
+                .get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
             estimated: false,
         })
-        .unwrap_or(TokenUsage { input_tokens: 0, output_tokens: 0, estimated: true });
+        .unwrap_or(TokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            estimated: true,
+        });
 
     Ok(NormalizedResponse {
         id: body
@@ -139,11 +146,17 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let usage = json.get("usage").filter(|u| !u.is_null()).map(|u| TokenUsage {
-        input_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-        output_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-        estimated: false,
-    });
+    let usage = json
+        .get("usage")
+        .filter(|u| !u.is_null())
+        .map(|u| TokenUsage {
+            input_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            output_tokens: u
+                .get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            estimated: false,
+        });
 
     // A chunk with no delta, no finish reason, and no usage carries nothing.
     if delta.is_empty() && finish_reason.is_none() && usage.is_none() {
@@ -354,7 +367,10 @@ mod tests {
     fn streaming_requests_ask_for_usage() {
         // Without stream_options.include_usage we cannot bill a streamed request from
         // reported tokens and would have to estimate every one.
-        let req = NormalizedRequest { stream: true, ..request() };
+        let req = NormalizedRequest {
+            stream: true,
+            ..request()
+        };
         let body = build_body(&req, "gpt-4o");
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
@@ -364,7 +380,8 @@ mod tests {
     fn unknown_parameters_pass_through() {
         let mut req = request();
         req.extra.insert("seed".into(), serde_json::json!(42));
-        req.extra.insert("presence_penalty".into(), serde_json::json!(0.5));
+        req.extra
+            .insert("presence_penalty".into(), serde_json::json!(0.5));
         let body = build_body(&req, "gpt-4o");
         assert_eq!(body["seed"], 42);
         assert_eq!(body["presence_penalty"], 0.5);
@@ -374,7 +391,8 @@ mod tests {
     fn explicit_parameters_win_over_extras() {
         // If a caller somehow supplies both, the modelled field is authoritative.
         let mut req = request();
-        req.extra.insert("temperature".into(), serde_json::json!(0.99));
+        req.extra
+            .insert("temperature".into(), serde_json::json!(0.99));
         let body = build_body(&req, "gpt-4o");
         assert_eq!(body["temperature"], 0.2);
     }
@@ -459,7 +477,10 @@ mod tests {
         });
         let parsed = parse_response(&body).unwrap();
         assert_eq!(parsed.content, "", "null content must not panic");
-        assert_eq!(parsed.tool_calls.as_ref().unwrap()[0]["function"]["name"], "get_weather");
+        assert_eq!(
+            parsed.tool_calls.as_ref().unwrap()[0]["function"]["name"],
+            "get_weather"
+        );
         assert_eq!(parsed.finish_reason.as_deref(), Some("tool_calls"));
     }
 
@@ -483,11 +504,9 @@ mod tests {
 
     #[test]
     fn stream_chunks_decode_content_deltas() {
-        let chunk = parse_stream_chunk(
-            r#"{"choices":[{"delta":{"content":"Hello"},"index":0}]}"#,
-        )
-        .unwrap()
-        .unwrap();
+        let chunk = parse_stream_chunk(r#"{"choices":[{"delta":{"content":"Hello"},"index":0}]}"#)
+            .unwrap()
+            .unwrap();
         assert_eq!(chunk.delta, "Hello");
         assert!(chunk.finish_reason.is_none());
     }
@@ -508,9 +527,11 @@ mod tests {
     #[test]
     fn role_only_first_chunk_is_ignored() {
         // OpenAI opens every stream with a delta carrying only the role.
-        assert!(parse_stream_chunk(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#)
-            .unwrap()
-            .is_none());
+        assert!(
+            parse_stream_chunk(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

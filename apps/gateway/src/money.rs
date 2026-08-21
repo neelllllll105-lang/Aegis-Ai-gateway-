@@ -210,7 +210,10 @@ mod tests {
     #[test]
     fn token_cost_is_proportional() {
         let rate = MicroCents::from_usd_per_mtok(2.50); // $2.50 / 1M tokens
-        assert_eq!(MicroCents::cost_for_tokens(rate, 1_000_000), MicroCents(2_500_000));
+        assert_eq!(
+            MicroCents::cost_for_tokens(rate, 1_000_000),
+            MicroCents(2_500_000)
+        );
         assert_eq!(MicroCents::cost_for_tokens(rate, 1_000), MicroCents(2_500));
         assert_eq!(MicroCents::cost_for_tokens(rate, 0), MicroCents::ZERO);
     }

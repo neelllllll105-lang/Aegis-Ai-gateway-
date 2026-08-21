@@ -147,8 +147,8 @@ mod tests {
     use super::*;
     use crate::db::repo::KeyContext;
     use crate::metering::pricing::PricingTable;
-    use crate::metering::usage::{self, UsageEvent};
     use crate::metering::savings::SavingsBreakdown;
+    use crate::metering::usage::{self, UsageEvent};
     use crate::store::MemoryStore;
     use crate::types::{CacheOutcome, RoutingReason, TokenUsage};
     use uuid::Uuid;
@@ -180,7 +180,11 @@ mod tests {
                 "gpt-4o".into(),
                 "gpt-4o".into(),
                 "openai".into(),
-                TokenUsage { input_tokens: 10, output_tokens: 10, estimated: false },
+                TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 10,
+                    estimated: false,
+                },
                 SavingsBreakdown::compute(MicroCents(cost), MicroCents(cost), 2_000),
                 10,
                 0.1,
@@ -199,7 +203,9 @@ mod tests {
     async fn requests_under_budget_are_allowed() {
         let store = MemoryStore::new();
         let context = auth("pro");
-        let decision = check(&store, &context, Some(1_000_000), None).await.unwrap();
+        let decision = check(&store, &context, Some(1_000_000), None)
+            .await
+            .unwrap();
         assert!(decision.allowed);
         assert_eq!(decision.spend, MicroCents::ZERO);
     }
@@ -210,7 +216,9 @@ mod tests {
         let context = auth("pro");
         spend(&store, &context, 1_500_000).await;
 
-        let decision = check(&store, &context, Some(1_000_000), None).await.unwrap();
+        let decision = check(&store, &context, Some(1_000_000), None)
+            .await
+            .unwrap();
         assert!(!decision.allowed);
         assert_eq!(decision.scope, "organization");
 
@@ -227,7 +235,9 @@ mod tests {
         context.monthly_budget_mc = Some(500_000);
         spend(&store, &context, 600_000).await;
 
-        let decision = check(&store, &context, Some(10_000_000), None).await.unwrap();
+        let decision = check(&store, &context, Some(10_000_000), None)
+            .await
+            .unwrap();
         assert!(!decision.allowed);
         assert_eq!(decision.scope, "key");
         assert_eq!(decision.limit, Some(MicroCents(500_000)));
@@ -240,7 +250,9 @@ mod tests {
         context.team_id = Some(Uuid::new_v4());
         spend(&store, &context, 2_000_000).await;
 
-        let decision = check(&store, &context, None, Some(1_000_000)).await.unwrap();
+        let decision = check(&store, &context, None, Some(1_000_000))
+            .await
+            .unwrap();
         assert!(!decision.allowed);
         assert_eq!(decision.scope, "team");
     }
@@ -252,7 +264,10 @@ mod tests {
         spend(&store, &context, 999_999_999).await;
 
         let decision = check(&store, &context, None, None).await.unwrap();
-        assert!(decision.allowed, "an org with no budget must not be blocked");
+        assert!(
+            decision.allowed,
+            "an org with no budget must not be blocked"
+        );
     }
 
     #[tokio::test]
@@ -263,7 +278,9 @@ mod tests {
         let context = auth("pro");
         spend(&store, &context, 1_000_000).await;
 
-        let decision = check(&store, &context, Some(1_000_000), None).await.unwrap();
+        let decision = check(&store, &context, Some(1_000_000), None)
+            .await
+            .unwrap();
         assert!(!decision.allowed);
     }
 
@@ -274,8 +291,18 @@ mod tests {
         let light = auth("pro");
         spend(&store, &heavy, 5_000_000).await;
 
-        assert!(!check(&store, &heavy, Some(1_000_000), None).await.unwrap().allowed);
-        assert!(check(&store, &light, Some(1_000_000), None).await.unwrap().allowed);
+        assert!(
+            !check(&store, &heavy, Some(1_000_000), None)
+                .await
+                .unwrap()
+                .allowed
+        );
+        assert!(
+            check(&store, &light, Some(1_000_000), None)
+                .await
+                .unwrap()
+                .allowed
+        );
     }
 
     #[tokio::test]
@@ -283,12 +310,16 @@ mod tests {
         let store = MemoryStore::new();
         let context = auth("free");
 
-        assert!(check_free_tier_allowance(&store, &context, 3).await.unwrap());
+        assert!(check_free_tier_allowance(&store, &context, 3)
+            .await
+            .unwrap());
         for _ in 0..3 {
             spend(&store, &context, 0).await;
         }
         assert!(
-            !check_free_tier_allowance(&store, &context, 3).await.unwrap(),
+            !check_free_tier_allowance(&store, &context, 3)
+                .await
+                .unwrap(),
             "the free allowance must stop at the cap"
         );
     }
@@ -300,7 +331,9 @@ mod tests {
         for _ in 0..100 {
             spend(&store, &context, 0).await;
         }
-        assert!(check_free_tier_allowance(&store, &context, 3).await.unwrap());
+        assert!(check_free_tier_allowance(&store, &context, 3)
+            .await
+            .unwrap());
     }
 
     #[test]
@@ -324,7 +357,10 @@ mod tests {
         };
         assert_eq!(decision.utilization_percent(), 0.0);
 
-        let zero_limit = BudgetDecision { limit: Some(MicroCents::ZERO), ..decision };
+        let zero_limit = BudgetDecision {
+            limit: Some(MicroCents::ZERO),
+            ..decision
+        };
         assert_eq!(zero_limit.utilization_percent(), 0.0);
     }
 
@@ -342,8 +378,14 @@ mod tests {
     fn cost_projection_uses_max_tokens_when_supplied() {
         let pricing = PricingTable::with_seed_data();
         let base = NormalizedRequest::simple("gpt-4o", "hi");
-        let capped = NormalizedRequest { max_tokens: Some(10), ..base.clone() };
-        let generous = NormalizedRequest { max_tokens: Some(4_000), ..base };
+        let capped = NormalizedRequest {
+            max_tokens: Some(10),
+            ..base.clone()
+        };
+        let generous = NormalizedRequest {
+            max_tokens: Some(4_000),
+            ..base
+        };
 
         assert!(project_cost(&generous, &pricing) > project_cost(&capped, &pricing));
     }

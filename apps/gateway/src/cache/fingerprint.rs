@@ -237,13 +237,22 @@ mod tests {
     fn sampling_parameters_change_the_fingerprint() {
         let base = NormalizedRequest::simple("gpt-4o", "hi");
 
-        let warm = NormalizedRequest { temperature: Some(0.5), ..base.clone() };
+        let warm = NormalizedRequest {
+            temperature: Some(0.5),
+            ..base.clone()
+        };
         assert_ne!(compute(&base, org()), compute(&warm, org()));
 
-        let capped = NormalizedRequest { max_tokens: Some(100), ..base.clone() };
+        let capped = NormalizedRequest {
+            max_tokens: Some(100),
+            ..base.clone()
+        };
         assert_ne!(compute(&base, org()), compute(&capped, org()));
 
-        let nucleus = NormalizedRequest { top_p: Some(0.9), ..base.clone() };
+        let nucleus = NormalizedRequest {
+            top_p: Some(0.9),
+            ..base.clone()
+        };
         assert_ne!(compute(&base, org()), compute(&nucleus, org()));
     }
 
@@ -287,7 +296,9 @@ mod tests {
         let mut with_seed = NormalizedRequest::simple("gpt-4o", "hi");
         with_seed.extra.insert("seed".into(), serde_json::json!(42));
         let mut other_seed = NormalizedRequest::simple("gpt-4o", "hi");
-        other_seed.extra.insert("seed".into(), serde_json::json!(43));
+        other_seed
+            .extra
+            .insert("seed".into(), serde_json::json!(43));
 
         assert_ne!(compute(&with_seed, org()), compute(&other_seed, org()));
     }
@@ -337,7 +348,10 @@ mod tests {
     fn high_temperature_requests_are_never_cached() {
         let mut request = NormalizedRequest::simple("gpt-4o", "write me a poem");
         request.temperature = Some(0.9);
-        assert_eq!(cacheability(&request, false), Cacheability::NonDeterministic);
+        assert_eq!(
+            cacheability(&request, false),
+            Cacheability::NonDeterministic
+        );
 
         // At and below the ceiling, caching is allowed.
         request.temperature = Some(CACHE_TEMPERATURE_CEILING);
@@ -348,7 +362,10 @@ mod tests {
 
     #[test]
     fn streaming_requests_are_not_cached() {
-        let request = NormalizedRequest { stream: true, ..NormalizedRequest::simple("gpt-4o", "hi") };
+        let request = NormalizedRequest {
+            stream: true,
+            ..NormalizedRequest::simple("gpt-4o", "hi")
+        };
         assert_eq!(cacheability(&request, false), Cacheability::Streaming);
     }
 

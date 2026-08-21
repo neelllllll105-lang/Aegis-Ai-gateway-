@@ -26,51 +26,161 @@ use crate::types::{Complexity, NormalizedRequest};
 
 /// Words that signal genuine reasoning work rather than recall or formatting.
 const REASONING_TERMS: &[&str] = &[
-    "analyze", "analyse", "reason", "prove", "derive", "debug", "architect", "design",
-    "optimize", "optimise", "refactor", "diagnose", "investigate", "evaluate", "compare",
-    "trade-off", "tradeoff", "root cause", "why does", "why is", "explain how",
-    "step by step", "think through", "strategy", "algorithm", "complexity analysis",
+    "analyze",
+    "analyse",
+    "reason",
+    "prove",
+    "derive",
+    "debug",
+    "architect",
+    "design",
+    "optimize",
+    "optimise",
+    "refactor",
+    "diagnose",
+    "investigate",
+    "evaluate",
+    "compare",
+    "trade-off",
+    "tradeoff",
+    "root cause",
+    "why does",
+    "why is",
+    "explain how",
+    "step by step",
+    "think through",
+    "strategy",
+    "algorithm",
+    "complexity analysis",
 ];
 
 /// Words that signal a mechanical, low-difficulty task.
 const TRIVIAL_TERMS: &[&str] = &[
-    "translate", "spell", "capitalize", "uppercase", "lowercase", "rephrase", "reword",
-    "what is the capital", "convert", "format as", "list the", "define ", "synonym",
-    "antonym", "abbreviation", "emoji", "tl;dr", "in one word", "yes or no",
+    "translate",
+    "spell",
+    "capitalize",
+    "uppercase",
+    "lowercase",
+    "rephrase",
+    "reword",
+    "what is the capital",
+    "convert",
+    "format as",
+    "list the",
+    "define ",
+    "synonym",
+    "antonym",
+    "abbreviation",
+    "emoji",
+    "tl;dr",
+    "in one word",
+    "yes or no",
 ];
 
 /// Phrases asking for explanation, comparison, or drafting. Not trivial recall, not deep
 /// reasoning — the middle band, and the largest source of routable savings.
 const EXPLANATORY_TERMS: &[&str] = &[
-    "explain", "describe", "difference between", "differences between", "pros and cons",
-    "compare", "summarize", "summarise", "outline", "draft ", "write an email",
-    "how does", "how do i", "what are the", "walk me through", "overview of",
-    "best practice", "when should i", "give an example",
+    "explain",
+    "describe",
+    "difference between",
+    "differences between",
+    "pros and cons",
+    "compare",
+    "summarize",
+    "summarise",
+    "outline",
+    "draft ",
+    "write an email",
+    "how does",
+    "how do i",
+    "what are the",
+    "walk me through",
+    "overview of",
+    "best practice",
+    "when should i",
+    "give an example",
 ];
 
 /// Connectives that chain one request into several. "Analyze X, diagnose Y, and
 /// architect Z" is three tasks in one turn, and a model that handles each in isolation
 /// can still fail to hold them together.
 const CHAINING_TERMS: &[&str] = &[
-    ", and ", ", then ", " and then ", " after that", " finally,", " also ", "1.", "2.",
-    " first, ", " second, ", " next, ", " and ",
+    ", and ",
+    ", then ",
+    " and then ",
+    " after that",
+    " finally,",
+    " also ",
+    "1.",
+    "2.",
+    " first, ",
+    " second, ",
+    " next, ",
+    " and ",
 ];
 
 /// Verbs that, combined with code vocabulary, mean "produce or change code" — a
 /// materially harder task than answering a question about code.
 const CODE_INTENT_VERBS: &[&str] = &[
-    "write a", "write the", "implement", "create a", "build a", "generate a", "add a",
-    "fix the", "fix this", "refactor", "rewrite", "port ", "migrate", "extend the",
+    "write a",
+    "write the",
+    "implement",
+    "create a",
+    "build a",
+    "generate a",
+    "add a",
+    "fix the",
+    "fix this",
+    "refactor",
+    "rewrite",
+    "port ",
+    "migrate",
+    "extend the",
 ];
 
 /// Tokens that indicate code is present or expected.
 const CODE_TERMS: &[&str] = &[
-    "function", "class ", "import ", "def ", "const ", "return", "async ", "await",
-    "select ", "from ", "where ", "null", "undefined", "exception", "stack trace",
-    "traceback", "compile", "segfault", "npm ", "cargo ", "pip ", "docker", "kubernetes",
-    "regex", "api endpoint", "unit test", "sql", "query", "python", "javascript",
-    "typescript", "rust", "css", "html", "endpoint", "database", "schema", "test case",
-    "component", "middleware", "deployment",
+    "function",
+    "class ",
+    "import ",
+    "def ",
+    "const ",
+    "return",
+    "async ",
+    "await",
+    "select ",
+    "from ",
+    "where ",
+    "null",
+    "undefined",
+    "exception",
+    "stack trace",
+    "traceback",
+    "compile",
+    "segfault",
+    "npm ",
+    "cargo ",
+    "pip ",
+    "docker",
+    "kubernetes",
+    "regex",
+    "api endpoint",
+    "unit test",
+    "sql",
+    "query",
+    "python",
+    "javascript",
+    "typescript",
+    "rust",
+    "css",
+    "html",
+    "endpoint",
+    "database",
+    "schema",
+    "test case",
+    "component",
+    "middleware",
+    "deployment",
 ];
 
 /// Extracted, normalised signals. Every field is in `0.0..=1.0` so weights are directly
@@ -119,16 +229,25 @@ impl Features {
 
         let code_block = if text.contains("```") { 1.0 } else { 0.0 };
         let code_hits = CODE_TERMS.iter().filter(|t| lowered.contains(**t)).count() as f32;
-        let reasoning_hits = REASONING_TERMS.iter().filter(|t| lowered.contains(**t)).count() as f32;
+        let reasoning_hits = REASONING_TERMS
+            .iter()
+            .filter(|t| lowered.contains(**t))
+            .count() as f32;
         let has_code_intent = (code_hits > 0.0 || text.contains("```"))
             && CODE_INTENT_VERBS.iter().any(|v| lowered.contains(*v));
-        let trivial_hits = TRIVIAL_TERMS.iter().filter(|t| lowered.contains(**t)).count() as f32;
+        let trivial_hits = TRIVIAL_TERMS
+            .iter()
+            .filter(|t| lowered.contains(**t))
+            .count() as f32;
         let is_explanatory = EXPLANATORY_TERMS.iter().any(|t| lowered.contains(*t));
 
         // Multi-step is the conjunction of two independent signals: several demanding
         // verbs AND the connectives that chain them. Either alone is common in ordinary
         // prose; together they reliably mark a compound task.
-        let chaining_hits = CHAINING_TERMS.iter().filter(|t| lowered.contains(**t)).count() as f32;
+        let chaining_hits = CHAINING_TERMS
+            .iter()
+            .filter(|t| lowered.contains(**t))
+            .count() as f32;
         let multi_step_signal = if reasoning_hits >= 3.0 && chaining_hits >= 1.0 {
             1.0
         } else if reasoning_hits >= 2.0 && chaining_hits >= 1.0 {
@@ -400,7 +519,11 @@ mod tests {
             messages.push(Message::text(Role::System, case.system.clone()));
         }
         for (i, turn) in case.history.iter().enumerate() {
-            let role = if i % 2 == 0 { Role::User } else { Role::Assistant };
+            let role = if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            };
             messages.push(Message::text(role, turn.clone()));
         }
         messages.push(Message::text(Role::User, case.prompt.clone()));
@@ -429,7 +552,10 @@ mod tests {
             } else {
                 misses.push(format!(
                     "{}: expected {}, got {} (score {:.3})",
-                    case.name, case.expected, result.complexity.as_str(), result.score
+                    case.name,
+                    case.expected,
+                    result.complexity.as_str(),
+                    result.score
                 ));
             }
         }
@@ -484,7 +610,9 @@ mod tests {
                     result.complexity,
                     Complexity::Simple,
                     "{:?} classified complex case {:?} as simple (score {:.3})",
-                    version, case.name, result.score
+                    version,
+                    case.name,
+                    result.score
                 );
             }
         }
@@ -497,7 +625,11 @@ mod tests {
         request.tools = vec![serde_json::json!({"type": "function", "function": {"name": "f"}})];
         for version in [ClassifierVersion::V1, ClassifierVersion::V2] {
             let result = Classifier::with_version(version).classify(&request);
-            assert!(result.score >= 0.7, "{version:?} scored a tool request {}", result.score);
+            assert!(
+                result.score >= 0.7,
+                "{version:?} scored a tool request {}",
+                result.score
+            );
             assert_eq!(result.complexity, Complexity::Complex);
         }
     }
@@ -541,8 +673,10 @@ mod tests {
     #[test]
     fn long_context_raises_complexity() {
         let short = Classifier::new().classify(&NormalizedRequest::simple("gpt-4o", "summarize"));
-        let long = Classifier::new()
-            .classify(&NormalizedRequest::simple("gpt-4o", &"context ".repeat(2_000)));
+        let long = Classifier::new().classify(&NormalizedRequest::simple(
+            "gpt-4o",
+            &"context ".repeat(2_000),
+        ));
         assert!(
             long.score > short.score,
             "long context ({:.3}) did not outscore short ({:.3})",
@@ -558,7 +692,10 @@ mod tests {
             NormalizedRequest::simple("gpt-4o", ""),
             NormalizedRequest::simple("gpt-4o", &"analyze debug prove derive ".repeat(500)),
             NormalizedRequest::simple("gpt-4o", &"translate ".repeat(500)),
-            NormalizedRequest { messages: vec![], ..NormalizedRequest::simple("gpt-4o", "") },
+            NormalizedRequest {
+                messages: vec![],
+                ..NormalizedRequest::simple("gpt-4o", "")
+            },
         ];
         for version in [ClassifierVersion::V1, ClassifierVersion::V2] {
             for request in &inputs {
@@ -585,7 +722,10 @@ mod tests {
         let request = NormalizedRequest::simple("gpt-4o", &"word ".repeat(10_000));
         let features = Features::extract(&request);
         for value in features.as_vector() {
-            assert!((0.0..=1.0).contains(&value), "feature out of range: {value}");
+            assert!(
+                (0.0..=1.0).contains(&value),
+                "feature out of range: {value}"
+            );
         }
     }
 
@@ -605,8 +745,15 @@ mod tests {
 
     #[test]
     fn empty_request_does_not_panic_and_scores_low() {
-        let empty = NormalizedRequest { messages: vec![], ..NormalizedRequest::simple("gpt-4o", "") };
+        let empty = NormalizedRequest {
+            messages: vec![],
+            ..NormalizedRequest::simple("gpt-4o", "")
+        };
         let result = Classifier::new().classify(&empty);
-        assert!(result.score < 0.35, "empty request scored {:.3}", result.score);
+        assert!(
+            result.score < 0.35,
+            "empty request scored {:.3}",
+            result.score
+        );
     }
 }

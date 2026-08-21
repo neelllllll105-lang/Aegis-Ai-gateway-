@@ -52,14 +52,15 @@ impl ModelPricing {
     /// ranking on input alone would route to them wrongly. Chat traffic runs roughly three
     /// input tokens per output token, so that is the weighting used here.
     pub fn blended_per_mtok(&self) -> MicroCents {
-        MicroCents(
-            (self.input_per_mtok.0.saturating_mul(3) + self.output_per_mtok.0) / 4,
-        )
+        MicroCents((self.input_per_mtok.0.saturating_mul(3) + self.output_per_mtok.0) / 4)
     }
 
     /// The bare model name without the provider prefix (`openai/gpt-4o` -> `gpt-4o`).
     pub fn bare_name(&self) -> &str {
-        self.model_id.split_once('/').map(|(_, n)| n).unwrap_or(&self.model_id)
+        self.model_id
+            .split_once('/')
+            .map(|(_, n)| n)
+            .unwrap_or(&self.model_id)
     }
 }
 
@@ -104,7 +105,9 @@ impl PricingTable {
         // The bare name resolves to this model unless another provider already claimed
         // it. First registration wins, which keeps `gpt-4o` pointing at OpenAI even after
         // an aggregator that also serves it is added.
-        self.aliases.entry(bare).or_insert_with(|| canonical.clone());
+        self.aliases
+            .entry(bare)
+            .or_insert_with(|| canonical.clone());
         self.aliases.insert(canonical.clone(), canonical.clone());
         self.by_canonical.insert(canonical, model);
     }
@@ -112,7 +115,8 @@ impl PricingTable {
     /// Register an extra alias, e.g. a dated snapshot name.
     pub fn add_alias(&mut self, alias: &str, canonical: &str) {
         if self.by_canonical.contains_key(canonical) {
-            self.aliases.insert(alias.to_string(), canonical.to_string());
+            self.aliases
+                .insert(alias.to_string(), canonical.to_string());
         }
     }
 
@@ -230,50 +234,353 @@ impl PricingTable {
     /// `docs/runbooks/pricing-update.md`. Prices are USD per million tokens as published
     /// on the stated date; providers change them without notice.
     pub fn with_seed_data() -> PricingTable {
-        let s = |provider: &str, date: &str| format!("{provider} published pricing — checked {date}");
+        let s =
+            |provider: &str, date: &str| format!("{provider} published pricing — checked {date}");
 
         let models = vec![
             // ---------------- OpenAI ----------------
-            model("openai/gpt-5", "openai", "GPT-5", ModelTier::Frontier, 1.25, 10.00, 400_000, true, true, s("OpenAI", "2026-08-20")),
-            model("openai/gpt-5-mini", "openai", "GPT-5 mini", ModelTier::Mid, 0.25, 2.00, 400_000, true, true, s("OpenAI", "2026-08-20")),
-            model("openai/gpt-5-nano", "openai", "GPT-5 nano", ModelTier::Cheap, 0.05, 0.40, 400_000, true, true, s("OpenAI", "2026-08-20")),
-            model("openai/gpt-4o", "openai", "GPT-4o", ModelTier::Premium, 2.50, 10.00, 128_000, true, true, s("OpenAI", "2026-08-20")),
-            model("openai/gpt-4o-mini", "openai", "GPT-4o mini", ModelTier::Cheap, 0.15, 0.60, 128_000, true, true, s("OpenAI", "2026-08-20")),
-            model("openai/gpt-4.1", "openai", "GPT-4.1", ModelTier::Premium, 2.00, 8.00, 1_047_576, true, true, s("OpenAI", "2026-08-20")),
-            model("openai/gpt-4.1-mini", "openai", "GPT-4.1 mini", ModelTier::Mid, 0.40, 1.60, 1_047_576, true, true, s("OpenAI", "2026-08-20")),
-            model("openai/gpt-4.1-nano", "openai", "GPT-4.1 nano", ModelTier::Cheap, 0.10, 0.40, 1_047_576, true, true, s("OpenAI", "2026-08-20")),
-            model("openai/o3", "openai", "o3", ModelTier::Frontier, 2.00, 8.00, 200_000, true, true, s("OpenAI", "2026-08-20")),
-            model("openai/o4-mini", "openai", "o4-mini", ModelTier::Premium, 1.10, 4.40, 200_000, true, true, s("OpenAI", "2026-08-20")),
-            model("openai/text-embedding-3-small", "openai", "Embedding 3 small", ModelTier::Cheap, 0.02, 0.0, 8_191, false, false, s("OpenAI", "2026-08-20")),
-            model("openai/text-embedding-3-large", "openai", "Embedding 3 large", ModelTier::Cheap, 0.13, 0.0, 8_191, false, false, s("OpenAI", "2026-08-20")),
-
+            model(
+                "openai/gpt-5",
+                "openai",
+                "GPT-5",
+                ModelTier::Frontier,
+                1.25,
+                10.00,
+                400_000,
+                true,
+                true,
+                s("OpenAI", "2026-08-20"),
+            ),
+            model(
+                "openai/gpt-5-mini",
+                "openai",
+                "GPT-5 mini",
+                ModelTier::Mid,
+                0.25,
+                2.00,
+                400_000,
+                true,
+                true,
+                s("OpenAI", "2026-08-20"),
+            ),
+            model(
+                "openai/gpt-5-nano",
+                "openai",
+                "GPT-5 nano",
+                ModelTier::Cheap,
+                0.05,
+                0.40,
+                400_000,
+                true,
+                true,
+                s("OpenAI", "2026-08-20"),
+            ),
+            model(
+                "openai/gpt-4o",
+                "openai",
+                "GPT-4o",
+                ModelTier::Premium,
+                2.50,
+                10.00,
+                128_000,
+                true,
+                true,
+                s("OpenAI", "2026-08-20"),
+            ),
+            model(
+                "openai/gpt-4o-mini",
+                "openai",
+                "GPT-4o mini",
+                ModelTier::Cheap,
+                0.15,
+                0.60,
+                128_000,
+                true,
+                true,
+                s("OpenAI", "2026-08-20"),
+            ),
+            model(
+                "openai/gpt-4.1",
+                "openai",
+                "GPT-4.1",
+                ModelTier::Premium,
+                2.00,
+                8.00,
+                1_047_576,
+                true,
+                true,
+                s("OpenAI", "2026-08-20"),
+            ),
+            model(
+                "openai/gpt-4.1-mini",
+                "openai",
+                "GPT-4.1 mini",
+                ModelTier::Mid,
+                0.40,
+                1.60,
+                1_047_576,
+                true,
+                true,
+                s("OpenAI", "2026-08-20"),
+            ),
+            model(
+                "openai/gpt-4.1-nano",
+                "openai",
+                "GPT-4.1 nano",
+                ModelTier::Cheap,
+                0.10,
+                0.40,
+                1_047_576,
+                true,
+                true,
+                s("OpenAI", "2026-08-20"),
+            ),
+            model(
+                "openai/o3",
+                "openai",
+                "o3",
+                ModelTier::Frontier,
+                2.00,
+                8.00,
+                200_000,
+                true,
+                true,
+                s("OpenAI", "2026-08-20"),
+            ),
+            model(
+                "openai/o4-mini",
+                "openai",
+                "o4-mini",
+                ModelTier::Premium,
+                1.10,
+                4.40,
+                200_000,
+                true,
+                true,
+                s("OpenAI", "2026-08-20"),
+            ),
+            model(
+                "openai/text-embedding-3-small",
+                "openai",
+                "Embedding 3 small",
+                ModelTier::Cheap,
+                0.02,
+                0.0,
+                8_191,
+                false,
+                false,
+                s("OpenAI", "2026-08-20"),
+            ),
+            model(
+                "openai/text-embedding-3-large",
+                "openai",
+                "Embedding 3 large",
+                ModelTier::Cheap,
+                0.13,
+                0.0,
+                8_191,
+                false,
+                false,
+                s("OpenAI", "2026-08-20"),
+            ),
             // ---------------- Anthropic ----------------
-            model("anthropic/claude-opus-4-5", "anthropic", "Claude Opus 4.5", ModelTier::Frontier, 5.00, 25.00, 200_000, true, true, s("Anthropic", "2026-08-20")),
-            model("anthropic/claude-sonnet-4-5", "anthropic", "Claude Sonnet 4.5", ModelTier::Premium, 3.00, 15.00, 200_000, true, true, s("Anthropic", "2026-08-20")),
-            model("anthropic/claude-haiku-4-5", "anthropic", "Claude Haiku 4.5", ModelTier::Mid, 1.00, 5.00, 200_000, true, true, s("Anthropic", "2026-08-20")),
-            model("anthropic/claude-opus-4-1", "anthropic", "Claude Opus 4.1", ModelTier::Frontier, 15.00, 75.00, 200_000, true, true, s("Anthropic", "2026-08-20")),
-            model("anthropic/claude-3-5-haiku", "anthropic", "Claude 3.5 Haiku", ModelTier::Cheap, 0.80, 4.00, 200_000, true, true, s("Anthropic", "2026-08-20")),
-
+            model(
+                "anthropic/claude-opus-4-5",
+                "anthropic",
+                "Claude Opus 4.5",
+                ModelTier::Frontier,
+                5.00,
+                25.00,
+                200_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-20"),
+            ),
+            model(
+                "anthropic/claude-sonnet-4-5",
+                "anthropic",
+                "Claude Sonnet 4.5",
+                ModelTier::Premium,
+                3.00,
+                15.00,
+                200_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-20"),
+            ),
+            model(
+                "anthropic/claude-haiku-4-5",
+                "anthropic",
+                "Claude Haiku 4.5",
+                ModelTier::Mid,
+                1.00,
+                5.00,
+                200_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-20"),
+            ),
+            model(
+                "anthropic/claude-opus-4-1",
+                "anthropic",
+                "Claude Opus 4.1",
+                ModelTier::Frontier,
+                15.00,
+                75.00,
+                200_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-20"),
+            ),
+            model(
+                "anthropic/claude-3-5-haiku",
+                "anthropic",
+                "Claude 3.5 Haiku",
+                ModelTier::Cheap,
+                0.80,
+                4.00,
+                200_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-20"),
+            ),
             // ---------------- Google ----------------
-            model("google/gemini-2.5-pro", "google", "Gemini 2.5 Pro", ModelTier::Premium, 1.25, 10.00, 1_048_576, true, true, s("Google", "2026-08-20")),
-            model("google/gemini-2.5-flash", "google", "Gemini 2.5 Flash", ModelTier::Mid, 0.30, 2.50, 1_048_576, true, true, s("Google", "2026-08-20")),
-            model("google/gemini-2.5-flash-lite", "google", "Gemini 2.5 Flash Lite", ModelTier::Cheap, 0.10, 0.40, 1_048_576, true, true, s("Google", "2026-08-20")),
-            model("google/gemini-2.0-flash", "google", "Gemini 2.0 Flash", ModelTier::Cheap, 0.10, 0.40, 1_048_576, true, true, s("Google", "2026-08-20")),
-
+            model(
+                "google/gemini-2.5-pro",
+                "google",
+                "Gemini 2.5 Pro",
+                ModelTier::Premium,
+                1.25,
+                10.00,
+                1_048_576,
+                true,
+                true,
+                s("Google", "2026-08-20"),
+            ),
+            model(
+                "google/gemini-2.5-flash",
+                "google",
+                "Gemini 2.5 Flash",
+                ModelTier::Mid,
+                0.30,
+                2.50,
+                1_048_576,
+                true,
+                true,
+                s("Google", "2026-08-20"),
+            ),
+            model(
+                "google/gemini-2.5-flash-lite",
+                "google",
+                "Gemini 2.5 Flash Lite",
+                ModelTier::Cheap,
+                0.10,
+                0.40,
+                1_048_576,
+                true,
+                true,
+                s("Google", "2026-08-20"),
+            ),
+            model(
+                "google/gemini-2.0-flash",
+                "google",
+                "Gemini 2.0 Flash",
+                ModelTier::Cheap,
+                0.10,
+                0.40,
+                1_048_576,
+                true,
+                true,
+                s("Google", "2026-08-20"),
+            ),
             // ---------------- DeepSeek ----------------
-            model("deepseek/deepseek-chat", "deepseek", "DeepSeek Chat", ModelTier::Cheap, 0.27, 1.10, 128_000, true, false, s("DeepSeek", "2026-08-20")),
-            model("deepseek/deepseek-reasoner", "deepseek", "DeepSeek Reasoner", ModelTier::Mid, 0.55, 2.19, 128_000, true, false, s("DeepSeek", "2026-08-20")),
-
+            model(
+                "deepseek/deepseek-chat",
+                "deepseek",
+                "DeepSeek Chat",
+                ModelTier::Cheap,
+                0.27,
+                1.10,
+                128_000,
+                true,
+                false,
+                s("DeepSeek", "2026-08-20"),
+            ),
+            model(
+                "deepseek/deepseek-reasoner",
+                "deepseek",
+                "DeepSeek Reasoner",
+                ModelTier::Mid,
+                0.55,
+                2.19,
+                128_000,
+                true,
+                false,
+                s("DeepSeek", "2026-08-20"),
+            ),
             // ---------------- Mistral ----------------
-            model("mistral/mistral-large-latest", "mistral", "Mistral Large", ModelTier::Premium, 2.00, 6.00, 131_000, true, false, s("Mistral", "2026-08-20")),
-            model("mistral/mistral-small-latest", "mistral", "Mistral Small", ModelTier::Cheap, 0.20, 0.60, 131_000, true, false, s("Mistral", "2026-08-20")),
-
+            model(
+                "mistral/mistral-large-latest",
+                "mistral",
+                "Mistral Large",
+                ModelTier::Premium,
+                2.00,
+                6.00,
+                131_000,
+                true,
+                false,
+                s("Mistral", "2026-08-20"),
+            ),
+            model(
+                "mistral/mistral-small-latest",
+                "mistral",
+                "Mistral Small",
+                ModelTier::Cheap,
+                0.20,
+                0.60,
+                131_000,
+                true,
+                false,
+                s("Mistral", "2026-08-20"),
+            ),
             // ---------------- Groq ----------------
-            model("groq/llama-3.3-70b-versatile", "groq", "Llama 3.3 70B (Groq)", ModelTier::Mid, 0.59, 0.79, 131_000, true, false, s("Groq", "2026-08-20")),
-            model("groq/llama-3.1-8b-instant", "groq", "Llama 3.1 8B (Groq)", ModelTier::Cheap, 0.05, 0.08, 131_000, true, false, s("Groq", "2026-08-20")),
-
+            model(
+                "groq/llama-3.3-70b-versatile",
+                "groq",
+                "Llama 3.3 70B (Groq)",
+                ModelTier::Mid,
+                0.59,
+                0.79,
+                131_000,
+                true,
+                false,
+                s("Groq", "2026-08-20"),
+            ),
+            model(
+                "groq/llama-3.1-8b-instant",
+                "groq",
+                "Llama 3.1 8B (Groq)",
+                ModelTier::Cheap,
+                0.05,
+                0.08,
+                131_000,
+                true,
+                false,
+                s("Groq", "2026-08-20"),
+            ),
             // ---------------- Moonshot ----------------
-            model("moonshot/kimi-k2", "moonshot", "Kimi K2", ModelTier::Mid, 0.60, 2.50, 128_000, true, false, s("Moonshot", "2026-08-20")),
+            model(
+                "moonshot/kimi-k2",
+                "moonshot",
+                "Kimi K2",
+                ModelTier::Mid,
+                0.60,
+                2.50,
+                128_000,
+                true,
+                false,
+                s("Moonshot", "2026-08-20"),
+            ),
         ];
 
         let mut table = PricingTable::from_models(models);
@@ -350,7 +657,11 @@ mod tests {
     #[test]
     fn seed_data_is_populated_and_active() {
         let t = table();
-        assert!(t.len() >= 20, "Phase 0 requires at least 20 seeded models, got {}", t.len());
+        assert!(
+            t.len() >= 20,
+            "Phase 0 requires at least 20 seeded models, got {}",
+            t.len()
+        );
         assert!(t.all().count() >= 20);
         assert!(!t.is_empty());
     }
@@ -360,15 +671,28 @@ mod tests {
         // Part 13 item 8: every cost number traceable to a dated source.
         for m in table().all() {
             assert!(!m.source.is_empty(), "{} has no source", m.model_id);
-            assert!(m.source.contains("checked"), "{} source lacks a date: {}", m.model_id, m.source);
+            assert!(
+                m.source.contains("checked"),
+                "{} source lacks a date: {}",
+                m.model_id,
+                m.source
+            );
         }
     }
 
     #[test]
     fn every_model_id_is_provider_qualified() {
         for m in table().all() {
-            assert!(m.model_id.contains('/'), "{} is not provider-qualified", m.model_id);
-            assert!(m.model_id.starts_with(&format!("{}/", m.provider)), "{}", m.model_id);
+            assert!(
+                m.model_id.contains('/'),
+                "{} is not provider-qualified",
+                m.model_id
+            );
+            assert!(
+                m.model_id.starts_with(&format!("{}/", m.provider)),
+                "{}",
+                m.model_id
+            );
         }
     }
 
@@ -402,7 +726,10 @@ mod tests {
         // Providers ship new dated snapshots constantly; each must not need a table row.
         let t = table();
         assert_eq!(t.resolve("gpt-4o-2024-11-20"), Some("openai/gpt-4o"));
-        assert_eq!(t.resolve("gpt-4o-mini-2024-07-18"), Some("openai/gpt-4o-mini"));
+        assert_eq!(
+            t.resolve("gpt-4o-mini-2024-07-18"),
+            Some("openai/gpt-4o-mini")
+        );
     }
 
     #[test]
@@ -418,7 +745,10 @@ mod tests {
     fn explicit_aliases_resolve() {
         let t = table();
         assert_eq!(t.resolve("chatgpt-4o-latest"), Some("openai/gpt-4o"));
-        assert_eq!(t.resolve("claude-sonnet-4-5-20250929"), Some("anthropic/claude-sonnet-4-5"));
+        assert_eq!(
+            t.resolve("claude-sonnet-4-5-20250929"),
+            Some("anthropic/claude-sonnet-4-5")
+        );
     }
 
     #[test]
@@ -440,8 +770,16 @@ mod tests {
     #[test]
     fn blended_price_weights_input_three_to_one() {
         let m = model(
-            "test/m", "test", "M", ModelTier::Mid,
-            4.0, 8.0, 1000, false, false, "test".into(),
+            "test/m",
+            "test",
+            "M",
+            ModelTier::Mid,
+            4.0,
+            8.0,
+            1000,
+            false,
+            false,
+            "test".into(),
         );
         // (3*4.00 + 8.00) / 4 = $5.00 per Mtok
         assert_eq!(m.blended_per_mtok(), MicroCents::from_usd_per_mtok(5.0));
@@ -461,33 +799,59 @@ mod tests {
                 "{} is not cheaper than gpt-4o",
                 candidate.model_id
             );
-            assert!(candidate.blended_per_mtok() >= previous, "not sorted ascending");
+            assert!(
+                candidate.blended_per_mtok() >= previous,
+                "not sorted ascending"
+            );
             previous = candidate.blended_per_mtok();
         }
         // gpt-4o-mini is the canonical cheap substitute and must be present.
-        assert!(alternatives.iter().any(|m| m.model_id == "openai/gpt-4o-mini"));
+        assert!(alternatives
+            .iter()
+            .any(|m| m.model_id == "openai/gpt-4o-mini"));
     }
 
     #[test]
     fn cheaper_alternatives_respect_capability_requirements() {
         let t = table();
-        let vision_needed = Requirements { vision: true, ..Default::default() };
+        let vision_needed = Requirements {
+            vision: true,
+            ..Default::default()
+        };
         for candidate in t.cheaper_alternatives("openai/gpt-5", vision_needed) {
-            assert!(candidate.supports_vision, "{} cannot do vision", candidate.model_id);
+            assert!(
+                candidate.supports_vision,
+                "{} cannot do vision",
+                candidate.model_id
+            );
         }
 
-        let huge_context = Requirements { min_context: 500_000, ..Default::default() };
+        let huge_context = Requirements {
+            min_context: 500_000,
+            ..Default::default()
+        };
         for candidate in t.cheaper_alternatives("openai/gpt-5", huge_context) {
-            assert!(candidate.context_window >= 500_000, "{}", candidate.model_id);
+            assert!(
+                candidate.context_window >= 500_000,
+                "{}",
+                candidate.model_id
+            );
         }
     }
 
     #[test]
     fn a_request_needing_tools_never_routes_to_a_toolless_model() {
         let t = table();
-        let needs_tools = Requirements { tools: true, ..Default::default() };
+        let needs_tools = Requirements {
+            tools: true,
+            ..Default::default()
+        };
         for candidate in t.cheaper_alternatives("gpt-4o", needs_tools) {
-            assert!(candidate.supports_tools, "{} lacks tool support", candidate.model_id);
+            assert!(
+                candidate.supports_tools,
+                "{} lacks tool support",
+                candidate.model_id
+            );
         }
     }
 
@@ -495,16 +859,22 @@ mod tests {
     fn unknown_model_yields_no_alternatives_rather_than_all_of_them() {
         // A bug here would silently reroute an unrecognised model to the cheapest thing
         // in the table — exactly the quality failure Part 5 warns against.
-        assert!(table().cheaper_alternatives("unknown-model", Requirements::default()).is_empty());
+        assert!(table()
+            .cheaper_alternatives("unknown-model", Requirements::default())
+            .is_empty());
     }
 
     #[test]
     fn cheapest_at_or_below_respects_the_tier_ceiling() {
         let t = table();
-        let cheap = t.cheapest_at_or_below(ModelTier::Cheap, Requirements::default()).unwrap();
+        let cheap = t
+            .cheapest_at_or_below(ModelTier::Cheap, Requirements::default())
+            .unwrap();
         assert_eq!(cheap.tier, ModelTier::Cheap);
 
-        let mid = t.cheapest_at_or_below(ModelTier::Mid, Requirements::default()).unwrap();
+        let mid = t
+            .cheapest_at_or_below(ModelTier::Mid, Requirements::default())
+            .unwrap();
         assert!(mid.tier <= ModelTier::Mid);
         // Allowing a higher ceiling can only ever be at least as cheap.
         assert!(mid.blended_per_mtok() <= cheap.blended_per_mtok());
@@ -546,7 +916,9 @@ mod tests {
     fn large_requests_do_not_overflow() {
         // A million-token context against the priciest model must still produce a sane
         // number rather than wrapping into a negative charge.
-        let cost = table().cost("anthropic/claude-opus-4-1", 1_000_000, 1_000_000).unwrap();
+        let cost = table()
+            .cost("anthropic/claude-opus-4-1", 1_000_000, 1_000_000)
+            .unwrap();
         assert!(cost > MicroCents::ZERO);
         // $15 + $75 = $90.00 = 90_000_000 micro-cents
         assert_eq!(cost, MicroCents(90_000_000));

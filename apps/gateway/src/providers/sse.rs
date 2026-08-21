@@ -179,7 +179,10 @@ mod tests {
                 collected.extend(decoder.push(&window.iter().collect::<String>()));
             }
             collected.extend(decoder.finish());
-            assert_eq!(collected, expected, "content lost at split size {split_size}");
+            assert_eq!(
+                collected, expected,
+                "content lost at split size {split_size}"
+            );
         }
     }
 }

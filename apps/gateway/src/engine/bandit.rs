@@ -121,7 +121,10 @@ impl RoutingBandit {
         savings: MicroCents,
         cost: MicroCents,
     ) {
-        let mut arm = self.arms.entry(RoutingBandit::key(band, model)).or_default();
+        let mut arm = self
+            .arms
+            .entry(RoutingBandit::key(band, model))
+            .or_default();
         arm.pulls = arm.pulls.saturating_add(1);
         if succeeded {
             arm.successes = arm.successes.saturating_add(1);
@@ -272,13 +275,28 @@ mod tests {
         let bandit = RoutingBandit::new();
         for _ in 0..200 {
             // Equally reliable, but one delivers far more savings.
-            bandit.record(Complexity::Simple, "cheap/good", true, savings(9_000), savings(1_000));
-            bandit.record(Complexity::Simple, "pricey/good", true, savings(1_000), savings(9_000));
+            bandit.record(
+                Complexity::Simple,
+                "cheap/good",
+                true,
+                savings(9_000),
+                savings(1_000),
+            );
+            bandit.record(
+                Complexity::Simple,
+                "pricey/good",
+                true,
+                savings(1_000),
+                savings(9_000),
+            );
         }
         let chosen = bandit
             .select(Complexity::Simple, &["pricey/good", "cheap/good"])
             .unwrap();
-        assert_eq!(chosen, "cheap/good", "the bandit ignored a clear savings signal");
+        assert_eq!(
+            chosen, "cheap/good",
+            "the bandit ignored a clear savings signal"
+        );
     }
 
     #[test]
@@ -286,11 +304,33 @@ mod tests {
         // A model that works for simple requests tells us nothing about complex ones.
         let bandit = RoutingBandit::new();
         for _ in 0..100 {
-            bandit.record(Complexity::Simple, "cheap/model", true, savings(9_000), savings(500));
-            bandit.record(Complexity::Complex, "cheap/model", false, savings(0), savings(500));
+            bandit.record(
+                Complexity::Simple,
+                "cheap/model",
+                true,
+                savings(9_000),
+                savings(500),
+            );
+            bandit.record(
+                Complexity::Complex,
+                "cheap/model",
+                false,
+                savings(0),
+                savings(500),
+            );
         }
-        assert!(bandit.stats(Complexity::Simple, "cheap/model").success_rate() > 0.99);
-        assert!(bandit.stats(Complexity::Complex, "cheap/model").success_rate() < 0.01);
+        assert!(
+            bandit
+                .stats(Complexity::Simple, "cheap/model")
+                .success_rate()
+                > 0.99
+        );
+        assert!(
+            bandit
+                .stats(Complexity::Complex, "cheap/model")
+                .success_rate()
+                < 0.01
+        );
 
         assert_eq!(
             bandit.select(Complexity::Complex, &["cheap/model", "solid/model"]),
@@ -302,7 +342,13 @@ mod tests {
     fn unobserved_arms_are_explored_before_established_ones() {
         let bandit = RoutingBandit::new();
         for _ in 0..MIN_OBSERVATIONS * 2 {
-            bandit.record(Complexity::Simple, "known/model", true, savings(1_000), savings(1_000));
+            bandit.record(
+                Complexity::Simple,
+                "known/model",
+                true,
+                savings(1_000),
+                savings(1_000),
+            );
         }
         // The unseen arm has an infinite UCB score, so it gets tried.
         let chosen = bandit
@@ -329,12 +375,22 @@ mod tests {
     fn failures_score_zero_reward_regardless_of_savings() {
         let bandit = RoutingBandit::new();
         for _ in 0..50 {
-            bandit.record(Complexity::Simple, "always/fails", false, savings(100_000), savings(0));
+            bandit.record(
+                Complexity::Simple,
+                "always/fails",
+                false,
+                savings(100_000),
+                savings(0),
+            );
         }
         let stats = bandit.stats(Complexity::Simple, "always/fails");
         assert_eq!(stats.success_rate(), 0.0);
         // Reward is 0.7*0 + 0.3*1.0 at most — the reliability term dominates.
-        assert!(stats.mean_reward() <= 0.31, "reward was {}", stats.mean_reward());
+        assert!(
+            stats.mean_reward() <= 0.31,
+            "reward was {}",
+            stats.mean_reward()
+        );
     }
 
     #[test]
@@ -350,9 +406,9 @@ mod tests {
         // Ground truth for the simulation.
         let outcome = |model: &str, step: u64| -> (bool, i64, i64) {
             match model {
-                "static/first" => (step % 10 != 0, 3_000, 5_000),  // 90% success, modest savings
+                "static/first" => (step % 10 != 0, 3_000, 5_000), // 90% success, modest savings
                 "better/second" => (step % 50 != 0, 7_000, 2_000), // 98% success, large savings
-                _ => (step % 3 != 0, 9_000, 500),                  // 67% success — unusable
+                _ => (step % 3 != 0, 9_000, 500),                 // 67% success — unusable
             }
         };
 
@@ -363,7 +419,13 @@ mod tests {
             // Bandit picks; static always takes the router's first choice.
             let picked = bandit.select(Complexity::Simple, &candidates).unwrap();
             let (ok, saved, cost) = outcome(picked, step);
-            bandit.record(Complexity::Simple, picked, ok, savings(saved), savings(cost));
+            bandit.record(
+                Complexity::Simple,
+                picked,
+                ok,
+                savings(saved),
+                savings(cost),
+            );
             bandit_reward += reward_of(ok, saved, cost);
 
             let (ok_static, saved_static, cost_static) = outcome("static/first", step);
@@ -392,7 +454,11 @@ mod tests {
     fn reward_of(succeeded: bool, saved: i64, cost: i64) -> f64 {
         let success = if succeeded { 1.0 } else { 0.0 };
         let baseline = saved + cost;
-        let ratio = if baseline > 0 { saved as f64 / baseline as f64 } else { 0.0 };
+        let ratio = if baseline > 0 {
+            saved as f64 / baseline as f64
+        } else {
+            0.0
+        };
         0.7 * success + 0.3 * ratio.clamp(0.0, 1.0)
     }
 
@@ -421,8 +487,20 @@ mod tests {
     #[test]
     fn counters_saturate_rather_than_overflowing() {
         let bandit = RoutingBandit::new();
-        bandit.record(Complexity::Simple, "m", true, MicroCents(i64::MAX), MicroCents(i64::MAX));
-        bandit.record(Complexity::Simple, "m", true, MicroCents(i64::MAX), MicroCents(i64::MAX));
+        bandit.record(
+            Complexity::Simple,
+            "m",
+            true,
+            MicroCents(i64::MAX),
+            MicroCents(i64::MAX),
+        );
+        bandit.record(
+            Complexity::Simple,
+            "m",
+            true,
+            MicroCents(i64::MAX),
+            MicroCents(i64::MAX),
+        );
         let stats = bandit.stats(Complexity::Simple, "m");
         assert_eq!(stats.total_savings_mc, i64::MAX);
         assert!(stats.mean_reward().is_finite());

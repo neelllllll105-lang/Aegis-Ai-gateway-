@@ -182,22 +182,42 @@ pub fn org_spend_key(org_id: Uuid, at: DateTime<Utc>) -> String {
 
 /// Redis key for an org's monthly request counter (free-tier allowance).
 pub fn org_requests_key(org_id: Uuid, at: DateTime<Utc>) -> String {
-    format!("aegis:org:{}:requests:{}{:02}", org_id, at.year(), at.month())
+    format!(
+        "aegis:org:{}:requests:{}{:02}",
+        org_id,
+        at.year(),
+        at.month()
+    )
 }
 
 /// Redis key for a team's monthly spend counter.
 pub fn team_spend_key(team_id: Uuid, at: DateTime<Utc>) -> String {
-    format!("aegis:team:{}:spend:{}{:02}", team_id, at.year(), at.month())
+    format!(
+        "aegis:team:{}:spend:{}{:02}",
+        team_id,
+        at.year(),
+        at.month()
+    )
 }
 
 /// Redis key for an API key's monthly spend counter.
 pub fn key_spend_key(api_key_id: Uuid, at: DateTime<Utc>) -> String {
-    format!("aegis:key:{}:spend:{}{:02}", api_key_id, at.year(), at.month())
+    format!(
+        "aegis:key:{}:spend:{}{:02}",
+        api_key_id,
+        at.year(),
+        at.month()
+    )
 }
 
 /// Redis key for an org's accumulated savings, used by the dashboard's live counter.
 pub fn org_savings_key(org_id: Uuid, at: DateTime<Utc>) -> String {
-    format!("aegis:org:{}:savings:{}{:02}", org_id, at.year(), at.month())
+    format!(
+        "aegis:org:{}:savings:{}{:02}",
+        org_id,
+        at.year(),
+        at.month()
+    )
 }
 
 /// TTL for monthly counters: 45 days, long enough to survive month-end reconciliation and
@@ -223,23 +243,39 @@ pub async fn emit(store: &dyn KvStore, event: &UsageEvent) -> Result<String> {
     // Spend and request counters gate budget enforcement and the free-tier allowance at
     // stage [3], so they must reflect this request before the next one arrives.
     let _ = store
-        .incr_by(&org_spend_key(event.org_id, at), event.actual_cost_mc, Some(COUNTER_TTL))
+        .incr_by(
+            &org_spend_key(event.org_id, at),
+            event.actual_cost_mc,
+            Some(COUNTER_TTL),
+        )
         .await;
     let _ = store
         .incr_by(&org_requests_key(event.org_id, at), 1, Some(COUNTER_TTL))
         .await;
     let _ = store
-        .incr_by(&org_savings_key(event.org_id, at), event.gross_savings_mc, Some(COUNTER_TTL))
+        .incr_by(
+            &org_savings_key(event.org_id, at),
+            event.gross_savings_mc,
+            Some(COUNTER_TTL),
+        )
         .await;
 
     if let Some(team_id) = event.team_id {
         let _ = store
-            .incr_by(&team_spend_key(team_id, at), event.actual_cost_mc, Some(COUNTER_TTL))
+            .incr_by(
+                &team_spend_key(team_id, at),
+                event.actual_cost_mc,
+                Some(COUNTER_TTL),
+            )
             .await;
     }
     if let Some(key_id) = event.api_key_id {
         let _ = store
-            .incr_by(&key_spend_key(key_id, at), event.actual_cost_mc, Some(COUNTER_TTL))
+            .incr_by(
+                &key_spend_key(key_id, at),
+                event.actual_cost_mc,
+                Some(COUNTER_TTL),
+            )
             .await;
     }
 
@@ -303,7 +339,11 @@ mod tests {
             "gpt-4o".to_string(),
             "gpt-4o-mini".to_string(),
             "openai".to_string(),
-            TokenUsage { input_tokens: 1_000, output_tokens: 500, estimated: false },
+            TokenUsage {
+                input_tokens: 1_000,
+                output_tokens: 500,
+                estimated: false,
+            },
             SavingsBreakdown::compute(MicroCents(7_500), MicroCents(450), 2_000),
             842,
             0.37,
@@ -332,7 +372,10 @@ mod tests {
         event.cache_hit = true;
         event.cache_type = Some(CacheOutcome::Exact.as_str().to_string());
         assert_eq!(event.cache_type.as_deref(), Some("exact"));
-        assert!(event.is_billable(), "a cache hit still produces a savings-share fee");
+        assert!(
+            event.is_billable(),
+            "a cache hit still produces a savings-share fee"
+        );
     }
 
     #[test]
@@ -371,9 +414,16 @@ mod tests {
         assert_ne!(org_spend_key(org_a, now), org_spend_key(org_b, now));
         assert!(org_spend_key(org_a, now).contains(&org_a.to_string()));
 
-        let january = DateTime::parse_from_rfc3339("2026-01-15T00:00:00Z").unwrap().with_timezone(&Utc);
-        let february = DateTime::parse_from_rfc3339("2026-02-15T00:00:00Z").unwrap().with_timezone(&Utc);
-        assert_ne!(org_spend_key(org_a, january), org_spend_key(org_a, february));
+        let january = DateTime::parse_from_rfc3339("2026-01-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let february = DateTime::parse_from_rfc3339("2026-02-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_ne!(
+            org_spend_key(org_a, january),
+            org_spend_key(org_a, february)
+        );
         assert!(org_spend_key(org_a, january).ends_with("202601"));
         assert!(org_spend_key(org_a, february).ends_with("202602"));
     }
@@ -444,7 +494,10 @@ mod tests {
     #[tokio::test]
     async fn unread_counters_report_zero_rather_than_failing() {
         let store = MemoryStore::new();
-        assert_eq!(current_spend(&store, Uuid::new_v4()).await, MicroCents::ZERO);
+        assert_eq!(
+            current_spend(&store, Uuid::new_v4()).await,
+            MicroCents::ZERO
+        );
         assert_eq!(current_requests(&store, Uuid::new_v4()).await, 0);
     }
 
@@ -464,7 +517,11 @@ mod tests {
         assert_eq!(entries.len(), 250);
         let recovered: Vec<Uuid> = entries
             .iter()
-            .map(|e| serde_json::from_str::<UsageEvent>(&e.payload).unwrap().request_id)
+            .map(|e| {
+                serde_json::from_str::<UsageEvent>(&e.payload)
+                    .unwrap()
+                    .request_id
+            })
             .collect();
         assert_eq!(recovered, ids);
     }

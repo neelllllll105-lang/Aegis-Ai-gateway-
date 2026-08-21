@@ -29,9 +29,9 @@ pub mod types;
 pub mod workers;
 
 use crate::config::Config;
-use crate::metering::pricing::PricingTable;
 use crate::engine::bandit::RoutingBandit;
 use crate::engine::fallback::ProviderHealth;
+use crate::metering::pricing::PricingTable;
 use crate::metrics::Metrics;
 use crate::middleware::auth::KeyCache;
 use crate::providers::pool::SharedKeyPool;

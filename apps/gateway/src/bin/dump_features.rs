@@ -57,7 +57,11 @@ fn main() {
                 messages.push(Message::text(Role::System, case.system.clone()));
             }
             for (i, turn) in case.history.iter().enumerate() {
-                let role = if i % 2 == 0 { Role::User } else { Role::Assistant };
+                let role = if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                };
                 messages.push(Message::text(role, turn.clone()));
             }
             messages.push(Message::text(Role::User, case.prompt.clone()));

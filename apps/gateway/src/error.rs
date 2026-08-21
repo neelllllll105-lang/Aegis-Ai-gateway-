@@ -34,11 +34,18 @@ pub enum AegisError {
 
     /// Rate limit exceeded. Carries the retry hint in seconds.
     #[error("rate limit exceeded")]
-    RateLimited { retry_after_secs: u64, limit: u32, scope: &'static str },
+    RateLimited {
+        retry_after_secs: u64,
+        limit: u32,
+        scope: &'static str,
+    },
 
     /// A hard budget was exceeded. HTTP 402 — the caller must raise the budget or pay.
     #[error("budget exceeded")]
-    BudgetExceeded { spend_micro_cents: i64, limit_micro_cents: i64 },
+    BudgetExceeded {
+        spend_micro_cents: i64,
+        limit_micro_cents: i64,
+    },
 
     /// The requested model is not available to this org (plan gate or allowlist).
     #[error("{0}")]
@@ -51,7 +58,11 @@ pub enum AegisError {
     // ---- 5xx / upstream: our problem or the provider's ----
     /// An upstream provider returned an error we could not recover from.
     #[error("provider error: {message}")]
-    Provider { provider: String, status: u16, message: String },
+    Provider {
+        provider: String,
+        status: u16,
+        message: String,
+    },
 
     /// Every candidate provider failed or was circuit-open.
     #[error("all providers unavailable: {0}")]
@@ -136,19 +147,24 @@ impl AegisError {
                  request id."
                     .to_string()
             }
-            AegisError::Store(_) => {
-                "A transient storage error occurred. Please retry.".to_string()
-            }
+            AegisError::Store(_) => "A transient storage error occurred. Please retry.".to_string(),
             AegisError::Internal(_) => {
                 "An internal error occurred. If this persists, contact support with the \
                  request id."
                     .to_string()
             }
-            AegisError::RateLimited { retry_after_secs, limit, scope } => format!(
+            AegisError::RateLimited {
+                retry_after_secs,
+                limit,
+                scope,
+            } => format!(
                 "Rate limit of {limit} requests/minute for this {scope} exceeded. Retry \
                  in {retry_after_secs}s."
             ),
-            AegisError::BudgetExceeded { spend_micro_cents, limit_micro_cents } => {
+            AegisError::BudgetExceeded {
+                spend_micro_cents,
+                limit_micro_cents,
+            } => {
                 let spend = crate::money::MicroCents(*spend_micro_cents).to_usd_string();
                 let limit = crate::money::MicroCents(*limit_micro_cents).to_usd_string();
                 format!(
@@ -221,7 +237,12 @@ impl IntoResponse for AegisError {
         };
 
         let mut headers = HeaderMap::new();
-        if let AegisError::RateLimited { retry_after_secs, limit, .. } = &self {
+        if let AegisError::RateLimited {
+            retry_after_secs,
+            limit,
+            ..
+        } = &self
+        {
             insert_num(&mut headers, "retry-after", *retry_after_secs);
             insert_num(&mut headers, "x-ratelimit-limit", *limit as u64);
             insert_num(&mut headers, "x-ratelimit-remaining", 0);
@@ -250,14 +271,26 @@ mod tests {
 
     #[test]
     fn status_codes_match_the_spec() {
-        assert_eq!(AegisError::Unauthorized("x".into()).status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
-            AegisError::RateLimited { retry_after_secs: 1, limit: 60, scope: "key" }.status(),
+            AegisError::Unauthorized("x".into()).status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            AegisError::RateLimited {
+                retry_after_secs: 1,
+                limit: 60,
+                scope: "key"
+            }
+            .status(),
             StatusCode::TOO_MANY_REQUESTS
         );
         // Budget exceeded is 402 Payment Required — Part 5 stage [3].
         assert_eq!(
-            AegisError::BudgetExceeded { spend_micro_cents: 1, limit_micro_cents: 0 }.status(),
+            AegisError::BudgetExceeded {
+                spend_micro_cents: 1,
+                limit_micro_cents: 0
+            }
+            .status(),
             StatusCode::PAYMENT_REQUIRED
         );
         assert_eq!(
@@ -269,10 +302,17 @@ mod tests {
     #[test]
     fn error_types_are_stable_strings() {
         assert_eq!(
-            AegisError::BudgetExceeded { spend_micro_cents: 0, limit_micro_cents: 0 }.error_type(),
+            AegisError::BudgetExceeded {
+                spend_micro_cents: 0,
+                limit_micro_cents: 0
+            }
+            .error_type(),
             "budget_exceeded"
         );
-        assert_eq!(AegisError::BadRequest("x".into()).error_type(), "invalid_request");
+        assert_eq!(
+            AegisError::BadRequest("x".into()).error_type(),
+            "invalid_request"
+        );
     }
 
     #[test]
@@ -281,7 +321,10 @@ mod tests {
         let err = AegisError::Internal("connection string postgres://user:hunter2@db".into());
         let msg = err.client_message();
         assert!(!msg.contains("hunter2"), "internal detail leaked: {msg}");
-        assert!(!msg.contains("postgres://"), "internal detail leaked: {msg}");
+        assert!(
+            !msg.contains("postgres://"),
+            "internal detail leaked: {msg}"
+        );
         assert_eq!(err.error_type(), "internal_error");
     }
 

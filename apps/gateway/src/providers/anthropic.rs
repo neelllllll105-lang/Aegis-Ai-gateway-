@@ -80,7 +80,10 @@ pub fn build_body(request: &NormalizedRequest, model: &str) -> serde_json::Value
         map.insert("top_p".into(), serde_json::json!(top_p));
     }
     if !request.tools.is_empty() {
-        map.insert("tools".into(), serde_json::json!(translate_tools(&request.tools)));
+        map.insert(
+            "tools".into(),
+            serde_json::json!(translate_tools(&request.tools)),
+        );
     }
     if let Some(stop) = &request.stop {
         // Anthropic calls this stop_sequences and requires an array.
@@ -158,11 +161,23 @@ pub fn parse_response(body: &serde_json::Value) -> Result<NormalizedResponse> {
             output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
             estimated: false,
         })
-        .unwrap_or(TokenUsage { input_tokens: 0, output_tokens: 0, estimated: true });
+        .unwrap_or(TokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            estimated: true,
+        });
 
     Ok(NormalizedResponse {
-        id: body.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        model: body.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        id: body
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        model: body
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         content,
         finish_reason: body
             .get("stop_reason")
@@ -277,7 +292,10 @@ impl Provider for AnthropicProvider {
     fn auth_headers(&self, credential: &Credential) -> Vec<(String, String)> {
         vec![
             ("x-api-key".to_string(), credential.api_key.clone()),
-            ("anthropic-version".to_string(), ANTHROPIC_VERSION.to_string()),
+            (
+                "anthropic-version".to_string(),
+                ANTHROPIC_VERSION.to_string(),
+            ),
         ]
     }
 
@@ -368,7 +386,10 @@ mod tests {
         let body = build_body(&req, "claude-sonnet-4-5");
         for message in body["messages"].as_array().unwrap() {
             let role = message["role"].as_str().unwrap();
-            assert!(role == "user" || role == "assistant", "illegal role: {role}");
+            assert!(
+                role == "user" || role == "assistant",
+                "illegal role: {role}"
+            );
         }
     }
 
@@ -376,7 +397,10 @@ mod tests {
     fn requests_with_no_system_prompt_omit_the_field() {
         let req = NormalizedRequest::simple("claude-sonnet-4-5", "hi");
         let body = build_body(&req, "claude-sonnet-4-5");
-        assert!(body.get("system").is_none(), "empty system must be omitted, not sent as ''");
+        assert!(
+            body.get("system").is_none(),
+            "empty system must be omitted, not sent as ''"
+        );
     }
 
     #[test]
@@ -409,7 +433,10 @@ mod tests {
         assert_eq!(tool["name"], "get_weather");
         assert_eq!(tool["description"], "Get weather");
         assert_eq!(tool["input_schema"]["properties"]["city"]["type"], "string");
-        assert!(tool.get("function").is_none(), "OpenAI nesting must be flattened");
+        assert!(
+            tool.get("function").is_none(),
+            "OpenAI nesting must be flattened"
+        );
     }
 
     #[test]
@@ -470,7 +497,10 @@ mod tests {
             "usage": {"input_tokens": 30, "output_tokens": 12}
         });
         let parsed = parse_response(&body).unwrap();
-        assert_eq!(parsed.tool_calls.as_ref().unwrap()[0]["name"], "get_weather");
+        assert_eq!(
+            parsed.tool_calls.as_ref().unwrap()[0]["name"],
+            "get_weather"
+        );
         assert_eq!(parsed.content, "");
     }
 
@@ -567,7 +597,9 @@ mod tests {
     #[test]
     fn auth_uses_x_api_key_and_a_version_header() {
         let headers = AnthropicProvider.auth_headers(&Credential::new("sk-ant-test"));
-        assert!(headers.iter().any(|(k, v)| k == "x-api-key" && v == "sk-ant-test"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "x-api-key" && v == "sk-ant-test"));
         assert!(headers
             .iter()
             .any(|(k, v)| k == "anthropic-version" && v == ANTHROPIC_VERSION));

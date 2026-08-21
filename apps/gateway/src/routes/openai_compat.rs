@@ -81,8 +81,14 @@ impl PipelineOutcome {
         push("x-aegis-model", self.served_model.clone());
         push("x-aegis-requested-model", self.requested_model.clone());
         push("x-aegis-cost", self.savings.actual_cost.to_usd_string());
-        push("x-aegis-baseline-cost", self.savings.baseline_cost.to_usd_string());
-        push("x-aegis-savings", self.savings.gross_savings.to_usd_string());
+        push(
+            "x-aegis-baseline-cost",
+            self.savings.baseline_cost.to_usd_string(),
+        );
+        push(
+            "x-aegis-savings",
+            self.savings.gross_savings.to_usd_string(),
+        );
         push("x-aegis-cache", self.cache.as_str().to_string());
         push("x-aegis-routing", self.routing_reason.as_str().to_string());
         push(
@@ -230,9 +236,11 @@ pub async fn execute(
             tokens_saved_by_compression: 0,
         });
     }
-    state
-        .metrics
-        .record_cache(if auth.zero_retention { "skipped" } else { "miss" });
+    state.metrics.record_cache(if auth.zero_retention {
+        "skipped"
+    } else {
+        "miss"
+    });
 
     // ---- [6c] Context compression ------------------------------------------------
     // Zero-retention organisations get their prompt delivered exactly as written.
@@ -381,8 +389,14 @@ async fn execute_with_fallback(
             }
         };
 
-        match call_with_retries(state, provider.as_ref(), request, &attempt.model_id, &credential)
-            .await
+        match call_with_retries(
+            state,
+            provider.as_ref(),
+            request,
+            &attempt.model_id,
+            &credential,
+        )
+        .await
         {
             Ok(response) => {
                 state.health.record_success(provider.id());
@@ -620,8 +634,12 @@ async fn handle_chat(
     let _ = usage::emit(state.store.as_ref(), &event).await;
     state.metrics.record_usage_event();
     state.metrics.record_request("/v1/chat/completions", 200);
-    state.metrics.record_overhead_ms(outcome.gateway_overhead_ms);
-    state.metrics.record_latency_ms(outcome.total_latency_ms as f64);
+    state
+        .metrics
+        .record_overhead_ms(outcome.gateway_overhead_ms);
+    state
+        .metrics
+        .record_latency_ms(outcome.total_latency_ms as f64);
 
     // ---- [11] Respond ------------------------------------------------------------
     let body = to_openai_response(&outcome);
@@ -670,10 +688,7 @@ async fn stream_chat(
         .providers
         .for_model(&decision.served_model)
         .ok_or_else(|| {
-            AegisError::AllProvidersFailed(format!(
-                "no adapter serves {}",
-                decision.served_model
-            ))
+            AegisError::AllProvidersFailed(format!("no adapter serves {}", decision.served_model))
         })?;
     let credential = resolve_credential(state, auth_context, provider.id()).await?;
 
@@ -809,12 +824,7 @@ async fn stream_chat(
 /// Meter a request rejected before it reached a provider.
 ///
 /// Principle 2: every request produces a usage record, including the ones we refuse.
-async fn record_rejection(
-    state: &AppState,
-    auth: &AuthContext,
-    status: u16,
-    error_type: &str,
-) {
+async fn record_rejection(state: &AppState, auth: &AuthContext, status: u16, error_type: &str) {
     let event = UsageEvent::rejected(
         Uuid::new_v4(),
         auth.org_id,
@@ -993,8 +1003,8 @@ pub async fn embeddings(
 
     match builder.send().await {
         Ok(upstream) => {
-            let status = StatusCode::from_u16(upstream.status().as_u16())
-                .unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let text = upstream.text().await.unwrap_or_default();
             match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(json) => (status, Json(json)).into_response(),
@@ -1020,9 +1030,9 @@ mod tests {
     use super::*;
     use crate::db::repo::KeyContext;
     use crate::providers::mock::MockProvider;
-    use std::sync::Arc;
     use crate::providers::ProviderRegistry;
     use crate::types::ModelTier;
+    use std::sync::Arc;
 
     /// State wired to a mock provider, with pooled credentials so the pipeline can run
     /// end to end without a database, a network, or an API key.
@@ -1102,7 +1112,8 @@ mod tests {
         let state = test_state(Arc::clone(&mock));
         let auth = auth_context("pro");
 
-        let request = NormalizedRequest::simple("mock/mock-premium", "What is the capital of France?");
+        let request =
+            NormalizedRequest::simple("mock/mock-premium", "What is the capital of France?");
         let outcome = execute(&state, &auth, request, RoutingHint::Auto)
             .await
             .unwrap();
@@ -1167,12 +1178,18 @@ mod tests {
         assert_eq!(first.cache, CacheOutcome::Miss);
         assert_eq!(mock.call_count(), 1);
 
-        let second = execute(&state, &auth, request, RoutingHint::Auto).await.unwrap();
+        let second = execute(&state, &auth, request, RoutingHint::Auto)
+            .await
+            .unwrap();
         assert_eq!(second.cache, CacheOutcome::Exact);
         assert_eq!(second.routing_reason, RoutingReason::Cache);
         assert_eq!(second.savings.actual_cost, MicroCents::ZERO);
         assert!(second.savings.gross_savings > MicroCents::ZERO);
-        assert_eq!(mock.call_count(), 1, "a cache hit must not reach the provider");
+        assert_eq!(
+            mock.call_count(),
+            1,
+            "a cache hit must not reach the provider"
+        );
     }
 
     #[tokio::test]
@@ -1203,11 +1220,19 @@ mod tests {
         auth.zero_retention = true;
         let request = NormalizedRequest::simple("mock/mock-premium", "What is 2+2?");
 
-        execute(&state, &auth, request.clone(), RoutingHint::Auto).await.unwrap();
-        let second = execute(&state, &auth, request, RoutingHint::Auto).await.unwrap();
+        execute(&state, &auth, request.clone(), RoutingHint::Auto)
+            .await
+            .unwrap();
+        let second = execute(&state, &auth, request, RoutingHint::Auto)
+            .await
+            .unwrap();
 
         assert_eq!(second.cache, CacheOutcome::Miss);
-        assert_eq!(mock.call_count(), 2, "a zero-retention org must never be cached");
+        assert_eq!(
+            mock.call_count(),
+            2,
+            "a zero-retention org must never be cached"
+        );
     }
 
     #[tokio::test]
@@ -1217,7 +1242,9 @@ mod tests {
         let auth = auth_context("pro");
 
         let request = NormalizedRequest::simple("mock/mock-premium", "What is 2+2?");
-        let outcome = execute(&state, &auth, request, RoutingHint::Auto).await.unwrap();
+        let outcome = execute(&state, &auth, request, RoutingHint::Auto)
+            .await
+            .unwrap();
 
         assert_eq!(outcome.response.content, "recovered");
         assert_eq!(mock.call_count(), 3, "expected two failures then a success");
@@ -1231,7 +1258,9 @@ mod tests {
         let auth = auth_context("pro");
 
         let request = NormalizedRequest::simple("mock/mock-premium", "What is 2+2?");
-        let err = execute(&state, &auth, request, RoutingHint::Auto).await.unwrap_err();
+        let err = execute(&state, &auth, request, RoutingHint::Auto)
+            .await
+            .unwrap_err();
 
         assert_eq!(err.status().as_u16(), 400);
         assert_eq!(mock.call_count(), 1, "a 4xx must not be retried");
@@ -1249,13 +1278,17 @@ mod tests {
 
         for i in 0..2 {
             let request = NormalizedRequest::simple("mock/mock-cheap", &format!("question {i}"));
-            let outcome = execute(&state, &auth, request, RoutingHint::Auto).await.unwrap();
+            let outcome = execute(&state, &auth, request, RoutingHint::Auto)
+                .await
+                .unwrap();
             let event = outcome.usage_event(&auth, 200);
             usage::emit(state.store.as_ref(), &event).await.unwrap();
         }
 
         let request = NormalizedRequest::simple("mock/mock-cheap", "one too many");
-        let err = execute(&state, &auth, request, RoutingHint::Auto).await.unwrap_err();
+        let err = execute(&state, &auth, request, RoutingHint::Auto)
+            .await
+            .unwrap_err();
         assert_eq!(err.status().as_u16(), 402);
     }
 
@@ -1270,7 +1303,9 @@ mod tests {
             "mock/mock-premium",
             "Analyze and diagnose the root cause, then architect a fix.",
         );
-        let outcome = execute(&state, &auth, request, RoutingHint::Auto).await.unwrap();
+        let outcome = execute(&state, &auth, request, RoutingHint::Auto)
+            .await
+            .unwrap();
         assert_eq!(outcome.served_model, "mock/mock-cheap");
     }
 
@@ -1281,7 +1316,9 @@ mod tests {
         let auth = auth_context("pro");
 
         let request = NormalizedRequest::simple("mock/mock-premium", "What is 2+2?");
-        let outcome = execute(&state, &auth, request, RoutingHint::Auto).await.unwrap();
+        let outcome = execute(&state, &auth, request, RoutingHint::Auto)
+            .await
+            .unwrap();
 
         assert!(outcome.gateway_overhead_ms >= 0.0);
         assert!(outcome.gateway_overhead_ms.is_finite());
@@ -1321,7 +1358,9 @@ mod tests {
 
         for i in 0..5 {
             let request = NormalizedRequest::simple("mock/mock-premium", &format!("question {i}"));
-            let outcome = execute(&state, &auth, request, RoutingHint::Auto).await.unwrap();
+            let outcome = execute(&state, &auth, request, RoutingHint::Auto)
+                .await
+                .unwrap();
             let event = outcome.usage_event(&auth, 200);
             usage::emit(state.store.as_ref(), &event).await.unwrap();
         }
@@ -1341,15 +1380,23 @@ mod tests {
         let auth = auth_context("pro");
 
         let request = NormalizedRequest::simple("mock/mock-premium", "What is 2+2?");
-        let outcome = execute(&state, &auth, request, RoutingHint::Auto).await.unwrap();
+        let outcome = execute(&state, &auth, request, RoutingHint::Auto)
+            .await
+            .unwrap();
         let event = outcome.usage_event(&auth, 200);
 
         assert_eq!(event.org_id, auth.org_id);
         assert_eq!(event.api_key_id, auth.api_key_id);
         assert_eq!(event.requested_model, "mock/mock-premium");
         assert_eq!(event.served_model, "mock/mock-cheap");
-        assert_eq!(event.baseline_cost_mc, outcome.savings.baseline_cost.as_i64());
-        assert_eq!(event.gross_savings_mc, outcome.savings.gross_savings.as_i64());
+        assert_eq!(
+            event.baseline_cost_mc,
+            outcome.savings.baseline_cost.as_i64()
+        );
+        assert_eq!(
+            event.gross_savings_mc,
+            outcome.savings.gross_savings.as_i64()
+        );
         assert_eq!(event.aegis_fee_mc, outcome.savings.aegis_fee.as_i64());
         assert!(event.gross_savings_mc >= event.aegis_fee_mc);
     }
@@ -1361,7 +1408,9 @@ mod tests {
         let auth = auth_context("pro");
 
         let request = NormalizedRequest::simple("mock-model", "hello");
-        let outcome = execute(&state, &auth, request, RoutingHint::Auto).await.unwrap();
+        let outcome = execute(&state, &auth, request, RoutingHint::Auto)
+            .await
+            .unwrap();
 
         assert_eq!(outcome.served_model, "mock-model");
         assert_eq!(outcome.routing_reason, RoutingReason::Passthrough);
@@ -1375,9 +1424,9 @@ mod tests {
 
         let mut request = NormalizedRequest::simple("mock/mock-premium", "hi");
         request.messages = vec![
-            crate::types::Message::text(crate::types::Role::System, &"long prompt ".repeat(40)),
+            crate::types::Message::text(crate::types::Role::System, "long prompt ".repeat(40)),
             crate::types::Message::text(crate::types::Role::User, "hi"),
-            crate::types::Message::text(crate::types::Role::System, &"long prompt ".repeat(40)),
+            crate::types::Message::text(crate::types::Role::System, "long prompt ".repeat(40)),
         ];
 
         let normal = auth_context("pro");
@@ -1423,7 +1472,11 @@ mod tests {
             content: "hi".into(),
             finish_reason: None,
             tool_calls: None,
-            usage: TokenUsage { input_tokens: 42, output_tokens: 7, estimated: false },
+            usage: TokenUsage {
+                input_tokens: 42,
+                output_tokens: 7,
+                estimated: false,
+            },
             raw: None,
         };
         let resolved = resolve_usage(&reported, &request);
@@ -1441,7 +1494,11 @@ mod tests {
             content: "a fairly long response body".into(),
             finish_reason: None,
             tool_calls: None,
-            usage: TokenUsage { input_tokens: 0, output_tokens: 0, estimated: true },
+            usage: TokenUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                estimated: true,
+            },
             raw: None,
         };
         let resolved = resolve_usage(&unreported, &request);
@@ -1460,7 +1517,11 @@ mod tests {
                 content: "4".into(),
                 finish_reason: Some("stop".into()),
                 tool_calls: None,
-                usage: TokenUsage { input_tokens: 10, output_tokens: 1, estimated: false },
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 1,
+                    estimated: false,
+                },
                 raw: None,
             },
             served_model: "mock/mock-cheap".into(),
@@ -1470,7 +1531,11 @@ mod tests {
             cache: CacheOutcome::Miss,
             routing_reason: RoutingReason::Complexity,
             complexity_score: Some(0.1),
-            tokens: TokenUsage { input_tokens: 10, output_tokens: 1, estimated: false },
+            tokens: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 1,
+                estimated: false,
+            },
             gateway_overhead_ms: 0.4,
             total_latency_ms: 120,
             tokens_saved_by_compression: 0,
