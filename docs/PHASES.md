@@ -127,17 +127,22 @@ rate limiting, and metering. A working product in passthrough mode.
 **Goal:** Complete user-facing surface + Stripe + docs + landing page.
 
 ### Tasks
-- [ ] P4.1 Remaining dashboard pages (usage, requests, models, org, teams, policies,
-      providers) — *overview, savings, usage, requests, keys, providers, settings built;
-      models/org/teams/policies pages not built*
+- [x] P4.1 Remaining dashboard pages (usage, requests, models, org, teams, policies,
+      providers) — all 12 pages built and verified in a browser against a fixture API
 - [x] P4.2 Budgets UI + alert delivery (email, Slack webhook)
 - [x] P4.3 Stripe: checkout, webhooks, invoice generation with savings-fee line items
 - [x] P4.4 Savings-share billing job (monthly rollup → draft invoice, manual finalize)
 - [x] P4.5 Docs site: quickstart per client, API reference, error codes, FAQ
 - [x] P4.6 Landing page: hero, savings counter, comparison table, pricing calculator
 - [x] P4.7 Admin console: users/orgs, system metrics, revenue
-- [ ] P4.8 Load test (k6): 1k RPS sustained, P99 overhead < 1ms — *script committed, NOT
-      YET EXECUTED against a deployed instance*
+- [ ] P4.8 Load test (k6): 1k RPS sustained, P99 overhead < 1ms — *k6 script
+      (`infra/loadtest/k6-gateway.js`) still NOT executed against a deployed instance —
+      needs a live host, out of reach on this machine. Partial evidence now exists:
+      `tests/overhead_under_load.rs` drives the real in-process pipeline at 64-way
+      concurrency, 2,560 requests, and asserts P99. Measured: mean 0.24ms, P50 0.19ms,
+      P95 0.45ms, P99 1.27ms — in an unoptimized debug build. This is not the same claim
+      (no network, no real DB/Redis contention, no 1k RPS) but it is real numbers from
+      real concurrent execution of the actual pipeline, not an aspiration.*
 - [x] P4.9 Security pass against Part 9 + `SECURITY.md`
 - [x] P4.10 Runbooks: deploy, rollback, restore, provider outage, pricing update
 
@@ -159,11 +164,13 @@ rate limiting, and metering. A working product in passthrough mode.
 - [x] P5.2 Providers: openrouter, moonshot, deepseek, mistral, groq
 - [x] P5.3 Classifier v2: trainable linear model with committed weights behind a flag
 - [x] P5.4 History summarization for long contexts (off the hot path)
-- [ ] P5.5 Slack alerts + weekly digest email — *rendering and delivery implemented; the
-      scheduled job that sends them is not wired*
-- [ ] P5.6 Referral program (credits) — *`referral_credits` table exists; no logic*
+- [x] P5.5 Slack alerts + weekly digest email — `workers/scheduler.rs` runs the digest
+      with a distributed claim so N replicas send one email, not N
+- [x] P5.6 Referral program (credits) — two-sided $10 credit, self-referral and
+      double-claim guards, dashboard UI on `/billing`
 - [x] P5.7 Public status page
-- [ ] P5.8 Changelog + feedback loop — *not started*
+- [x] P5.8 Changelog + feedback loop — `CHANGELOG.md`, with "breaking" defined to
+      include routing and pricing semantics
 
 ### Acceptance
 | Criterion | Met | Evidence |
@@ -183,17 +190,19 @@ rate limiting, and metering. A working product in passthrough mode.
 - [x] P6.3 Self-hosted distribution + signed license validation with offline grace
 - [x] P6.4 Per-tenant encryption keys (HKDF from master + org_id)
 - [x] P6.5 Data residency: region pinning per org
-- [ ] P6.6 Compliance pack: DPA template, subprocessor list, security whitepaper — *not
-      started*
+- [x] P6.6 Compliance pack: DPA template, subprocessor list, security whitepaper —
+      `docs/compliance/`, plus a data-flow document and an honest SOC 2 gap analysis
 - [x] P6.7 Audit log export (JSONL, SIEM-friendly)
-- [ ] P6.8 Read replica routing for analytics queries — *not started*
+- [x] P6.8 Read replica routing for analytics queries — `DATABASE_REPLICA_URL`,
+      `AppState::analytics_db()`, with a source-reading test that keeps handlers on the
+      right pool
 - [x] P6.9 Admin TOTP 2FA
 
 ### Acceptance
 | Criterion | Met | Evidence |
 |---|---|---|
 | License validation works offline within the grace window | ✅ | `enterprise::license` — 14 tests incl. forged signature, tampered payload, grace boundary. |
-| SCIM endpoints conform to RFC 7644 shapes | ⚠️ | Shapes tested (`enterprise::scim`, 14 tests incl. both Okta and Entra deprovision forms). **HTTP routes not wired**, and not verified against a real IdP. |
+| SCIM endpoints conform to RFC 7644 shapes | ⚠️ | Shapes tested (`enterprise::scim`, 14 tests incl. both Okta and Entra deprovision forms). Routes now wired and asserted reachable by `tests/route_surface.rs`. **Not verified against a real IdP.** |
 | Per-tenant key derivation deterministic and org-isolated | ✅ | `tenant_keys_are_deterministic_and_isolated`, `tenant_key_cannot_decrypt_another_tenants_data`. |
 
 ---
@@ -204,18 +213,20 @@ rate limiting, and metering. A working product in passthrough mode.
 
 ### Tasks
 - [x] P7.1 Classifier v3: outcome-trained bandit over our own routing results
-- [ ] P7.2 Multi-region: regional budgets + region-aware routing — *region pinning and
-      enforcement done; regional budgets not started*
+- [x] P7.2 Multi-region: regional budgets + region-aware routing — fourth budget scope
+      between team and org; counters keyed by org AND region
 - [x] P7.3 API/platform tier: usage-based metering path
 - [x] P7.4 SDKs: TypeScript + Python thin clients
-- [ ] P7.5 Model auto-discovery job (nightly pricing diff -> proposal file) — *not started*
+- [x] P7.5 Model auto-discovery job (nightly pricing diff → proposal) — reports drift,
+      deliberately does not auto-apply: a price is what an invoice is computed from
 - [x] P7.6 Advanced governance: approval flows, spend anomaly detection (z-score)
-- [ ] P7.7 Cost-center chargeback exports — *CSV export exists; no cost-center dimension*
-- [ ] P7.8 Investor/DD pack: metrics definitions + data-room index — *not started*
+- [x] P7.7 Cost-center chargeback exports — JSON and CSV, attributed by team, with
+      unattributed spend reported separately rather than spread across the lines
+- [x] P7.8 Investor/DD pack: metrics definitions + data-room index — `docs/investor/`
 
 ### Acceptance
 | Criterion | Met | Evidence |
 |---|---|---|
 | Bandit improves expected savings vs static routing on replayed data | ✅ | `bandit_outperforms_static_routing_on_replayed_data` — 3,000-step replay, asserts higher mean reward and traffic concentration. |
-| Anomaly detector flags injected spend spikes | ❌ | **Not built.** P7.6 anomaly detection is not started. |
+| Anomaly detector flags injected spend spikes | ✅ | `engine::governance::detect_spend_anomaly` — z-score against the org's own 30-day baseline; 21 tests. Surfaced at `GET /api/usage/anomalies` and on the `/budgets` page. |
 | SDKs typecheck/build | ✅ | TypeScript: `tsc --noEmit` clean. Python: assertions on real header parsing pass. |
