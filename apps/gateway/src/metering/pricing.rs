@@ -18,6 +18,13 @@ use crate::money::MicroCents;
 use crate::types::ModelTier;
 use std::collections::HashMap;
 
+/// Marker written into `source` for any price that has not been re-verified.
+///
+/// The admin console and `docs/runbooks/pricing-update.md` both search for this string,
+/// so a row carrying it is impossible to lose track of.
+pub const UNVERIFIED: &str =
+    "UNVERIFIED — re-check before billing, see docs/runbooks/pricing-update.md";
+
 /// Pricing and capabilities for one model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelPricing {
@@ -235,11 +242,23 @@ impl PricingTable {
     /// on the stated date; providers change them without notice.
     pub fn with_seed_data() -> PricingTable {
         let s =
-            |provider: &str, date: &str| format!("{provider} published pricing — checked {date}");
+            |provider: &str, date: &str| format!("{provider} published pricing — verified {date}");
 
+        // Verified 2026-08-21 against each published pricing page.
+        //
+        // Three conservative choices, applied consistently, because every one of these
+        // numbers becomes a savings claim on a customer invoice:
+        //
+        //   * UNCACHED input rates. Assuming a cache discount we do not always receive
+        //     would understate cost and therefore overstate savings.
+        //   * BASE context tier. Gemini 2.5 Pro charges more above 200k tokens; quoting
+        //     the base rate means long-context requests cost us margin, not the customer.
+        //   * PEAK rates for DeepSeek, which halves prices off-peak. Billing the off-peak
+        //     rate for a peak-hour request would under-state what the request really cost.
         let models = vec![
             // ---------------- OpenAI ----------------
-            model(
+            // developers.openai.com/api/docs/pricing
+            m(
                 "openai/gpt-5",
                 "openai",
                 "GPT-5",
@@ -249,9 +268,9 @@ impl PricingTable {
                 400_000,
                 true,
                 true,
-                s("OpenAI", "2026-08-20"),
+                s("OpenAI", "2026-08-21"),
             ),
-            model(
+            m(
                 "openai/gpt-5-mini",
                 "openai",
                 "GPT-5 mini",
@@ -261,9 +280,9 @@ impl PricingTable {
                 400_000,
                 true,
                 true,
-                s("OpenAI", "2026-08-20"),
+                s("OpenAI", "2026-08-21"),
             ),
-            model(
+            m(
                 "openai/gpt-5-nano",
                 "openai",
                 "GPT-5 nano",
@@ -273,9 +292,9 @@ impl PricingTable {
                 400_000,
                 true,
                 true,
-                s("OpenAI", "2026-08-20"),
+                s("OpenAI", "2026-08-21"),
             ),
-            model(
+            m(
                 "openai/gpt-4o",
                 "openai",
                 "GPT-4o",
@@ -285,9 +304,9 @@ impl PricingTable {
                 128_000,
                 true,
                 true,
-                s("OpenAI", "2026-08-20"),
+                s("OpenAI", "2026-08-21"),
             ),
-            model(
+            m(
                 "openai/gpt-4o-mini",
                 "openai",
                 "GPT-4o mini",
@@ -297,9 +316,9 @@ impl PricingTable {
                 128_000,
                 true,
                 true,
-                s("OpenAI", "2026-08-20"),
+                s("OpenAI", "2026-08-21"),
             ),
-            model(
+            m(
                 "openai/gpt-4.1",
                 "openai",
                 "GPT-4.1",
@@ -309,9 +328,9 @@ impl PricingTable {
                 1_047_576,
                 true,
                 true,
-                s("OpenAI", "2026-08-20"),
+                s("OpenAI", "2026-08-21"),
             ),
-            model(
+            m(
                 "openai/gpt-4.1-mini",
                 "openai",
                 "GPT-4.1 mini",
@@ -321,9 +340,9 @@ impl PricingTable {
                 1_047_576,
                 true,
                 true,
-                s("OpenAI", "2026-08-20"),
+                s("OpenAI", "2026-08-21"),
             ),
-            model(
+            m(
                 "openai/gpt-4.1-nano",
                 "openai",
                 "GPT-4.1 nano",
@@ -333,9 +352,9 @@ impl PricingTable {
                 1_047_576,
                 true,
                 true,
-                s("OpenAI", "2026-08-20"),
+                s("OpenAI", "2026-08-21"),
             ),
-            model(
+            m(
                 "openai/o3",
                 "openai",
                 "o3",
@@ -345,9 +364,9 @@ impl PricingTable {
                 200_000,
                 true,
                 true,
-                s("OpenAI", "2026-08-20"),
+                s("OpenAI", "2026-08-21"),
             ),
-            model(
+            m(
                 "openai/o4-mini",
                 "openai",
                 "o4-mini",
@@ -357,9 +376,9 @@ impl PricingTable {
                 200_000,
                 true,
                 true,
-                s("OpenAI", "2026-08-20"),
+                s("OpenAI", "2026-08-21"),
             ),
-            model(
+            m(
                 "openai/text-embedding-3-small",
                 "openai",
                 "Embedding 3 small",
@@ -369,9 +388,9 @@ impl PricingTable {
                 8_191,
                 false,
                 false,
-                s("OpenAI", "2026-08-20"),
+                s("OpenAI", "2026-08-21"),
             ),
-            model(
+            m(
                 "openai/text-embedding-3-large",
                 "openai",
                 "Embedding 3 large",
@@ -381,10 +400,75 @@ impl PricingTable {
                 8_191,
                 false,
                 false,
-                s("OpenAI", "2026-08-20"),
+                s("OpenAI", "2026-08-21"),
             ),
             // ---------------- Anthropic ----------------
-            model(
+            // platform.claude.com/docs/en/about-claude/pricing
+            //
+            // Sonnet 5 at $2/$10 is cheaper than Sonnet 4.5 at $3/$15, so the router now
+            // prefers it — a real saving that exists only because this table is current.
+            // That is the case for the monthly pricing runbook in one line.
+            m(
+                "anthropic/claude-fable-5",
+                "anthropic",
+                "Claude Fable 5",
+                ModelTier::Frontier,
+                10.00,
+                50.00,
+                1_000_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-21"),
+            ),
+            m(
+                "anthropic/claude-opus-5",
+                "anthropic",
+                "Claude Opus 5",
+                ModelTier::Frontier,
+                5.00,
+                25.00,
+                1_000_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-21"),
+            ),
+            m(
+                "anthropic/claude-opus-4-8",
+                "anthropic",
+                "Claude Opus 4.8",
+                ModelTier::Frontier,
+                5.00,
+                25.00,
+                1_000_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-21"),
+            ),
+            m(
+                "anthropic/claude-opus-4-7",
+                "anthropic",
+                "Claude Opus 4.7",
+                ModelTier::Frontier,
+                5.00,
+                25.00,
+                1_000_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-21"),
+            ),
+            m(
+                "anthropic/claude-opus-4-6",
+                "anthropic",
+                "Claude Opus 4.6",
+                ModelTier::Frontier,
+                5.00,
+                25.00,
+                1_000_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-21"),
+            ),
+            m(
                 "anthropic/claude-opus-4-5",
                 "anthropic",
                 "Claude Opus 4.5",
@@ -394,9 +478,33 @@ impl PricingTable {
                 200_000,
                 true,
                 true,
-                s("Anthropic", "2026-08-20"),
+                s("Anthropic", "2026-08-21"),
             ),
-            model(
+            m(
+                "anthropic/claude-sonnet-5",
+                "anthropic",
+                "Claude Sonnet 5",
+                ModelTier::Premium,
+                2.00,
+                10.00,
+                1_000_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-21"),
+            ),
+            m(
+                "anthropic/claude-sonnet-4-6",
+                "anthropic",
+                "Claude Sonnet 4.6",
+                ModelTier::Premium,
+                3.00,
+                15.00,
+                1_000_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-21"),
+            ),
+            m(
                 "anthropic/claude-sonnet-4-5",
                 "anthropic",
                 "Claude Sonnet 4.5",
@@ -406,9 +514,9 @@ impl PricingTable {
                 200_000,
                 true,
                 true,
-                s("Anthropic", "2026-08-20"),
+                s("Anthropic", "2026-08-21"),
             ),
-            model(
+            m(
                 "anthropic/claude-haiku-4-5",
                 "anthropic",
                 "Claude Haiku 4.5",
@@ -418,34 +526,11 @@ impl PricingTable {
                 200_000,
                 true,
                 true,
-                s("Anthropic", "2026-08-20"),
-            ),
-            model(
-                "anthropic/claude-opus-4-1",
-                "anthropic",
-                "Claude Opus 4.1",
-                ModelTier::Frontier,
-                15.00,
-                75.00,
-                200_000,
-                true,
-                true,
-                s("Anthropic", "2026-08-20"),
-            ),
-            model(
-                "anthropic/claude-3-5-haiku",
-                "anthropic",
-                "Claude 3.5 Haiku",
-                ModelTier::Cheap,
-                0.80,
-                4.00,
-                200_000,
-                true,
-                true,
-                s("Anthropic", "2026-08-20"),
+                s("Anthropic", "2026-08-21"),
             ),
             // ---------------- Google ----------------
-            model(
+            // ai.google.dev/gemini-api/docs/pricing — base context tier.
+            m(
                 "google/gemini-2.5-pro",
                 "google",
                 "Gemini 2.5 Pro",
@@ -455,9 +540,9 @@ impl PricingTable {
                 1_048_576,
                 true,
                 true,
-                s("Google", "2026-08-20"),
+                s("Google", "2026-08-21"),
             ),
-            model(
+            m(
                 "google/gemini-2.5-flash",
                 "google",
                 "Gemini 2.5 Flash",
@@ -467,9 +552,9 @@ impl PricingTable {
                 1_048_576,
                 true,
                 true,
-                s("Google", "2026-08-20"),
+                s("Google", "2026-08-21"),
             ),
-            model(
+            m(
                 "google/gemini-2.5-flash-lite",
                 "google",
                 "Gemini 2.5 Flash Lite",
@@ -479,47 +564,39 @@ impl PricingTable {
                 1_048_576,
                 true,
                 true,
-                s("Google", "2026-08-20"),
-            ),
-            model(
-                "google/gemini-2.0-flash",
-                "google",
-                "Gemini 2.0 Flash",
-                ModelTier::Cheap,
-                0.10,
-                0.40,
-                1_048_576,
-                true,
-                true,
-                s("Google", "2026-08-20"),
+                s("Google", "2026-08-21"),
             ),
             // ---------------- DeepSeek ----------------
-            model(
-                "deepseek/deepseek-chat",
+            // api-docs.deepseek.com — PEAK rates, see the note above.
+            m(
+                "deepseek/deepseek-v4-flash",
                 "deepseek",
-                "DeepSeek Chat",
+                "DeepSeek V4 Flash",
                 ModelTier::Cheap,
-                0.27,
-                1.10,
-                128_000,
+                0.44,
+                1.32,
+                1_000_000,
                 true,
                 false,
-                s("DeepSeek", "2026-08-20"),
+                s("DeepSeek", "2026-08-21"),
             ),
-            model(
-                "deepseek/deepseek-reasoner",
+            m(
+                "deepseek/deepseek-v4-pro",
                 "deepseek",
-                "DeepSeek Reasoner",
+                "DeepSeek V4 Pro",
                 ModelTier::Mid,
-                0.55,
-                2.19,
-                128_000,
+                1.32,
+                3.96,
+                1_000_000,
                 true,
                 false,
-                s("DeepSeek", "2026-08-20"),
+                s("DeepSeek", "2026-08-21"),
             ),
-            // ---------------- Mistral ----------------
-            model(
+            // ---------------- Mistral / Groq / Moonshot ----------------
+            // NOT re-verified on 2026-08-21. Marked so the admin console surfaces them and
+            // the runbook query finds them. Minor by volume, but an unverified row is an
+            // unverified row and must not pretend otherwise.
+            m(
                 "mistral/mistral-large-latest",
                 "mistral",
                 "Mistral Large",
@@ -529,9 +606,9 @@ impl PricingTable {
                 131_000,
                 true,
                 false,
-                s("Mistral", "2026-08-20"),
+                UNVERIFIED.to_string(),
             ),
-            model(
+            m(
                 "mistral/mistral-small-latest",
                 "mistral",
                 "Mistral Small",
@@ -541,10 +618,9 @@ impl PricingTable {
                 131_000,
                 true,
                 false,
-                s("Mistral", "2026-08-20"),
+                UNVERIFIED.to_string(),
             ),
-            // ---------------- Groq ----------------
-            model(
+            m(
                 "groq/llama-3.3-70b-versatile",
                 "groq",
                 "Llama 3.3 70B (Groq)",
@@ -554,9 +630,9 @@ impl PricingTable {
                 131_000,
                 true,
                 false,
-                s("Groq", "2026-08-20"),
+                UNVERIFIED.to_string(),
             ),
-            model(
+            m(
                 "groq/llama-3.1-8b-instant",
                 "groq",
                 "Llama 3.1 8B (Groq)",
@@ -566,10 +642,9 @@ impl PricingTable {
                 131_000,
                 true,
                 false,
-                s("Groq", "2026-08-20"),
+                UNVERIFIED.to_string(),
             ),
-            // ---------------- Moonshot ----------------
-            model(
+            m(
                 "moonshot/kimi-k2",
                 "moonshot",
                 "Kimi K2",
@@ -579,25 +654,75 @@ impl PricingTable {
                 128_000,
                 true,
                 false,
-                s("Moonshot", "2026-08-20"),
+                UNVERIFIED.to_string(),
             ),
         ];
 
         let mut table = PricingTable::from_models(models);
 
-        // Common aliases callers actually send.
+        // Retired and deprecated models. Retained but INACTIVE, so a historical usage
+        // record can still be priced while the router will never select one.
+        for retired in [
+            m(
+                "anthropic/claude-opus-4-1",
+                "anthropic",
+                "Claude Opus 4.1 (retired)",
+                ModelTier::Frontier,
+                15.00,
+                75.00,
+                200_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-21"),
+            ),
+            m(
+                "anthropic/claude-3-5-haiku",
+                "anthropic",
+                "Claude 3.5 Haiku (retired)",
+                ModelTier::Cheap,
+                0.80,
+                4.00,
+                200_000,
+                true,
+                true,
+                s("Anthropic", "2026-08-21"),
+            ),
+            m(
+                "google/gemini-2.0-flash",
+                "google",
+                "Gemini 2.0 Flash (deprecated)",
+                ModelTier::Cheap,
+                0.10,
+                0.40,
+                1_048_576,
+                true,
+                true,
+                s("Google", "2026-08-21"),
+            ),
+        ] {
+            table.insert(ModelPricing {
+                is_active: false,
+                ..retired
+            });
+        }
+
+        // Aliases callers actually send.
         table.add_alias("gpt-4o-latest", "openai/gpt-4o");
         table.add_alias("chatgpt-4o-latest", "openai/gpt-4o");
         table.add_alias("claude-3-5-sonnet", "anthropic/claude-sonnet-4-5");
         table.add_alias("claude-sonnet-4-5-20250929", "anthropic/claude-sonnet-4-5");
         table.add_alias("claude-opus-4-5-20251101", "anthropic/claude-opus-4-5");
         table.add_alias("gemini-flash", "google/gemini-2.5-flash");
+        // DeepSeek renamed its whole lineup. These keep an existing integration working
+        // instead of failing with an unknown model.
+        table.add_alias("deepseek-chat", "deepseek/deepseek-v4-flash");
+        table.add_alias("deepseek-reasoner", "deepseek/deepseek-v4-pro");
         table
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn model(
+fn m(
     id: &str,
     provider: &str,
     display: &str,
@@ -668,16 +793,106 @@ mod tests {
 
     #[test]
     fn every_seeded_price_has_dated_provenance() {
-        // Part 13 item 8: every cost number traceable to a dated source.
+        // Part 13 item 8: every cost number traceable to a dated source. Asserting an
+        // actual YYYY-MM-DD rather than a keyword, so a source that merely *sounds*
+        // authoritative without saying when it was checked still fails.
         for m in table().all() {
             assert!(!m.source.is_empty(), "{} has no source", m.model_id);
+
+            let has_date = m.source.split_whitespace().any(|word| {
+                let bytes = word.as_bytes();
+                bytes.len() == 10
+                    && bytes[4] == b'-'
+                    && bytes[7] == b'-'
+                    && word.chars().filter(|c| c.is_ascii_digit()).count() == 8
+            });
+            let flagged_unverified = m.source.contains("UNVERIFIED");
+
             assert!(
-                m.source.contains("checked"),
-                "{} source lacks a date: {}",
+                has_date || flagged_unverified,
+                "{} has neither a date nor an UNVERIFIED marker: {}",
                 m.model_id,
                 m.source
             );
         }
+    }
+
+    #[test]
+    fn unverified_prices_are_findable() {
+        // The runbook and the admin console both locate outstanding rows by this marker.
+        // If it ever stops matching, an unverified price becomes invisible — which is
+        // exactly how a wrong number reaches an invoice.
+        let t = table();
+        let unverified: Vec<&str> = t
+            .all()
+            .filter(|m| m.source.contains(UNVERIFIED))
+            .map(|m| m.model_id.as_str())
+            .collect();
+
+        // Mistral, Groq, and Moonshot were not re-verified on 2026-08-21.
+        assert_eq!(
+            unverified.len(),
+            5,
+            "expected 5 unverified rows, found: {unverified:?}"
+        );
+        assert!(unverified.iter().all(|id| {
+            id.starts_with("mistral/") || id.starts_with("groq/") || id.starts_with("moonshot/")
+        }));
+    }
+
+    #[test]
+    fn retired_models_are_priced_but_never_routed_to() {
+        // A historical usage record must still price correctly, but the router must not
+        // select a model the provider has withdrawn.
+        let t = table();
+
+        // Still resolvable and priceable.
+        assert!(t.get("anthropic/claude-opus-4-1").is_some());
+        assert!(t.cost("anthropic/claude-opus-4-1", 1_000, 500).is_some());
+
+        // But absent from the active set the router draws candidates from.
+        assert!(
+            !t.all().any(|m| m.model_id == "anthropic/claude-opus-4-1"),
+            "a retired model appeared in the active set"
+        );
+        for candidate in t.cheaper_alternatives("openai/gpt-5", Requirements::default()) {
+            assert!(candidate.is_active, "{} is retired", candidate.model_id);
+        }
+    }
+
+    #[test]
+    fn a_newer_cheaper_model_wins_over_its_predecessor() {
+        // Sonnet 5 ($2/$10) is cheaper than Sonnet 4.5 ($3/$15). Keeping the table current
+        // is what turns that into a real saving, so it is worth asserting directly.
+        let t = table();
+        let sonnet_5 = t.get("anthropic/claude-sonnet-5").expect("sonnet 5");
+        let sonnet_45 = t.get("anthropic/claude-sonnet-4-5").expect("sonnet 4.5");
+
+        assert!(sonnet_5.blended_per_mtok() < sonnet_45.blended_per_mtok());
+
+        let alternatives =
+            t.cheaper_alternatives("anthropic/claude-sonnet-4-5", Requirements::default());
+        assert!(
+            alternatives
+                .iter()
+                .any(|m| m.model_id == "anthropic/claude-sonnet-5"),
+            "Sonnet 5 should be offered as a cheaper alternative to Sonnet 4.5"
+        );
+    }
+
+    #[test]
+    fn renamed_provider_models_still_resolve_through_aliases() {
+        // DeepSeek renamed its entire lineup. An existing integration sending the old
+        // name must keep working rather than failing with an unknown model.
+        let t = table();
+        assert_eq!(
+            t.resolve("deepseek-chat"),
+            Some("deepseek/deepseek-v4-flash")
+        );
+        assert_eq!(
+            t.resolve("deepseek-reasoner"),
+            Some("deepseek/deepseek-v4-pro")
+        );
     }
 
     #[test]
@@ -769,7 +984,7 @@ mod tests {
 
     #[test]
     fn blended_price_weights_input_three_to_one() {
-        let m = model(
+        let m = m(
             "test/m",
             "test",
             "M",

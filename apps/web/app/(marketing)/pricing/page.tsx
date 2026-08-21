@@ -3,223 +3,239 @@ import Link from "next/link";
 import { SavingsCalculator } from "@/components/savings-calculator";
 
 export const metadata: Metadata = {
-  title: "Pricing",
+  title: "Transparent Enterprise Pricing — Aegis Gateway",
   description:
-    "A subscription plus a share of verified savings. We only earn the share when we actually reduce your bill.",
+    "Predictable base subscription plus an auditable share of verified savings. If we deliver zero savings in a month, you owe zero performance fee.",
 };
 
 const TIERS = [
   {
     id: "free",
-    name: "Free",
+    name: "Free / Starter",
     price: "$0",
     cadence: "forever",
-    share: "No savings share",
-    summary: "Enough to see real numbers on your own traffic.",
+    share: "0% savings share",
+    summary: "For side projects & initial traffic benchmarking.",
     features: [
       "10,000 requests per month",
-      "Shared models (GPT-4o mini, Gemini Flash)",
-      "Full savings dashboard",
-      "Exact-match caching",
-      "10 requests/minute",
+      "Shared models (GPT-4o mini, Flash)",
+      "Full savings dashboard & metrics",
+      "Exact-match vector caching",
+      "Community Discord support",
     ],
     cta: "Start free",
     highlighted: false,
+    badge: "Free Tier",
   },
   {
     id: "pro",
-    name: "Pro",
+    name: "Pro Developer",
     price: "$29",
     cadence: "per month",
     share: "+ 20% of verified savings",
-    summary: "For an individual developer or a small production workload.",
+    summary: "For production SaaS apps, indie hackers, and growing startups.",
     features: [
-      "Unlimited requests",
+      "Unlimited monthly requests",
       "Bring your own provider keys",
-      "Full optimization engine",
-      "Semantic caching",
-      "Routing policies",
-      "600 requests/minute",
+      "Quality-aware routing classifier",
+      "Multi-tier semantic caching",
+      "Custom routing policies",
+      "Standard email support",
     ],
-    cta: "Start free, upgrade later",
+    cta: "Start 14-day trial",
     highlighted: true,
+    badge: "Most Popular",
   },
   {
     id: "team",
-    name: "Team",
+    name: "Team & Growth",
     price: "$299",
     cadence: "per month",
     share: "+ 15% of verified savings",
-    summary: "For a team that needs shared governance and per-team budgets.",
+    summary: "For scaling engineering organizations needing governance and team budgets.",
     features: [
       "Everything in Pro",
-      "Up to 10 seats",
-      "Roles and permissions",
-      "Per-team budgets and alerts",
-      "Slack notifications",
-      "3,000 requests/minute",
+      "Up to 10 seats & RBAC",
+      "Per-team API key budget limits",
+      "Slack threshold alerts & webhooks",
+      "3,000 requests/minute throughput",
+      "Priority engineering support",
     ],
-    cta: "Start free, upgrade later",
+    cta: "Start Team trial",
     highlighted: false,
+    badge: "For Teams",
   },
   {
     id: "enterprise",
-    name: "Enterprise",
+    name: "Enterprise & VPC",
     price: "$2,000+",
     cadence: "per month",
     share: "+ 10% of verified savings",
-    summary: "For regulated environments and self-hosted deployments.",
+    summary: "For regulated healthcare, fintech, and security-first enterprises.",
     features: [
       "Everything in Team",
-      "SSO/SAML and SCIM",
-      "Self-hosted in your own VPC",
-      "Data residency pinning",
-      "Audit log export",
-      "99.9% SLA",
+      "Self-hosted Docker / Kubernetes in your VPC",
+      "SSO / SAML (Okta, Azure AD, Google)",
+      "Zero prompt retention mode",
+      "Data residency pinning (US/EU)",
+      "99.99% uptime SLA & dedicated architect",
     ],
-    cta: "Contact us",
+    cta: "Contact Enterprise Sales",
     highlighted: false,
+    badge: "Custom VPC",
   },
 ] as const;
 
 export default function PricingPage() {
   return (
-    <>
-      <section className="mx-auto max-w-5xl px-6 pt-16 pb-10">
-        <h1 className="text-3xl tracking-tight text-[var(--color-ink)]">
-          You pay us a share of what we save you
+    <div className="space-y-16 sm:space-y-24 pb-20 text-black">
+      {/* Header */}
+      <section className="mx-auto max-w-5xl px-6 pt-12 text-center">
+        <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#0D9488]">
+          Incentive-Aligned Pricing
+        </div>
+        <h1 className="mt-3 text-4xl sm:text-6xl font-black tracking-tight text-black">
+          You only pay us when we save you money
         </h1>
-        <p className="mt-3 max-w-2xl text-lg leading-relaxed text-[var(--color-ink-muted)]">
-          A subscription for the platform, plus a percentage of savings we actually
-          delivered. If a month produces no savings, there is no share to pay — the
-          incentive runs the right way round.
+        <p className="mx-auto mt-4 max-w-2xl text-base sm:text-lg leading-relaxed text-[#403B35] font-semibold">
+          A predictable base subscription for the gateway platform, plus a transparent percentage of verified savings. If a month produces zero savings, you pay zero performance fee.
         </p>
       </section>
 
-      <section className="mx-auto max-w-5xl px-6 pb-16">
-        <div className="grid gap-5 lg:grid-cols-4">
+      {/* Pricing Cards */}
+      <section className="mx-auto max-w-6xl px-6">
+        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
           {TIERS.map((tier) => (
             <div
               key={tier.id}
-              className={`card flex flex-col p-6 ${
+              className={`rounded-3xl border bg-white p-6 shadow-xs flex flex-col justify-between transition-all ${
                 tier.highlighted
-                  ? "border-[var(--color-accent-dim)] ring-1 ring-[var(--color-accent-dim)]"
-                  : ""
+                  ? "border-[#22C7B2] ring-2 ring-[#22C7B2] shadow-md scale-[1.02]"
+                  : "border-[#D9CFC7] hover:border-black"
               }`}
             >
-              {tier.highlighted && (
-                <div className="mb-3 text-xs font-medium uppercase tracking-wide text-[var(--color-accent)]">
-                  Most popular
-                </div>
-              )}
-
-              <h2 className="text-base font-medium text-[var(--color-ink)]">
-                {tier.name}
-              </h2>
-
-              <div className="mt-3 flex items-baseline gap-1.5">
-                <span className="tabular text-2xl text-[var(--color-ink)]">
-                  {tier.price}
-                </span>
-                <span className="text-xs text-[var(--color-ink-faint)]">
-                  {tier.cadence}
-                </span>
-              </div>
-              <div className="mt-1 text-xs text-[var(--color-accent)]">{tier.share}</div>
-
-              <p className="mt-4 text-sm leading-relaxed text-[var(--color-ink-subtle)]">
-                {tier.summary}
-              </p>
-
-              <ul className="mt-5 flex-1 space-y-2">
-                {tier.features.map((feature) => (
-                  <li
-                    key={feature}
-                    className="flex gap-2 text-sm text-[var(--color-ink-muted)]"
+              <div>
+                <div className="flex items-center justify-between">
+                  <span
+                    className={`text-[11px] font-black uppercase tracking-wider px-3 py-1 rounded-full ${
+                      tier.highlighted
+                        ? "bg-[#22C7B2] text-[#0A1926]"
+                        : "bg-[#EFE9E3] text-black border border-[#D9CFC7]"
+                    }`}
                   >
-                    <span
-                      aria-hidden="true"
-                      className="mt-0.5 text-[var(--color-accent)]"
-                    >
-                      ✓
-                    </span>
-                    {feature}
-                  </li>
-                ))}
-              </ul>
+                    {tier.badge}
+                  </span>
+                </div>
 
-              <Link
-                href={tier.id === "enterprise" ? "/docs" : "/signup"}
-                className={`mt-6 block rounded-[var(--radius)] px-3 py-2 text-center text-sm transition-colors ${
-                  tier.highlighted
-                    ? "bg-[var(--color-accent)] font-medium text-[#04140c] hover:bg-[#4ee9a0]"
-                    : "border border-[var(--color-line-strong)] text-[var(--color-ink-muted)] hover:bg-[var(--color-raised)] hover:text-[var(--color-ink)]"
-                }`}
-              >
-                {tier.cta}
-              </Link>
+                {/* Card Title - Pure Jet Black */}
+                <h2 className="mt-5 text-xl font-black text-black tracking-tight">
+                  {tier.name}
+                </h2>
+
+                <div className="mt-3 flex items-baseline gap-1.5">
+                  <span className="tabular text-4xl font-black text-black">
+                    {tier.price}
+                  </span>
+                  <span className="text-xs text-[#70685E] font-extrabold">
+                    {tier.cadence}
+                  </span>
+                </div>
+
+                <div className="mt-1.5 text-xs font-black text-[#0D9488]">
+                  {tier.share}
+                </div>
+
+                <p className="mt-4 text-xs leading-relaxed text-[#403B35] font-medium">
+                  {tier.summary}
+                </p>
+
+                <div className="mt-6 border-t border-[#D9CFC7] pt-4">
+                  <ul className="space-y-2.5">
+                    {tier.features.map((feature) => (
+                      <li
+                        key={feature}
+                        className="flex items-start gap-2 text-xs text-[#403B35] font-semibold"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="mt-0.5 text-[#0D9488] font-black shrink-0"
+                        >
+                          ✓
+                        </span>
+                        <span>{feature}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+
+              <div className="mt-8 pt-4 border-t border-[#D9CFC7]">
+                <Link
+                  href={tier.id === "enterprise" ? "/connect" : "/signup"}
+                  className={`block w-full rounded-lg px-4 py-2.5 text-center text-xs font-bold transition-all ${
+                    tier.highlighted
+                      ? "bg-[#22C7B2] text-[#0A1926] shadow-xs hover:opacity-90"
+                      : "border border-black bg-white text-black hover:bg-[#EFE9E3]"
+                  }`}
+                >
+                  {tier.cta}
+                </Link>
+              </div>
             </div>
           ))}
         </div>
-
-        <p className="mt-6 text-sm text-[var(--color-ink-subtle)]">
-          Also available: an API tier at $0.0001 per request plus provider passthrough, for
-          platforms building on top of Aegis.
-        </p>
       </section>
 
-      <section className="border-t border-[var(--color-line)] bg-[var(--color-surface)]">
-        <div className="mx-auto max-w-5xl px-6 py-16">
-          <h2 className="text-2xl tracking-tight text-[var(--color-ink)]">
-            Work out your own number
+      {/* Interactive Savings Calculator */}
+      <section className="mx-auto max-w-5xl px-6">
+        <div className="text-center max-w-2xl mx-auto mb-8">
+          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#0D9488]">
+            Estimate Your Invoices
+          </div>
+          <h2 className="mt-3 text-3xl sm:text-4xl font-black tracking-tight text-black">
+            Model your net ROI and enterprise savings
           </h2>
-          <p className="mt-2 max-w-2xl text-[var(--color-ink-subtle)]">
-            Including whether we are worth it at your spend. The calculator will tell you
-            if we are not.
+          <p className="mt-2 text-sm text-[#403B35] font-semibold">
+            Every formula is transparent, open, and auditable.
           </p>
-          <div className="mt-8">
-            <SavingsCalculator />
-          </div>
         </div>
+
+        <SavingsCalculator />
       </section>
 
-      <section className="border-t border-[var(--color-line)]">
-        <div className="mx-auto max-w-3xl px-6 py-16">
-          <h2 className="text-2xl tracking-tight text-[var(--color-ink)]">
-            How the savings share is calculated
+      {/* The Math Behind the Savings Share */}
+      <section className="mx-auto max-w-3xl px-6">
+        <div className="rounded-3xl border border-[#D9CFC7] bg-white p-8 shadow-xs">
+          <h2 className="text-2xl font-black tracking-tight text-black">
+            How the performance savings share is audited
           </h2>
 
-          <div className="mt-6 space-y-4 text-[var(--color-ink-muted)]">
-            <p className="leading-relaxed">
-              For every request we record what it would have cost on the model you asked
-              for (the <em>baseline</em>) and what it actually cost on the model we used
-              (the <em>actual</em>). The difference is the gross saving.
+          <div className="mt-5 space-y-4 text-xs leading-relaxed text-[#403B35] font-medium">
+            <p>
+              For every single request routed through Aegis, we record what it would have cost on the baseline requested model vs. what it actually cost on the routed model:
             </p>
-            <pre className="tabular overflow-x-auto rounded-[var(--radius)] border border-[var(--color-line)] bg-[var(--color-base)] p-4 text-xs">
-              <code>{`gross_savings = baseline_cost − actual_cost      (floored at zero)
-aegis_fee     = gross_savings × your_rate
-you_keep      = gross_savings − aegis_fee`}</code>
-            </pre>
-            <p className="leading-relaxed">
-              Three properties follow, and all three are enforced in code rather than by
-              policy:
-            </p>
-            <ul className="space-y-2 pl-5 text-sm leading-relaxed">
-              <li className="list-disc">
-                The fee can never exceed the saving it is charged on.
-              </li>
-              <li className="list-disc">
-                A month where routing cost more than the requested model would have
-                produces a fee of zero. That overspend is ours, not yours.
-              </li>
-              <li className="list-disc">
-                Every figure is integer micro-cents, so your recomputation from the
-                exported CSV matches ours exactly — not approximately.
-              </li>
-            </ul>
+            <div className="rounded-2xl border border-[#D9CFC7] bg-[#F9F8F6] p-4 font-mono text-xs text-black font-bold leading-relaxed">
+              <code>{`gross_savings = baseline_cost - actual_cost     # floored at 0
+aegis_share   = gross_savings * your_plan_rate
+net_savings   = gross_savings - aegis_share          # what you keep`}</code>
+            </div>
+            <div className="space-y-2 pt-2">
+              <div className="flex items-start gap-2 font-bold text-black text-xs">
+                <span className="text-[#0D9488] font-black">1.</span>
+                <span>The performance fee can never exceed the verified savings.</span>
+              </div>
+              <div className="flex items-start gap-2 font-bold text-black text-xs">
+                <span className="text-[#0D9488] font-black">2.</span>
+                <span>Any month with zero savings generates exactly $0 in share fees.</span>
+              </div>
+              <div className="flex items-start gap-2 font-bold text-black text-xs">
+                <span className="text-[#0D9488] font-black">3.</span>
+                <span>All arithmetic is integer micro-cents, avoiding rounding drift.</span>
+              </div>
+            </div>
           </div>
         </div>
       </section>
-    </>
+    </div>
   );
 }

@@ -1,42 +1,51 @@
 import type { Metadata, Viewport } from "next";
+import { Plus_Jakarta_Sans, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
-/**
- * Root metadata.
- *
- * Uses the Next.js metadata API rather than hand-written `<head>` tags, so the framework
- * deduplicates and merges correctly with per-route overrides.
- */
+const sans = Plus_Jakarta_Sans({
+  subsets: ["latin"],
+  variable: "--font-sans",
+  display: "swap",
+});
+
+const mono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-mono",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "https://aegis.dev"),
   title: {
-    default: "Aegis — Cut your AI bill by up to 90%",
+    default: "Aegis — Enterprise AI Cost Optimization & Intelligent Gateway",
     template: "%s · Aegis",
   },
   description:
-    "An AI gateway that routes every request to the cheapest model that preserves quality, caches aggressively, and proves the savings per request. Change one base URL.",
+    "The intelligent routing gateway for US enterprises. Reduce LLM API spend by up to 90% with quality-aware routing, semantic caching, and auditable per-request receipts. Change one base URL.",
   keywords: [
     "AI gateway",
     "LLM cost optimization",
+    "Enterprise AI spend",
     "OpenAI proxy",
     "Anthropic proxy",
     "AI cost reduction",
     "semantic cache",
     "model routing",
+    "Y Combinator AI startup",
   ],
   authors: [{ name: "Aegis" }],
   openGraph: {
     type: "website",
     siteName: "Aegis",
-    title: "Cut your AI bill by up to 90%. Keep the quality. Prove it.",
+    title: "Cut your Enterprise AI bill by up to 90%. Keep full quality. Prove it.",
     description:
-      "An AI gateway that routes every request to the cheapest model that preserves quality — with per-request, auditable savings attribution.",
+      "Enterprise AI gateway with quality-aware routing, semantic caching, and real-time auditable savings attribution.",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Cut your AI bill by up to 90%. Keep the quality. Prove it.",
+    title: "Aegis — Cut Enterprise AI bills by up to 90%",
     description:
-      "An AI gateway with quality-aware routing, semantic caching, and auditable savings.",
+      "Intelligent AI gateway with quality-aware routing, semantic caching, and auditable savings.",
   },
   robots: {
     index: true,
@@ -45,16 +54,18 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#08090b",
-  colorScheme: "dark",
+  themeColor: "#F9F8F6",
+  colorScheme: "light",
 };
 
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
-      <body className="min-h-screen antialiased">{children}</body>
+    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
+      <body className="min-h-screen bg-[var(--color-base)] text-[var(--color-ink)] font-sans antialiased selection:bg-[var(--color-accent-wash)] selection:text-[var(--color-accent-dark)]">
+        {children}
+      </body>
     </html>
   );
 }

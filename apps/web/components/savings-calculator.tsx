@@ -4,70 +4,52 @@ import { useMemo, useState } from "react";
 import { formatUsd, savingsSharePercent } from "@/lib/format";
 
 /**
- * The pricing calculator.
- *
- * # Why the assumptions are stated on the page
- *
- * A calculator that produces a large number without saying how is marketing, and a
- * developer evaluating an infrastructure product will discount it accordingly. Every
- * input to the estimate is shown and adjustable, and the conservative end of the range is
- * the one displayed by default.
- *
- * The savings rate is capped well below the 90% headline for the same reason: 90% is
- * achievable on a workload that is overwhelmingly simple repeated queries, and presenting
- * it as typical would set an expectation the product then fails to meet.
+ * Enterprise AI Savings & ROI Calculator — 4-Tier Neutral Palette (#F9F8F6, #EFE9E3, #D9CFC7, #C9B59C) + Teal.
  */
 
-/** Plans with a subscription and a savings share. */
 const PLANS = [
-  { id: "pro", label: "Pro", monthlyUsd: 29, seats: "1 seat" },
-  { id: "team", label: "Team", monthlyUsd: 299, seats: "up to 10 seats" },
-  { id: "enterprise", label: "Enterprise", monthlyUsd: 2000, seats: "unlimited" },
+  { id: "pro", label: "Pro", monthlyUsd: 29, seats: "1 seat", share: "20%" },
+  { id: "team", label: "Team", monthlyUsd: 299, seats: "Up to 10 seats", share: "15%" },
+  { id: "enterprise", label: "Enterprise", monthlyUsd: 2000, seats: "Unlimited (VPC)", share: "10%" },
 ] as const;
 
 type PlanId = (typeof PLANS)[number]["id"];
 
-/**
- * How much of a bill Aegis can realistically remove, by workload shape.
- *
- * These are the honest middle of what the routing and caching mechanisms deliver, not the
- * best case. A workload of long, novel, reasoning-heavy requests genuinely cannot be
- * optimised much — saying so here is more useful than a number the product cannot hit.
- */
 const WORKLOADS = [
   {
     id: "mixed",
-    label: "Mixed application traffic",
-    description: "A typical product: some lookups, some generation, some analysis.",
+    label: "Mixed Application Traffic",
+    description: "Typical SaaS: conversational chat, search, automated actions, extraction.",
     savingsRate: 0.55,
+    tag: "Standard SaaS",
   },
   {
     id: "simple",
-    label: "Mostly short, repetitive requests",
-    description: "Classification, extraction, lookups. Caches and routes well.",
+    label: "High-Volume Repetitive / Classification",
+    description: "Embeddings, categorizations, QA, lookups. Caches & routes extremely well.",
     savingsRate: 0.78,
+    tag: "High Savings",
   },
   {
     id: "complex",
-    label: "Mostly long-context reasoning",
-    description: "Agents, code analysis, deep research. Little room to optimise.",
-    savingsRate: 0.22,
+    label: "Deep Reasoning & Coding Agents",
+    description: "Complex multi-step agents, code synthesis, long-context research.",
+    savingsRate: 0.24,
+    tag: "Conservative",
   },
 ] as const;
 
 type WorkloadId = (typeof WORKLOADS)[number]["id"];
 
 export function SavingsCalculator() {
-  const [monthlySpend, setMonthlySpend] = useState(2_000);
-  const [plan, setPlan] = useState<PlanId>("pro");
+  const [monthlySpend, setMonthlySpend] = useState(6_500);
+  const [plan, setPlan] = useState<PlanId>("team");
   const [workload, setWorkload] = useState<WorkloadId>("mixed");
 
   const result = useMemo(() => {
     const shape = WORKLOADS.find((w) => w.id === workload) ?? WORKLOADS[0];
     const planDetails = PLANS.find((p) => p.id === plan) ?? PLANS[0];
 
-    // Everything in micro-cents, mirroring the gateway, so the arithmetic shown here is
-    // the same arithmetic that produces an invoice.
     const spendMc = Math.round(monthlySpend * 1_000_000);
     const grossSavingsMc = Math.round(spendMc * shape.savingsRate);
     const shareBp = savingsSharePercent(plan) * 100;
@@ -77,201 +59,236 @@ export function SavingsCalculator() {
     const netSavingMc = grossSavingsMc - totalCostMc;
     const newBillMc = spendMc - grossSavingsMc + totalCostMc;
 
+    const savingsPercentage =
+      spendMc > 0 ? Math.round((netSavingMc / spendMc) * 100) : 0;
+    const annualNetSavingsMc = netSavingMc * 12;
+
     return {
+      spendMc,
       grossSavingsMc,
       feeMc,
       subscriptionMc,
       totalCostMc,
       netSavingMc,
       newBillMc,
-      savingsRate: shape.savingsRate,
-      worthIt: netSavingMc > 0,
+      savingsPercentage,
+      annualNetSavingsMc,
+      shape,
+      planDetails,
     };
   }, [monthlySpend, plan, workload]);
 
   return (
-    <div className="card p-6 sm:p-8">
-      <div className="grid gap-8 lg:grid-cols-2">
-        {/* --- Inputs --- */}
-        <div className="space-y-6">
+    <div className="rounded-3xl border border-[#D9CFC7] bg-white p-6 sm:p-8 shadow-xs text-black">
+      <div className="grid gap-8 lg:grid-cols-12">
+        {/* --- Left Column: Inputs --- */}
+        <div className="lg:col-span-7 space-y-6">
+          {/* Monthly Spend Slider */}
           <div>
-            <label
-              htmlFor="spend"
-              className="block text-sm font-medium text-[var(--color-ink-muted)]"
-            >
-              Current monthly AI spend
-            </label>
-            <div className="mt-3 flex items-baseline gap-2">
-              <span className="tabular text-3xl text-[var(--color-ink)]">
-                ${monthlySpend.toLocaleString("en-US")}
+            <div className="flex items-baseline justify-between mb-2">
+              <label
+                htmlFor="spend-slider"
+                className="text-xs font-black uppercase tracking-wider text-black"
+              >
+                Current Monthly AI Spend
+              </label>
+              <span className="tabular font-mono text-2xl font-black text-black">
+                ${monthlySpend.toLocaleString()}
+                <span className="text-xs font-semibold text-[#70685E]">/mo</span>
               </span>
-              <span className="text-sm text-[var(--color-ink-faint)]">/month</span>
             </div>
+
             <input
-              id="spend"
+              id="spend-slider"
               type="range"
-              min={100}
-              max={100_000}
-              step={100}
+              min="500"
+              max="100000"
+              step="500"
               value={monthlySpend}
-              onChange={(event) => setMonthlySpend(Number(event.target.value))}
-              className="mt-4 w-full accent-[var(--color-accent)]"
-              aria-describedby="spend-hint"
+              onChange={(e) => setMonthlySpend(Number(e.target.value))}
+              className="w-full h-2.5 bg-[#EFE9E3] rounded-lg appearance-none cursor-pointer accent-[#22C7B2]"
             />
-            <p id="spend-hint" className="mt-1.5 text-xs text-[var(--color-ink-faint)]">
-              Drag to match your current OpenAI, Anthropic, or Google bill.
-            </p>
+
+            <div className="flex justify-between text-[10px] font-mono text-[#70685E] mt-1 font-bold">
+              <span>$500</span>
+              <span>$25k</span>
+              <span>$50k</span>
+              <span>$75k</span>
+              <span>$100k+</span>
+            </div>
           </div>
 
-          <fieldset>
-            <legend className="text-sm font-medium text-[var(--color-ink-muted)]">
-              What does your traffic look like?
-            </legend>
-            <div className="mt-3 space-y-2">
-              {WORKLOADS.map((option) => (
-                <label
-                  key={option.id}
-                  className={`flex cursor-pointer gap-3 rounded-[var(--radius)] border p-3 transition-colors ${
-                    workload === option.id
-                      ? "border-[var(--color-accent-dim)] bg-[var(--color-accent-wash)]"
-                      : "border-[var(--color-line)] hover:border-[var(--color-line-strong)]"
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="workload"
-                    value={option.id}
-                    checked={workload === option.id}
-                    onChange={() => setWorkload(option.id)}
-                    className="mt-1 accent-[var(--color-accent)]"
-                  />
-                  <span>
-                    <span className="block text-sm text-[var(--color-ink)]">
-                      {option.label}
-                    </span>
-                    <span className="block text-xs text-[var(--color-ink-subtle)]">
-                      {option.description}
-                    </span>
-                  </span>
-                </label>
-              ))}
+          {/* Workload Profile */}
+          <div>
+            <label className="block text-[11px] font-black uppercase tracking-wider text-black mb-2.5">
+              Workload Profile
+            </label>
+            <div className="grid gap-2.5 sm:grid-cols-1">
+              {WORKLOADS.map((option) => {
+                const selected = workload === option.id;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => setWorkload(option.id)}
+                    className={`flex items-start gap-3 rounded-2xl border p-3.5 text-left transition-all ${
+                      selected
+                        ? "border-[#22C7B2] bg-[#22C7B2]/10 shadow-xs"
+                        : "border-[#D9CFC7] bg-white hover:border-[#C9B59C] hover:bg-[#F9F8F6]"
+                    }`}
+                  >
+                    <div
+                      className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                        selected
+                          ? "border-[#22C7B2] bg-[#22C7B2]"
+                          : "border-[#D9CFC7] bg-white"
+                      }`}
+                    >
+                      {selected && <span className="h-1.5 w-1.5 rounded-full bg-[#0A1926]" />}
+                    </div>
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-black text-black">
+                          {option.label}
+                        </span>
+                        <span
+                          className={`text-[10px] uppercase font-black px-2 py-0.5 rounded-full ${
+                            selected
+                              ? "bg-[#22C7B2] text-[#0A1926]"
+                              : "bg-[#EFE9E3] text-[#403B35]"
+                          }`}
+                        >
+                          {option.tag}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-xs text-[#403B35] leading-relaxed font-medium">
+                        {option.description}
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
-          </fieldset>
+          </div>
 
-          <fieldset>
-            <legend className="text-sm font-medium text-[var(--color-ink-muted)]">
-              Plan
-            </legend>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {PLANS.map((option) => (
-                <button
-                  key={option.id}
-                  type="button"
-                  onClick={() => setPlan(option.id)}
-                  className={`rounded-[var(--radius)] border px-3 py-1.5 text-sm transition-colors ${
-                    plan === option.id
-                      ? "border-[var(--color-accent-dim)] bg-[var(--color-accent-wash)] text-[var(--color-accent)]"
-                      : "border-[var(--color-line)] text-[var(--color-ink-muted)] hover:border-[var(--color-line-strong)]"
-                  }`}
-                  aria-pressed={plan === option.id}
-                >
-                  {option.label}
-                  <span className="ml-1.5 text-xs text-[var(--color-ink-faint)]">
-                    ${option.monthlyUsd}/mo
-                  </span>
-                </button>
-              ))}
+          {/* Plan Choice */}
+          <div>
+            <label className="block text-[11px] font-black uppercase tracking-wider text-black mb-2.5">
+              Aegis Plan Tier
+            </label>
+            <div className="grid grid-cols-3 gap-2.5">
+              {PLANS.map((option) => {
+                const active = plan === option.id;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => setPlan(option.id)}
+                    className={`rounded-2xl border p-3 text-center transition-all ${
+                      active
+                        ? "border-[#22C7B2] bg-[#22C7B2]/10 text-[#0D9488] font-bold shadow-xs"
+                        : "border-[#D9CFC7] bg-white text-[#403B35] hover:border-[#C9B59C] hover:bg-[#F9F8F6]"
+                    }`}
+                  >
+                    <div className="text-xs font-bold text-black">{option.label}</div>
+                    <div className="mt-1 text-sm font-black text-black">
+                      ${option.monthlyUsd}
+                      <span className="text-[10px] font-normal text-[#70685E]">/mo</span>
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-[#70685E] font-medium">
+                      +{option.share} share
+                    </div>
+                  </button>
+                );
+              })}
             </div>
-          </fieldset>
+          </div>
         </div>
 
-        {/* --- Result --- */}
-        <div className="rounded-[var(--radius-lg)] border border-[var(--color-line)] bg-[var(--color-base)] p-6">
-          <div className="text-xs uppercase tracking-wide text-[var(--color-ink-subtle)]">
-            Estimated new monthly bill
-          </div>
-          <div className="tabular mt-2 text-4xl text-[var(--color-accent)]">
-            {formatUsd(result.newBillMc)}
-          </div>
-          <div className="mt-1 text-sm text-[var(--color-ink-subtle)]">
-            down from {formatUsd(monthlySpend * 1_000_000)}
-          </div>
-
-          <dl className="mt-6 space-y-2.5 text-sm">
-            <Row
-              label="Provider costs avoided"
-              value={`− ${formatUsd(result.grossSavingsMc)}`}
-              tone="accent"
-            />
-            <Row
-              label="Aegis subscription"
-              value={`+ ${formatUsd(result.subscriptionMc)}`}
-            />
-            <Row
-              label={`Savings share (${savingsSharePercent(plan)}%)`}
-              value={`+ ${formatUsd(result.feeMc)}`}
-            />
-            <div className="border-t border-[var(--color-line)] pt-2.5">
-              <Row
-                label="You keep"
-                value={formatUsd(result.netSavingMc)}
-                tone={result.worthIt ? "accent" : "danger"}
-                emphasis
-              />
+        {/* --- Right Column: Savings Report --- */}
+        <div className="lg:col-span-5 flex flex-col justify-between rounded-2xl border border-[#22C7B2]/40 bg-[#22C7B2]/10 p-6 shadow-xs">
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-black uppercase tracking-wider text-[#0D9488]">
+                Estimated Net Savings
+              </span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-[#22C7B2] px-2.5 py-0.5 text-xs font-bold text-[#0A1926] shadow-xs">
+                ~{result.savingsPercentage}% Net Reduction
+              </span>
             </div>
-          </dl>
 
-          {!result.worthIt && (
-            <p className="mt-4 rounded-[var(--radius)] border border-[#4a3a1c] bg-[#2a2113] p-3 text-xs text-[var(--color-warn)]">
-              At this spend, the {PLANS.find((p) => p.id === plan)?.label} subscription
-              costs more than it saves. The free tier or a smaller plan is the better
-              choice — we would rather say so than sell you the wrong one.
+            <div className="mt-3">
+              <div className="tabular text-3xl sm:text-4xl font-black tracking-tight text-[#0D9488]">
+                {formatUsd(result.netSavingMc)}
+                <span className="text-xs font-bold text-[#403B35] ml-1">/ month</span>
+              </div>
+              <div className="mt-1.5 text-xs font-semibold text-[#403B35]">
+                Equivalent to <strong className="text-black font-black">{formatUsd(result.annualNetSavingsMc)}</strong> in net annual recurring savings.
+              </div>
+            </div>
+
+            {/* Visual Spend Comparison Bar */}
+            <div className="mt-6 space-y-2">
+              <div className="text-[10px] font-black uppercase tracking-wider text-black">
+                Monthly Bill Comparison
+              </div>
+              <div className="space-y-2">
+                <div>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="text-[#403B35] font-semibold">Direct Provider Cost</span>
+                    <span className="font-black text-black">${monthlySpend.toLocaleString()}</span>
+                  </div>
+                  <div className="w-full h-3 bg-[#EFE9E3] border border-[#D9CFC7] rounded-full overflow-hidden">
+                    <div className="h-full bg-[#E11D48] rounded-full w-full" />
+                  </div>
+                </div>
+                <div>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="font-black text-[#0D9488]">With Aegis (Total Cost)</span>
+                    <span className="font-black text-[#0D9488]">{formatUsd(result.newBillMc)}</span>
+                  </div>
+                  <div className="w-full h-3 bg-[#EFE9E3] border border-[#D9CFC7] rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-[#22C7B2] rounded-full transition-all duration-500"
+                      style={{
+                        width: `${Math.max(12, Math.min(100, (result.newBillMc / (monthlySpend * 1_000_000)) * 100))}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Itemised Breakdown */}
+            <div className="mt-6 border-t border-[#22C7B2]/30 pt-4 space-y-2 text-xs">
+              <div className="flex justify-between text-[#403B35]">
+                <span className="font-medium">Avoided provider spend</span>
+                <span className="tabular font-black text-[#0D9488]">
+                  − {formatUsd(result.grossSavingsMc)}
+                </span>
+              </div>
+              <div className="flex justify-between text-[#403B35]">
+                <span className="font-medium">Aegis plan subscription</span>
+                <span className="tabular font-black text-black">
+                  + {formatUsd(result.subscriptionMc)}
+                </span>
+              </div>
+              <div className="flex justify-between text-[#403B35]">
+                <span className="font-medium">Performance share ({savingsSharePercent(plan)}%)</span>
+                <span className="tabular font-black text-black">
+                  + {formatUsd(result.feeMc)}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-6 pt-4 border-t border-[#22C7B2]/30 text-[11px] text-[#403B35] leading-relaxed">
+            <p>
+              🔒 <strong>Incentive Aligned:</strong> If routing or caching produces zero savings in a month, no performance share is billed. Every dollar is tracked in integer micro-cents.
             </p>
-          )}
-
-          <p className="mt-5 text-xs leading-relaxed text-[var(--color-ink-faint)]">
-            Assumes {Math.round(result.savingsRate * 100)}% of provider cost is removable
-            for this traffic shape, through cheaper-model routing, cache hits, and context
-            compression. Your actual figure depends on your prompts — the dashboard shows
-            the real number per request from day one, and the savings share is only ever
-            charged on savings we actually delivered.
-          </p>
+          </div>
         </div>
       </div>
-    </div>
-  );
-}
-
-function Row({
-  label,
-  value,
-  tone = "neutral",
-  emphasis = false,
-}: {
-  label: string;
-  value: string;
-  tone?: "neutral" | "accent" | "danger";
-  emphasis?: boolean;
-}) {
-  const colour =
-    tone === "accent"
-      ? "text-[var(--color-accent)]"
-      : tone === "danger"
-        ? "text-[var(--color-danger)]"
-        : "text-[var(--color-ink-muted)]";
-
-  return (
-    <div className="flex items-baseline justify-between gap-4">
-      <dt
-        className={
-          emphasis
-            ? "text-[var(--color-ink)]"
-            : "text-[var(--color-ink-subtle)]"
-        }
-      >
-        {label}
-      </dt>
-      <dd className={`tabular ${colour} ${emphasis ? "text-base" : ""}`}>{value}</dd>
     </div>
   );
 }

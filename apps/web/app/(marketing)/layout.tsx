@@ -1,151 +1,104 @@
 import Link from "next/link";
+import { AegisLogo } from "@/components/ui";
 
-/** Marketing shell: a shared header and footer around the public pages. */
+/**
+ * Aegis Marketing Shell — Exact 4-Tier Neutral Palette (#F9F8F6, #EFE9E3, #D9CFC7, #C9B59C) with Teal Accents.
+ */
 export default function MarketingLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="sticky top-0 z-20 border-b border-[var(--color-line)] bg-[color-mix(in_srgb,var(--color-base)_88%,transparent)] backdrop-blur">
-        <nav
-          className="mx-auto flex max-w-5xl items-center justify-between px-6 py-3.5"
-          aria-label="Main"
-        >
-          <Link href="/" className="flex items-center gap-2">
-            <Shield />
-            <span className="text-sm font-medium tracking-tight text-[var(--color-ink)]">
-              Aegis
+    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-10 text-black">
+      {/* Header with Aegis Sleek Minimalist Logo */}
+      <header className="mb-8 border-b border-[#D9CFC7] pb-4">
+        <div className="relative flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+          <Link
+            href="/"
+            className="flex items-center gap-2.5 text-lg font-black tracking-tight text-[#0D9488] group"
+          >
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#22C7B2]/20 border border-[#22C7B2]/40 text-[#0D9488] transition-transform group-hover:scale-105 shadow-2xs">
+              <AegisLogo className="w-5 h-5 text-[#0D9488]" />
+            </div>
+            <span className="text-black font-black text-xl tracking-tight">Aegis</span>
+            <span className="hidden sm:inline-block text-[10px] uppercase font-black tracking-wider text-[#0D9488] bg-[#22C7B2]/15 px-2.5 py-0.5 rounded-full border border-[#22C7B2]/40">
+              AI Gateway
             </span>
           </Link>
 
-          <div className="flex items-center gap-1">
-            <NavLink href="/pricing">Pricing</NavLink>
-            <NavLink href="/docs">Docs</NavLink>
-            <Link
-              href="/login"
-              className="rounded-[var(--radius)] px-3 py-1.5 text-sm text-[var(--color-ink-muted)] transition-colors hover:text-[var(--color-ink)]"
-            >
-              Sign in
-            </Link>
+          <div className="flex items-center gap-x-4 gap-y-2 text-sm sm:gap-x-6">
+            <div className="hidden items-center gap-x-6 md:flex font-bold text-xs uppercase tracking-wide">
+              <Link
+                className="text-[#403B35] hover:text-[#0D9488] transition-colors"
+                href="/connect"
+              >
+                How to use
+              </Link>
+              <Link
+                className="text-[#403B35] hover:text-[#0D9488] transition-colors"
+                href="/pricing"
+              >
+                Pricing
+              </Link>
+              <Link
+                className="text-[#403B35] hover:text-[#0D9488] transition-colors"
+                href="/faq"
+              >
+                FAQ
+              </Link>
+              <Link
+                className="text-[#403B35] hover:text-[#0D9488] transition-colors"
+                href="/docs"
+              >
+                Docs
+              </Link>
+              <Link
+                className="text-[#403B35] hover:text-[#0D9488] transition-colors"
+                href="/login"
+              >
+                Sign in
+              </Link>
+            </div>
+
             <Link
               href="/signup"
-              className="ml-1 rounded-[var(--radius)] bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[#04140c] transition-colors hover:bg-[#4ee9a0]"
+              className="rounded-lg bg-[#22C7B2] px-4 py-2 text-xs font-bold text-[#0A1926] transition-all hover:opacity-90 shadow-xs active:scale-95"
             >
-              Get started
+              Request access →
             </Link>
           </div>
-        </nav>
+        </div>
       </header>
 
-      <main className="flex-1">{children}</main>
+      {/* Main Content */}
+      <main>{children}</main>
 
-      <footer className="border-t border-[var(--color-line)]">
-        <div className="mx-auto max-w-5xl px-6 py-10">
-          <div className="flex flex-wrap items-start justify-between gap-8">
-            <div>
-              <div className="flex items-center gap-2">
-                <Shield />
-                <span className="text-sm font-medium text-[var(--color-ink)]">Aegis</span>
-              </div>
-              <p className="mt-2 max-w-xs text-xs leading-relaxed text-[var(--color-ink-faint)]">
-                An AI cost optimization gateway. Route smarter, cache harder, and see
-                exactly what you saved.
-              </p>
-            </div>
-
-            <div className="flex gap-12 text-sm">
-              <FooterColumn
-                heading="Product"
-                links={[
-                  { href: "/pricing", label: "Pricing" },
-                  { href: "/docs", label: "Documentation" },
-                  { href: "/status", label: "Status" },
-                ]}
-              />
-              <FooterColumn
-                heading="Account"
-                links={[
-                  { href: "/login", label: "Sign in" },
-                  { href: "/signup", label: "Create account" },
-                ]}
-              />
-            </div>
+      {/* Footer using the 4th Swatch #C9B59C (Warm Camel / Light Taupe) */}
+      <footer className="mt-16 flex flex-wrap items-center justify-between gap-4 border-t border-[#D9CFC7] bg-[#C9B59C] rounded-2xl p-6 text-xs text-[#2A241E] font-bold shadow-xs">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <AegisLogo className="w-4 h-4 text-black" />
+            <span className="font-black text-black">Aegis</span>
           </div>
-
-          <div className="mt-10 border-t border-[var(--color-line)] pt-5 text-xs text-[var(--color-ink-faint)]">
-            © {new Date().getFullYear()} Aegis. All rights reserved.
-          </div>
+          <span className="text-[#8F7D67]">·</span>
+          <span>The control plane for AI cost and governance</span>
+        </div>
+        <div className="flex items-center gap-5">
+          <Link className="hover:text-black transition-colors" href="/connect">
+            How to use
+          </Link>
+          <Link className="hover:text-black transition-colors" href="/pricing">
+            Pricing
+          </Link>
+          <Link className="hover:text-black transition-colors" href="/faq">
+            FAQ
+          </Link>
+          <Link className="hover:text-black transition-colors" href="/docs">
+            API Docs
+          </Link>
         </div>
       </footer>
     </div>
-  );
-}
-
-function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
-  return (
-    <Link
-      href={href}
-      className="rounded-[var(--radius)] px-3 py-1.5 text-sm text-[var(--color-ink-muted)] transition-colors hover:text-[var(--color-ink)]"
-    >
-      {children}
-    </Link>
-  );
-}
-
-function FooterColumn({
-  heading,
-  links,
-}: {
-  heading: string;
-  links: { href: string; label: string }[];
-}) {
-  return (
-    <div>
-      <div className="text-xs uppercase tracking-wide text-[var(--color-ink-subtle)]">
-        {heading}
-      </div>
-      <ul className="mt-3 space-y-2">
-        {links.map((link) => (
-          <li key={link.href}>
-            <Link
-              href={link.href}
-              className="text-[var(--color-ink-muted)] transition-colors hover:text-[var(--color-ink)]"
-            >
-              {link.label}
-            </Link>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-/** The mark. A shield, drawn rather than imported — one icon does not justify a library. */
-function Shield() {
-  return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 20 20"
-      fill="none"
-      aria-hidden="true"
-      className="text-[var(--color-accent)]"
-    >
-      <path
-        d="M10 1.5 3 4.2v5.3c0 4.2 2.9 7.5 7 9 4.1-1.5 7-4.8 7-9V4.2L10 1.5Z"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-      />
-      <path
-        d="m6.8 9.8 2.3 2.3 4.1-4.6"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
   );
 }

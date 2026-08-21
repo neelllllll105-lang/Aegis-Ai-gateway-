@@ -22,8 +22,6 @@ export default function LoginPage() {
       await api.login(email, password);
       router.push("/dashboard");
     } catch (caught) {
-      // The gateway deliberately returns one message for every credential failure, so
-      // this form cannot be used to discover which email addresses have accounts.
       setError(
         caught instanceof ApiError
           ? caught.message
@@ -34,20 +32,21 @@ export default function LoginPage() {
   }
 
   return (
-    <Card className="p-6">
-      <h1 className="text-lg font-medium text-[var(--color-ink)]">Sign in</h1>
-      <p className="mt-1 text-sm text-[var(--color-ink-subtle)]">
-        Welcome back.
+    <Card className="p-7 shadow-xs">
+      <h1 className="text-xl font-extrabold tracking-tight text-[#0A0A0A]">Sign in</h1>
+      <p className="mt-1 text-xs text-[#262320] font-medium">
+        Welcome back to your Aegis dashboard.
       </p>
 
       <form onSubmit={handleSubmit} className="mt-6 space-y-4">
         <Field
-          label="Email"
+          label="Work Email"
           id="email"
           type="email"
           value={email}
           onChange={setEmail}
           autoComplete="email"
+          placeholder="name@company.com"
           required
         />
         <Field
@@ -63,21 +62,21 @@ export default function LoginPage() {
         {error && (
           <div
             role="alert"
-            className="rounded-[var(--radius)] border border-[#4a2424] bg-[#1a1112] px-3 py-2 text-sm text-[var(--color-danger)]"
+            className="rounded-[var(--radius)] border border-[#FECACA] bg-[#FEF2F2] px-3.5 py-2 text-xs font-semibold text-[#DC2626]"
           >
             {error}
           </div>
         )}
 
-        <Button type="submit" disabled={submitting} className="w-full">
-          {submitting ? "Signing in…" : "Sign in"}
+        <Button type="submit" disabled={submitting} className="w-full mt-2">
+          {submitting ? "Signing in…" : "Sign in to Dashboard"}
         </Button>
       </form>
 
-      <p className="mt-5 text-center text-sm text-[var(--color-ink-subtle)]">
-        No account?{" "}
-        <Link href="/signup" className="text-[var(--color-accent)] hover:underline">
-          Create one
+      <p className="mt-6 text-center text-xs text-[#262320] font-medium">
+        Don&apos;t have an account?{" "}
+        <Link href="/signup" className="font-extrabold text-[#0A0A0A] underline hover:text-[#059669]">
+          Create free account
         </Link>
       </p>
     </Card>

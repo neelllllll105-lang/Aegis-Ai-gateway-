@@ -1,45 +1,93 @@
-/**
- * Shared primitives.
- *
- * Small and deliberately unclever. Every component here exists because the same markup
- * appeared three or more times; nothing is here speculatively. Variants are closed unions
- * rather than open strings, so an invalid state is a type error and not a silently
- * unstyled element.
- */
+"use client";
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
-// Layout
+// Aegis Sleek Minimalist Logo
 // ---------------------------------------------------------------------------
 
-/** A bordered panel. The only container style in the product. */
+export function AegisLogo({ className = "w-6 h-6" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      className={className}
+      aria-hidden="true"
+    >
+      <path
+        d="M12 2L3.5 5.5V11C3.5 16.5 7.1 21.3 12 22.8C16.9 21.3 20.5 16.5 20.5 11V5.5L12 2Z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M12 6.8L6.5 9.2V12.8C6.5 16.2 8.8 19.3 12 20.2C15.2 19.3 17.5 16.2 17.5 12.8V9.2L12 6.8Z"
+        fill="currentColor"
+        fillOpacity="0.2"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="13" r="2" fill="currentColor" />
+    </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Layout & Panels
+// ---------------------------------------------------------------------------
+
 export function Card({
   children,
   className = "",
+  variant = "default",
 }: {
   children: ReactNode;
   className?: string;
+  variant?: "default" | "warm" | "subtle";
 }) {
-  return <div className={`card ${className}`}>{children}</div>;
+  const variantClass =
+    variant === "warm"
+      ? "bg-[#EFE9E3] border border-[#D9CFC7]"
+      : variant === "subtle"
+        ? "bg-[#F9F8F6] border border-[#D9CFC7]"
+        : "bg-white border border-[#D9CFC7]";
+
+  return (
+    <div
+      className={`rounded-2xl ${variantClass} shadow-xs transition-all hover:border-[#C9B59C] ${className}`}
+    >
+      {children}
+    </div>
+  );
 }
 
-/** A section heading with optional supporting text and a trailing action. */
 export function SectionHeader({
   title,
   description,
   action,
+  eyebrow,
 }: {
   title: string;
   description?: string;
   action?: ReactNode;
+  eyebrow?: string;
 }) {
   return (
-    <div className="flex items-start justify-between gap-6 mb-6">
+    <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-6">
       <div>
-        <h2 className="text-lg font-medium text-[var(--color-ink)]">{title}</h2>
+        {eyebrow && (
+          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#0D9488] mb-1">
+            {eyebrow}
+          </div>
+        )}
+        <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-black">
+          {title}
+        </h2>
         {description && (
-          <p className="mt-1 text-sm text-[var(--color-ink-subtle)] max-w-2xl">
+          <p className="mt-1 text-sm text-[#403B35] max-w-2xl font-medium leading-relaxed">
             {description}
           </p>
         )}
@@ -50,80 +98,86 @@ export function SectionHeader({
 }
 
 // ---------------------------------------------------------------------------
-// Data display
+// Data Display
 // ---------------------------------------------------------------------------
 
-/**
- * A headline metric.
- *
- * The value is monospace and tabular so a column of tiles stays aligned and a
- * live-updating figure does not jitter as digit widths change.
- */
 export function Stat({
   label,
   value,
   sublabel,
   accent = false,
+  trend,
 }: {
   label: string;
   value: string;
   sublabel?: string;
   accent?: boolean;
+  trend?: string;
 }) {
   return (
-    <Card className="p-5">
-      <div className="text-xs uppercase tracking-wide text-[var(--color-ink-subtle)]">
-        {label}
+    <div className="rounded-2xl border border-[#D9CFC7] bg-white p-5 shadow-xs relative overflow-hidden">
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] font-black uppercase tracking-wider text-[#70685E]">
+          {label}
+        </div>
+        {trend && (
+          <span className="inline-flex items-center gap-1 text-[11px] font-black text-[#0D9488] bg-[#22C7B2]/15 px-2 py-0.5 rounded-full border border-[#22C7B2]/40">
+            {trend}
+          </span>
+        )}
       </div>
       <div
-        className={`tabular mt-2 text-2xl ${
-          accent ? "text-[var(--color-accent)]" : "text-[var(--color-ink)]"
+        className={`tabular mt-2 text-2xl sm:text-3xl font-black tracking-tight ${
+          accent ? "text-[#0D9488]" : "text-black"
         }`}
       >
         {value}
       </div>
       {sublabel && (
-        <div className="mt-1 text-xs text-[var(--color-ink-faint)]">{sublabel}</div>
+        <div className="mt-1 text-xs text-[#70685E] font-medium">{sublabel}</div>
       )}
-    </Card>
+    </div>
   );
 }
 
-type BadgeTone = "neutral" | "accent" | "warn" | "danger" | "info";
+export type BadgeTone =
+  | "neutral"
+  | "accent"
+  | "warm"
+  | "warn"
+  | "danger"
+  | "success"
+  | "info";
 
 const BADGE_TONES: Record<BadgeTone, string> = {
-  neutral:
-    "bg-[var(--color-raised)] text-[var(--color-ink-muted)] border-[var(--color-line)]",
-  accent:
-    "bg-[var(--color-accent-wash)] text-[var(--color-accent)] border-[var(--color-accent-dim)]",
-  warn: "bg-[#2a2113] text-[var(--color-warn)] border-[#4a3a1c]",
-  danger: "bg-[#2a1616] text-[var(--color-danger)] border-[#4a2424]",
-  info: "bg-[#131f2f] text-[var(--color-info)] border-[#23364f]",
+  neutral: "bg-[#EFE9E3] text-black border-[#D9CFC7] font-bold",
+  accent: "bg-[#22C7B2]/15 text-[#0D9488] border-[#22C7B2]/40 font-black",
+  warm: "bg-[#FEF3C7] text-[#D97706] border-[#FDE68A] font-bold",
+  warn: "bg-[#FEF3C7] text-[#D97706] border-[#FDE68A] font-bold",
+  danger: "bg-[#FEE2E2] text-[#DC2626] border-[#FECACA] font-bold",
+  success: "bg-[#22C7B2]/15 text-[#0D9488] border-[#22C7B2]/40 font-black",
+  info: "bg-[#EFF6FF] text-[#2563EB] border-[#BFDBFE] font-bold",
 };
 
-/** A small status pill. */
 export function Badge({
   children,
   tone = "neutral",
+  size = "md",
 }: {
   children: ReactNode;
   tone?: BadgeTone;
+  size?: "sm" | "md";
 }) {
+  const sizeClasses = size === "sm" ? "px-2 py-0.5 text-[10px]" : "px-3 py-1 text-xs";
   return (
     <span
-      className={`inline-flex items-center rounded border px-1.5 py-0.5 text-xs font-medium ${BADGE_TONES[tone]}`}
+      className={`inline-flex items-center gap-1.5 font-bold rounded-full border ${BADGE_TONES[tone]} ${sizeClasses}`}
     >
       {children}
     </span>
   );
 }
 
-/**
- * An empty state.
- *
- * Always says what to do next. A panel reading only "No data" tells the user nothing
- * about whether the product is broken or simply new.
- */
 export function EmptyState({
   title,
   description,
@@ -134,9 +188,14 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <div className="px-6 py-14 text-center">
-      <p className="text-sm font-medium text-[var(--color-ink-muted)]">{title}</p>
-      <p className="mx-auto mt-1 max-w-md text-sm text-[var(--color-ink-subtle)]">
+    <div className="px-6 py-14 text-center rounded-2xl border border-dashed border-[#D9CFC7] bg-[#F9F8F6]">
+      <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-[#EFE9E3] text-[#70685E] mb-3 border border-[#D9CFC7]">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        </svg>
+      </div>
+      <p className="text-sm font-black text-black">{title}</p>
+      <p className="mx-auto mt-1 max-w-md text-xs text-[#403B35] font-medium">
         {description}
       </p>
       {action && <div className="mt-5">{action}</div>}
@@ -144,12 +203,14 @@ export function EmptyState({
   );
 }
 
-/** An error panel. */
 export function ErrorState({ message }: { message: string }) {
   return (
-    <Card className="border-[#4a2424] bg-[#1a1112] p-5">
-      <p className="text-sm text-[var(--color-danger)]">{message}</p>
-    </Card>
+    <div className="border border-[#FECACA] bg-[#FEF2F2] rounded-xl p-4 flex items-start gap-3">
+      <svg className="w-4 h-4 text-[#DC2626] shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
+        <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+      </svg>
+      <p className="text-xs font-bold text-[#DC2626]">{message}</p>
+    </div>
   );
 }
 
@@ -157,21 +218,14 @@ export function ErrorState({ message }: { message: string }) {
 // Tables
 // ---------------------------------------------------------------------------
 
-/**
- * A table wrapper that scrolls horizontally on narrow screens.
- *
- * Without the overflow container, a wide request log pushes the whole page sideways on a
- * phone and every other page element goes with it.
- */
 export function TableShell({ children }: { children: ReactNode }) {
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto rounded-2xl border border-[#D9CFC7] bg-white shadow-xs">
       <table className="w-full min-w-[640px] text-sm">{children}</table>
     </div>
   );
 }
 
-/** A table header cell. */
 export function Th({
   children,
   align = "left",
@@ -181,7 +235,7 @@ export function Th({
 }) {
   return (
     <th
-      className={`hairline px-4 py-2.5 text-xs font-medium uppercase tracking-wide text-[var(--color-ink-subtle)] ${
+      className={`border-b border-[#D9CFC7] px-4 py-3.5 text-xs font-black uppercase tracking-wider text-black bg-[#EFE9E3] ${
         align === "right" ? "text-right" : "text-left"
       }`}
     >
@@ -190,7 +244,6 @@ export function Th({
   );
 }
 
-/** A table body cell. */
 export function Td({
   children,
   align = "left",
@@ -204,9 +257,9 @@ export function Td({
 }) {
   return (
     <td
-      className={`hairline px-4 py-2.5 ${align === "right" ? "text-right" : "text-left"} ${
-        mono ? "tabular" : ""
-      } ${muted ? "text-[var(--color-ink-subtle)]" : "text-[var(--color-ink-muted)]"}`}
+      className={`border-b border-[#EFE9E3] px-4 py-3.5 text-xs ${align === "right" ? "text-right" : "text-left"} ${
+        mono ? "tabular font-mono font-bold" : ""
+      } ${muted ? "text-[#70685E]" : "text-black font-medium"}`}
     >
       {children}
     </td>
@@ -214,23 +267,24 @@ export function Td({
 }
 
 // ---------------------------------------------------------------------------
-// Forms
+// Forms & Buttons
 // ---------------------------------------------------------------------------
 
-type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
+type ButtonVariant = "primary" | "secondary" | "teal" | "ghost" | "danger";
 
 const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
   primary:
-    "bg-[var(--color-accent)] text-[#04140c] hover:bg-[#4ee9a0] font-medium",
+    "bg-black text-white hover:bg-[#262626] shadow-xs font-black active:scale-[0.98]",
+  teal:
+    "bg-[#22C7B2] text-[#0A1926] hover:opacity-90 shadow-xs font-bold active:scale-[0.98]",
   secondary:
-    "bg-[var(--color-raised)] text-[var(--color-ink)] border border-[var(--color-line-strong)] hover:bg-[var(--color-overlay)]",
+    "bg-white text-black border border-[#D9CFC7] hover:bg-[#EFE9E3] shadow-xs font-bold active:scale-[0.98]",
   ghost:
-    "text-[var(--color-ink-muted)] hover:text-[var(--color-ink)] hover:bg-[var(--color-raised)]",
+    "text-[#403B35] hover:text-black hover:bg-[#EFE9E3] font-bold",
   danger:
-    "bg-transparent text-[var(--color-danger)] border border-[#4a2424] hover:bg-[#2a1616]",
+    "bg-transparent text-[#DC2626] border border-[#FECACA] hover:bg-[#FEF2F2] font-bold",
 };
 
-/** A button. */
 export function Button({
   children,
   variant = "primary",
@@ -251,20 +305,13 @@ export function Button({
       type={type}
       disabled={disabled}
       onClick={onClick}
-      className={`inline-flex items-center justify-center gap-2 rounded-[var(--radius)] px-3 py-1.5 text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${BUTTON_VARIANTS[variant]} ${className}`}
+      className={`inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-xs transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-50 ${BUTTON_VARIANTS[variant]} ${className}`}
     >
       {children}
     </button>
   );
 }
 
-/**
- * A labelled text field.
- *
- * The label is a real `<label>` bound by `htmlFor`, not a placeholder. Placeholder-only
- * fields lose their label the moment the user types, which is exactly when they are still
- * needed.
- */
 export function Field({
   label,
   id,
@@ -290,10 +337,10 @@ export function Field({
     <div>
       <label
         htmlFor={id}
-        className="block text-sm font-medium text-[var(--color-ink-muted)]"
+        className="block text-xs font-black text-black"
       >
         {label}
-        {required && <span className="ml-1 text-[var(--color-ink-faint)]">*</span>}
+        {required && <span className="ml-1 text-[#DC2626]">*</span>}
       </label>
       <input
         id={id}
@@ -304,28 +351,106 @@ export function Field({
         autoComplete={autoComplete}
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
-        className="mt-1.5 w-full rounded-[var(--radius)] border border-[var(--color-line-strong)] bg-[var(--color-base)] px-3 py-2 text-sm text-[var(--color-ink)] placeholder:text-[var(--color-ink-faint)] focus:border-[var(--color-accent-dim)] focus:outline-none focus-visible:outline-none"
+        className="mt-1.5 w-full rounded-xl border border-[#D9CFC7] bg-white px-3.5 py-2.5 text-xs text-black placeholder:text-[#9E9487] focus:border-[#0D9488] focus:ring-1 focus:ring-[#0D9488] focus:outline-none transition-colors"
       />
-      {hint && <p className="mt-1.5 text-xs text-[var(--color-ink-subtle)]">{hint}</p>}
+      {hint && <p className="mt-1 text-[11px] text-[#70685E] font-medium">{hint}</p>}
     </div>
   );
 }
 
-/** A block of code with a caption. */
+/**
+ * Terminal CodeBlock with authentic window traffic light controls and crisp syntax colors.
+ */
 export function CodeBlock({
   code,
   caption,
+  language = "bash",
 }: {
   code: string;
   caption?: string;
+  language?: string;
 }) {
+  const [copied, setCopied] = useState(false);
+
+  function handleCopy() {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  function formatHighlightedCode(rawCode: string) {
+    const lines = rawCode.split("\n");
+    return lines.map((line, idx) => {
+      // Comments
+      if (line.trim().startsWith("#")) {
+        return (
+          <span key={idx} className="block text-[#22C7B2] font-medium">
+            {line}
+          </span>
+        );
+      }
+      
+      const commentIndex = line.indexOf("#");
+      if (commentIndex !== -1) {
+        const codePart = line.slice(0, commentIndex);
+        const commentPart = line.slice(commentIndex);
+        return (
+          <span key={idx} className="block">
+            <span className="text-[#F9F8F6]">{codePart}</span>
+            <span className="text-[#22C7B2] font-bold">{commentPart}</span>
+          </span>
+        );
+      }
+
+      return (
+        <span key={idx} className="block text-[#F9F8F6]">
+          {line}
+        </span>
+      );
+    });
+  }
+
   return (
-    <div>
-      {caption && (
-        <div className="mb-1.5 text-xs text-[var(--color-ink-subtle)]">{caption}</div>
-      )}
-      <pre className="overflow-x-auto rounded-[var(--radius)] border border-[var(--color-line)] bg-[var(--color-base)] p-4 text-xs leading-relaxed text-[var(--color-ink-muted)]">
-        <code>{code}</code>
+    <div className="relative group rounded-2xl border border-[#38332D] bg-[#141210] text-[#F9F8F6] overflow-hidden shadow-sm">
+      {/* Terminal Window Header */}
+      <div className="flex items-center justify-between px-4 py-2.5 bg-[#0D0B0A] border-b border-[#2A2420] text-xs">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <span
+              className="w-3 h-3 rounded-full bg-[#FF5F56] border border-[#E0443E]"
+              title="Close"
+            />
+            <span
+              className="w-3 h-3 rounded-full bg-[#FFBD2E] border border-[#DEA123]"
+              title="Minimize"
+            />
+            <span
+              className="w-3 h-3 rounded-full bg-[#27C93F] border border-[#1AAB29]"
+              title="Expand"
+            />
+          </div>
+          {caption && <span className="ml-1 font-bold text-[#F9F8F6]">{caption}</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-mono uppercase tracking-wider text-[#A8A29E] font-bold">
+            {language}
+          </span>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="flex items-center gap-1 rounded bg-[#2A2420] px-2 py-1 text-[10px] font-bold text-[#F9F8F6] hover:bg-[#3D362F] transition-colors"
+            aria-label="Copy code"
+          >
+            {copied ? (
+              <span className="text-[#22C7B2]">Copied</span>
+            ) : (
+              <span>Copy</span>
+            )}
+          </button>
+        </div>
+      </div>
+      <pre className="overflow-x-auto p-4 text-xs leading-relaxed font-mono">
+        <code>{formatHighlightedCode(code)}</code>
       </pre>
     </div>
   );
