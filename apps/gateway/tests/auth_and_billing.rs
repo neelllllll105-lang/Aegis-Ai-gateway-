@@ -273,6 +273,40 @@ async fn the_last_owner_cannot_be_removed() {
 }
 
 #[tokio::test]
+async fn users_are_found_by_email_case_insensitively() {
+    // People type their address with inconsistent capitalisation, and a login that fails
+    // because of a capital letter is indistinguishable from a wrong password.
+    let Some((_, pool)) = setup().await else {
+        return skip("users_are_found_by_email_case_insensitively");
+    };
+
+    let fixture = create_org(&pool, "email-case").await;
+
+    for variant in [
+        fixture.email.clone(),
+        fixture.email.to_uppercase(),
+        format!("  {}  ", fixture.email),
+    ] {
+        let found = repo::find_user_by_email(&pool, variant.trim())
+            .await
+            .expect("query");
+        assert!(
+            found.is_some(),
+            "the address {variant:?} did not resolve to the user"
+        );
+        assert_eq!(found.expect("user").id, fixture.user_id);
+    }
+
+    // A genuinely different address must not match.
+    let other = repo::find_user_by_email(&pool, "nobody@test.invalid")
+        .await
+        .expect("query");
+    assert!(other.is_none());
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
 async fn audit_entries_are_written_and_readable() {
     let Some((_, pool)) = setup().await else {
         return skip("audit_entries_are_written_and_readable");

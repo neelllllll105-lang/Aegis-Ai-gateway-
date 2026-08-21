@@ -2,90 +2,127 @@
   "$comment": "Machine-readable project state. The human-readable companion is MEMORY.md; keep the two in agreement. Validated by scripts/check-memory-freshness.sh in CI.",
   "schema_version": 1,
   "project": "aegis",
-  "last_updated": "2026-08-20",
+  "last_updated": "2026-08-21",
   "current_phase": 4,
-  "next_task": "Build the Next.js dashboard and marketing site (P4.1, P4.6), then verify against live Postgres/Redis.",
+  "next_task": "Start Docker, run the 14 integration tests against real Postgres/Redis, then verify one live provider completion end to end.",
   "phases": [
     {
       "id": 0,
       "name": "Foundation",
       "status": "complete",
-      "evidence": "Workspace, schema migrations, typed config, CI, health endpoints, ADRs 001-004."
+      "evidence": "Workspace, full schema migrations with monthly partitioning, typed config, CI, health endpoints verified against a running gateway, ADRs 001-006."
     },
     {
       "id": 1,
       "name": "Auth, keys, orgs",
-      "status": "in_progress",
-      "evidence": "Gateway side complete: argon2id auth, sessions, API key CRUD with LRU+Redis cache, audit log, org/member management. Dashboard UI outstanding.",
-      "remaining": ["P1.5 dashboard signup/login/keys pages"]
+      "status": "complete",
+      "evidence": "argon2id auth, sessions, API key CRUD with LRU+Redis+PG tiers, audit log, org/member management, dashboard signup/login/keys pages. 14 integration tests written (run in CI)."
     },
     {
       "id": 2,
       "name": "Core gateway",
       "status": "complete",
-      "evidence": "Nine provider adapters, full pipeline with rate limiting, budgets, BYOK, shared key pool, usage worker, metrics. 622 unit tests."
+      "evidence": "Nine provider adapters, full twelve-stage pipeline, rate limiting, budgets, BYOK, shared key pool, usage worker, Prometheus metrics, Grafana dashboard."
     },
     {
       "id": 3,
       "name": "Optimization engine",
       "status": "complete",
-      "evidence": "Classifier 98% on 100 labelled fixtures, router with conservative defaults, exact + semantic cache, compressor, circuit breakers, savings attribution."
+      "evidence": "Classifier 98% on 100 labelled fixtures, router with conservative defaults, exact + semantic cache, compressor, circuit breakers, savings attribution. verify-phase.sh 3 passes."
     },
     {
       "id": 4,
       "name": "Dashboards, billing, launch prep",
       "status": "in_progress",
-      "evidence": "Stripe webhook verification, invoice assembly, budget alerts, admin console, savings CSV export complete.",
+      "evidence": "Stripe webhook verification, invoice assembly with an independent fee-consistency check, budget alerts, admin console, landing page, docs, savings CSV export, runbooks.",
       "remaining": [
-        "P4.1 dashboard pages",
-        "P4.6 landing page",
-        "P4.8 execute the load test",
-        "P4.10 runbooks"
+        "P4.1 models/org/teams/policies dashboard pages",
+        "P4.8 EXECUTE the load test against staging"
       ]
     },
     {
       "id": 5,
       "name": "Launch + provider expansion",
       "status": "in_progress",
-      "evidence": "All five expansion providers implemented and tested. Classifier v2 trained via a real dump/fit pipeline. Status page endpoint live.",
-      "remaining": ["P5.1 launch playbook", "P5.5 Slack digest wiring", "P5.6 referral program"]
+      "evidence": "All five expansion providers tested. Classifier v2 trained via a real dump/fit pipeline. Status page endpoint. Launch playbook written.",
+      "remaining": [
+        "P5.5 wire the scheduled digest job",
+        "P5.6 referral program",
+        "P5.8 changelog"
+      ]
     },
     {
       "id": 6,
       "name": "Enterprise readiness",
       "status": "in_progress",
-      "evidence": "Offline license validation with grace period, SCIM 2.0 shapes, SSO assertion validation with replay detection, per-tenant HKDF keys, region pinning, admin TOTP.",
-      "remaining": ["P6.6 compliance pack", "P6.8 read replica routing"]
+      "evidence": "Offline license validation with grace period, SCIM 2.0 shapes handling both Okta and Entra deprovisioning, SSO assertion validation with replay detection, per-tenant HKDF keys, region pinning, admin TOTP with the RFC 6238 vector.",
+      "remaining": [
+        "Wire SCIM and SSO HTTP routes",
+        "P6.6 compliance pack",
+        "P6.8 read replica routing",
+        "Verify against a real Okta or Entra tenant"
+      ]
     },
     {
       "id": 7,
       "name": "Scale + moat",
       "status": "in_progress",
-      "evidence": "UCB1 outcome bandit with a replay test showing it beats static routing.",
-      "remaining": ["P7.2 multi-region", "P7.4 SDKs", "P7.5 model auto-discovery", "P7.8 DD pack"]
+      "evidence": "UCB1 outcome bandit with a 3000-step replay showing it beats static routing. TypeScript and Python SDKs, both verified.",
+      "remaining": [
+        "P7.2 regional budgets",
+        "P7.5 model auto-discovery",
+        "P7.6 spend anomaly detection",
+        "P7.7 cost-center dimension",
+        "P7.8 DD pack"
+      ]
     }
   ],
   "blockers": [
     {
       "id": "docker-unavailable",
-      "summary": "Docker Desktop was not running on the build machine, so nothing has been verified against live Postgres, Redis, or Qdrant.",
-      "impact": "Integration tests are written but unexecuted locally. CI runs them against service containers.",
-      "workaround": "The gateway compiles and unit-tests with no external service. Set AEGIS_TEST_DATABASE_URL to run the integration suite."
+      "summary": "Docker Desktop was not running, so nothing has been verified against live Postgres, Redis, or Qdrant.",
+      "impact": "The 14 integration tests compile and skip locally. CI runs them against service containers.",
+      "workaround": "Set AEGIS_TEST_DATABASE_URL to run them. The gateway compiles and unit-tests with no external service."
+    },
+    {
+      "id": "no-provider-keys",
+      "summary": "No real provider API key was available, so no live completion has been served.",
+      "impact": "The pipeline is verified against a mock provider only.",
+      "workaround": "Add one key and send a single request; the savings figure can then be checked against the provider bill."
     }
   ],
   "launch_blockers": [
     {
       "id": "pricing-unverified",
-      "summary": "Seed pricing in metering/pricing.rs was written from memory, not fetched from provider price sheets.",
-      "impact": "Every savings figure and invoice line depends on these numbers being right.",
-      "action": "Follow docs/runbooks/pricing-update.md and confirm all 28 rows before billing any customer."
+      "summary": "Seed pricing for 28 models was transcribed during the build, not fetched from provider price sheets. Every row is marked UNVERIFIED.",
+      "impact": "Every savings figure and invoice line depends on these numbers.",
+      "action": "Follow docs/runbooks/pricing-update.md before billing any customer."
+    },
+    {
+      "id": "load-test-not-run",
+      "summary": "The k6 load test has never been executed.",
+      "impact": "The sub-1ms P99 overhead claim on the landing page is a design target, not a measurement.",
+      "action": "Run infra/loadtest/k6-gateway.js against staging and record the P99."
+    },
+    {
+      "id": "restore-drill-not-run",
+      "summary": "No backup has ever been restored.",
+      "impact": "Part 13 item 6: an untested backup is not a backup.",
+      "action": "Run scripts/backup-restore-drill.sh and record the result in MEMORY.md."
     }
   ],
   "verification": {
-    "unit_tests": 622,
+    "unit_tests": 623,
     "unit_tests_passing": true,
+    "integration_tests_written": 14,
+    "integration_tests_run_locally": false,
     "clippy_clean": true,
     "fmt_clean": true,
-    "integration_tests_run_locally": false
+    "web_builds": true,
+    "web_lint_clean": true,
+    "gateway_started_and_probed": true,
+    "load_test_executed": false,
+    "restore_drill_executed": false,
+    "live_provider_verified": false
   }
 }

@@ -12,10 +12,14 @@
 //! having run. What is avoided is the far worse failure mode where a contributor sees red
 //! tests on a clean checkout, learns the suite is unreliable, and stops reading it.
 
+// Cargo compiles this module separately into every integration test binary, and each one
+// uses a different subset of it. Without this, adding a helper that only one test file
+// needs breaks the build for all the others.
+#![allow(dead_code)]
+
 use aegis_gateway::db::pool;
 use aegis_gateway::AppState;
 use sqlx::PgPool;
-use std::sync::Arc;
 use uuid::Uuid;
 
 /// Connect to the test database, or return `None` when one is not configured.
@@ -143,6 +147,3 @@ pub async fn setup() -> Option<(AppState, PgPool)> {
 
 /// Re-export so tests need only one import.
 pub use aegis_gateway::db::repo;
-
-/// Convenience alias used across the integration tests.
-pub type SharedState = Arc<AppState>;
