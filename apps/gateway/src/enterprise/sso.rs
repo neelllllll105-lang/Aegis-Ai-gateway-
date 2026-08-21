@@ -69,11 +69,7 @@ pub struct SsoConnection {
 ///
 /// Stateless checks only; replay detection needs the store and is
 /// [`check_and_record_replay`].
-pub fn validate(
-    assertion: &SsoAssertion,
-    connection: &SsoConnection,
-    now: i64,
-) -> Result<()> {
+pub fn validate(assertion: &SsoAssertion, connection: &SsoConnection, now: i64) -> Result<()> {
     if !connection.is_active {
         return Err(AegisError::Forbidden(
             "single sign-on is not enabled for this organisation".into(),
@@ -398,7 +394,9 @@ mod tests {
         let first = Uuid::new_v4();
         let second = Uuid::new_v4();
 
-        check_and_record_replay(&store, first, "shared-id").await.unwrap();
+        check_and_record_replay(&store, first, "shared-id")
+            .await
+            .unwrap();
         // A different tenant using a coincidentally identical id must not be blocked.
         assert!(check_and_record_replay(&store, second, "shared-id")
             .await

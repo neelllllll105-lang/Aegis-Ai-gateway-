@@ -163,9 +163,7 @@ mod tests {
     fn generated_secrets_are_base32_and_long_enough() {
         let secret = generate_secret();
         assert_eq!(secret.len(), 32, "20 bytes encodes to 32 base32 characters");
-        assert!(secret
-            .chars()
-            .all(|c| BASE32_ALPHABET.contains(&(c as u8))));
+        assert!(secret.chars().all(|c| BASE32_ALPHABET.contains(&(c as u8))));
     }
 
     #[test]

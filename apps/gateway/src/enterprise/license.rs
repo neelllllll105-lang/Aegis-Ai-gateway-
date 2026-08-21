@@ -359,7 +359,11 @@ mod tests {
         // vulnerabilities. There is no algorithm field here to attack.
         let now = 1_800_000_000;
         let license = issue(&payload(now + DAY), SECRET).unwrap();
-        assert_eq!(license.matches('.').count(), 1, "expected exactly two segments");
+        assert_eq!(
+            license.matches('.').count(),
+            1,
+            "expected exactly two segments"
+        );
         assert!(!license.contains("alg"));
     }
 

@@ -1,0 +1,126 @@
+@import "tailwindcss";
+
+/*
+ * Aegis design tokens.
+ *
+ * Dark-first, per MASTER_BUILD.md Part 7: the audience is developers, and the product
+ * sits next to a terminal and an IDE. One accent colour, used only for things that are
+ * actually actionable or actually money — an interface where everything is highlighted
+ * highlights nothing.
+ *
+ * Numbers are monospace everywhere. A savings figure that shifts horizontally as it
+ * animates is unreadable, and tabular alignment is what makes a column of costs scannable.
+ */
+
+@theme {
+  /* Surfaces: a near-black base with three lifts. Real separation comes from these
+     steps plus a single hairline border, not from shadows — shadows on a dark ground
+     read as smudges. */
+  --color-base: #08090b;
+  --color-surface: #0d0f13;
+  --color-raised: #14171d;
+  --color-overlay: #1b1f27;
+
+  --color-line: #232830;
+  --color-line-strong: #333a45;
+
+  /* Text: four steps, enough for hierarchy without inventing greys per component. */
+  --color-ink: #f2f4f7;
+  --color-ink-muted: #a5adba;
+  --color-ink-subtle: #6b7482;
+  --color-ink-faint: #464e5a;
+
+  /* One accent. Aegis green: savings, success, the primary action. */
+  --color-accent: #3ddc91;
+  --color-accent-dim: #2aa870;
+  --color-accent-wash: #0f2a1f;
+
+  /* Semantic colours, used only for genuine state. */
+  --color-warn: #f5b544;
+  --color-danger: #f2635f;
+  --color-info: #6ba7f5;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo,
+    Consolas, monospace;
+
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-line);
+  }
+
+  html {
+    color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--color-base);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Every number is tabular. Without this, a live-updating counter jitters as digit
+     widths change, which looks broken even when the value is right. */
+  .tabular,
+  code,
+  pre {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::selection {
+    background-color: var(--color-accent-wash);
+    color: var(--color-accent);
+  }
+
+  /* A visible focus ring on every interactive element. Keyboard navigation is not
+     optional, and the browser default is invisible against this background. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
+  /* Respect the system preference rather than animating regardless. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  .card {
+    background-color: var(--color-surface);
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-lg);
+  }
+
+  .hairline {
+    border-bottom: 1px solid var(--color-line);
+  }
+
+  /* A subtle grid, used once on the landing hero. Used more than once it becomes
+     wallpaper. */
+  .grid-bg {
+    background-image:
+      linear-gradient(to right, var(--color-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--color-line) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(ellipse 80% 55% at 50% 0%, #000 40%, transparent 100%);
+  }
+}

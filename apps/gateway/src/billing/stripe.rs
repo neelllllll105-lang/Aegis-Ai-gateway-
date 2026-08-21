@@ -146,12 +146,7 @@ pub fn verify_signature(
         ));
     }
 
-    let signed_payload = [
-        parsed.timestamp.to_string().as_bytes(),
-        b".",
-        payload,
-    ]
-    .concat();
+    let signed_payload = [parsed.timestamp.to_string().as_bytes(), b".", payload].concat();
 
     let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
         return Err(AegisError::Crypto);
@@ -281,7 +276,10 @@ mod tests {
         let signed = [timestamp.to_string().as_bytes(), b".", payload].concat();
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(&signed);
-        format!("t={timestamp},v1={}", hex::encode(mac.finalize().into_bytes()))
+        format!(
+            "t={timestamp},v1={}",
+            hex::encode(mac.finalize().into_bytes())
+        )
     }
 
     fn event_payload(event_type: &str) -> Vec<u8> {
@@ -497,7 +495,8 @@ mod tests {
 
         assert_eq!(map.get("client_reference_id").unwrap(), &org_id.to_string());
         assert_eq!(
-            map.get("subscription_data[metadata][aegis_org_id]").unwrap(),
+            map.get("subscription_data[metadata][aegis_org_id]")
+                .unwrap(),
             &org_id.to_string()
         );
         assert_eq!(map.get("mode").unwrap(), "subscription");

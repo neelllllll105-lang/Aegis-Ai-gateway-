@@ -30,7 +30,11 @@ pub struct ScimName {
     pub formatted: Option<String>,
     #[serde(rename = "givenName", default, skip_serializing_if = "Option::is_none")]
     pub given_name: Option<String>,
-    #[serde(rename = "familyName", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "familyName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub family_name: Option<String>,
 }
 
@@ -73,7 +77,11 @@ pub struct ScimMeta {
     pub resource_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<String>,
-    #[serde(rename = "lastModified", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "lastModified",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub last_modified: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
@@ -107,7 +115,10 @@ impl ScimUser {
                 resource_type: "User".to_string(),
                 created: None,
                 last_modified: None,
-                location: Some(format!("{}/scim/v2/Users/{id}", base_url.trim_end_matches('/'))),
+                location: Some(format!(
+                    "{}/scim/v2/Users/{id}",
+                    base_url.trim_end_matches('/')
+                )),
             }),
         }
     }
@@ -123,24 +134,20 @@ impl ScimUser {
             .find(|e| e.primary)
             .or_else(|| self.emails.first())
             .map(|e| e.value.clone())
-            .or_else(|| {
-                self.user_name
-                    .contains('@')
-                    .then(|| self.user_name.clone())
-            })
+            .or_else(|| self.user_name.contains('@').then(|| self.user_name.clone()))
     }
 
     /// The display name, if the provider sent one.
     pub fn display_name(&self) -> Option<String> {
         self.name.as_ref().and_then(|n| {
-            n.formatted.clone().or_else(|| {
-                match (&n.given_name, &n.family_name) {
+            n.formatted
+                .clone()
+                .or_else(|| match (&n.given_name, &n.family_name) {
                     (Some(given), Some(family)) => Some(format!("{given} {family}")),
                     (Some(given), None) => Some(given.clone()),
                     (None, Some(family)) => Some(family.clone()),
                     (None, None) => None,
-                }
-            })
+                })
         })
     }
 }
@@ -295,7 +302,10 @@ mod tests {
         let user: ScimUser = serde_json::from_value(okta_user_json()).unwrap();
         assert_eq!(user.user_name, "jane.doe@acme.com");
         assert!(user.active);
-        assert_eq!(user.provisioning_email().as_deref(), Some("jane.doe@acme.com"));
+        assert_eq!(
+            user.provisioning_email().as_deref(),
+            Some("jane.doe@acme.com")
+        );
         assert_eq!(user.display_name().as_deref(), Some("Jane Doe"));
     }
 
@@ -434,7 +444,10 @@ mod tests {
         assert_eq!(response.schemas[0], LIST_SCHEMA);
 
         let json = serde_json::to_value(&response).unwrap();
-        assert!(json.get("Resources").is_some(), "Resources must be capitalised");
+        assert!(
+            json.get("Resources").is_some(),
+            "Resources must be capitalised"
+        );
         assert!(json.get("totalResults").is_some());
     }
 
@@ -444,7 +457,10 @@ mod tests {
         let error = ScimError::not_found("user not found");
         let json = serde_json::to_value(&error).unwrap();
         assert_eq!(json["status"], "404");
-        assert!(json["status"].is_string(), "status must be a string, not a number");
+        assert!(
+            json["status"].is_string(),
+            "status must be a string, not a number"
+        );
         assert_eq!(json["schemas"][0], ERROR_SCHEMA);
     }
 

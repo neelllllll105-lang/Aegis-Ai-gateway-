@@ -1,0 +1,312 @@
+/**
+ * Typed client for the Aegis management API.
+ *
+ * # Why every call goes through here
+ *
+ * Session authentication is an HTTP-only cookie, which means `credentials: "include"` on
+ * every request and no token ever reaching JavaScript. Centralising that removes the
+ * possibility of a component fetching directly, forgetting the flag, and appearing to be
+ * logged out for reasons nobody can reproduce.
+ *
+ * It also means the gateway error envelope is unwrapped in exactly one place, so a
+ * component receives a real message ("budget exceeded: $12.40 of $10.00") rather than
+ * "Request failed with status 402".
+ */
+
+/** Base URL of the gateway. */
+export const API_URL =
+  process.env.NEXT_PUBLIC_AEGIS_API_URL ?? "http://localhost:8080";
+
+/** The gateway error envelope, per MASTER_BUILD.md Part 12. */
+export interface ApiErrorBody {
+  error: {
+    type: string;
+    message: string;
+    docs_url: string;
+    upgrade_url?: string;
+  };
+}
+
+/** An error from the gateway, carrying its machine-readable type. */
+export class ApiError extends Error {
+  readonly status: number;
+  /** Stable error type, e.g. `budget_exceeded`. Branch on this, not the message. */
+  readonly type: string;
+  readonly docsUrl?: string;
+  readonly upgradeUrl?: string;
+
+  constructor(
+    status: number,
+    type: string,
+    message: string,
+    docsUrl?: string,
+    upgradeUrl?: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.type = type;
+    this.docsUrl = docsUrl;
+    this.upgradeUrl = upgradeUrl;
+  }
+
+  /** True when the user needs to sign in again. */
+  get isUnauthorized(): boolean {
+    return this.status === 401;
+  }
+}
+
+interface RequestOptions {
+  method?: string;
+  body?: unknown;
+  /** Server components must opt out of caching for per-user data. */
+  cache?: RequestCache;
+}
+
+/**
+ * Perform an API request.
+ *
+ * Throws {@link ApiError} on any non-2xx response so callers can use ordinary
+ * try/catch rather than checking a status on every call site.
+ */
+export async function apiRequest<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    method: options.method ?? "GET",
+    headers: { "Content-Type": "application/json" },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    // The session cookie is HTTP-only, so it only travels when credentials are included.
+    credentials: "include",
+    cache: options.cache ?? "no-store",
+  });
+
+  if (!response.ok) {
+    let type = "unknown_error";
+    let message = `Request failed with status ${response.status}`;
+    let docsUrl: string | undefined;
+    let upgradeUrl: string | undefined;
+
+    try {
+      const body = (await response.json()) as Partial<ApiErrorBody>;
+      if (body.error) {
+        type = body.error.type ?? type;
+        message = body.error.message ?? message;
+        docsUrl = body.error.docs_url;
+        upgradeUrl = body.error.upgrade_url;
+      }
+    } catch {
+      // A non-JSON error body (a proxy 502, say) leaves the status-based default,
+      // which is still more useful than throwing a parse error over the real failure.
+    }
+
+    throw new ApiError(response.status, type, message, docsUrl, upgradeUrl);
+  }
+
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
+// ---------------------------------------------------------------------------
+// Response shapes
+// ---------------------------------------------------------------------------
+
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  plan: string;
+  savings_share_bp: number;
+  billing_email: string | null;
+  zero_retention: boolean;
+  content_capture: boolean;
+  region: string;
+  created_at: string;
+}
+
+export interface User {
+  id: string;
+  email: string;
+  name: string | null;
+  is_admin: boolean;
+  email_verified_at: string | null;
+  created_at: string;
+}
+
+export interface ApiKey {
+  id: string;
+  org_id: string;
+  team_id: string | null;
+  name: string;
+  key_prefix: string;
+  rate_limit_per_minute: number;
+  monthly_budget_mc: number | null;
+  allowed_models: string[] | null;
+  last_used_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export interface CreatedKey {
+  /** The full key. Shown once, never retrievable again. */
+  key: string;
+  metadata: ApiKey;
+  warning: string;
+}
+
+export interface UsageSummary {
+  requests: number;
+  cache_hits: number;
+  input_tokens: number;
+  output_tokens: number;
+  baseline_cost_mc: number;
+  actual_cost_mc: number;
+  gross_savings_mc: number;
+  aegis_fee_mc: number;
+}
+
+export interface UsageSummaryResponse {
+  period: { start: string; end: string };
+  summary: UsageSummary;
+  derived: {
+    savings_percent: number;
+    cache_hit_rate: number;
+    customer_net_mc: number;
+  };
+}
+
+export interface RequestLogRow {
+  request_id: string;
+  requested_model: string;
+  served_model: string;
+  provider: string;
+  input_tokens: number;
+  output_tokens: number;
+  baseline_cost_mc: number;
+  actual_cost_mc: number;
+  gross_savings_mc: number;
+  latency_ms: number;
+  cache_hit: boolean;
+  cache_type: string | null;
+  routing_reason: string;
+  status_code: number;
+  created_at: string;
+}
+
+export interface ProviderCredential {
+  id: string;
+  provider: string;
+  key_hint: string | null;
+  base_url: string | null;
+  label: string | null;
+  is_default: boolean;
+  last_tested_at: string | null;
+  last_test_ok: boolean | null;
+  created_at: string;
+}
+
+export interface OrgResponse {
+  organization: Organization;
+  usage: {
+    month_to_date_spend_mc: number;
+    month_to_date_savings_mc: number;
+    month_to_date_requests: number;
+  };
+}
+
+export interface BillingPlan {
+  plan: string;
+  savings_share_bp: number;
+  savings_share_percent: number;
+  subscription_mc: number;
+  limits: {
+    requests_per_minute: number;
+    monthly_request_allowance: number | null;
+    byok: boolean;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Endpoints
+// ---------------------------------------------------------------------------
+
+export const api = {
+  signup: (email: string, password: string, name?: string) =>
+    apiRequest<{ user: User; organization: Organization }>("/api/auth/signup", {
+      method: "POST",
+      body: { email, password, name },
+    }),
+
+  login: (email: string, password: string) =>
+    apiRequest<{ user: User; organizations: Organization[] }>("/api/auth/login", {
+      method: "POST",
+      body: { email, password },
+    }),
+
+  logout: () => apiRequest<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+
+  me: () =>
+    apiRequest<{
+      user: User | null;
+      organization: Organization | null;
+      role: string | null;
+      is_admin: boolean;
+    }>("/api/auth/me"),
+
+  org: () => apiRequest<OrgResponse>("/api/org"),
+
+  listKeys: () => apiRequest<{ keys: ApiKey[] }>("/api/keys"),
+
+  createKey: (input: {
+    name: string;
+    rate_limit_per_minute?: number;
+    monthly_budget_mc?: number;
+    allowed_models?: string[];
+  }) => apiRequest<CreatedKey>("/api/keys", { method: "POST", body: input }),
+
+  revokeKey: (id: string) =>
+    apiRequest<{ revoked: boolean }>(`/api/keys/${id}`, { method: "DELETE" }),
+
+  usageSummary: (start?: string, end?: string) => {
+    const params = new URLSearchParams();
+    if (start) params.set("start", start);
+    if (end) params.set("end", end);
+    const query = params.toString();
+    return apiRequest<UsageSummaryResponse>(
+      `/api/usage/summary${query ? `?${query}` : ""}`,
+    );
+  },
+
+  requests: (limit = 100) =>
+    apiRequest<{ requests: RequestLogRow[] }>(`/api/requests?limit=${limit}`),
+
+  listProviders: () =>
+    apiRequest<{ providers: ProviderCredential[] }>("/api/providers"),
+
+  createProvider: (input: {
+    provider: string;
+    api_key: string;
+    base_url?: string;
+    label?: string;
+  }) =>
+    apiRequest<ProviderCredential>("/api/providers", {
+      method: "POST",
+      body: input,
+    }),
+
+  deleteProvider: (id: string) =>
+    apiRequest<{ deleted: boolean }>(`/api/providers/${id}`, { method: "DELETE" }),
+
+  testProvider: (id: string) =>
+    apiRequest<{ ok: boolean; provider: string; error: string | null }>(
+      `/api/providers/${id}/test`,
+      { method: "POST" },
+    ),
+
+  billingPlan: () => apiRequest<BillingPlan>("/api/billing/plan"),
+
+  /** URL for the CSV export. A direct link, so the browser handles the download. */
+  savingsCsvUrl: () => `${API_URL}/api/savings/report.csv`,
+};

@@ -44,6 +44,12 @@ if [ -f .aegis/state.json ]; then
   if [ -n "$PYTHON" ]; then
     "$PYTHON" - <<'PY'
 import json
+import sys
+
+# Windows consoles default to cp1252, which cannot encode the status glyphs. Reconfigure
+# stdout rather than falling back to ASCII everywhere else.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 with open(".aegis/state.json", encoding="utf-8") as handle:
     state = json.load(handle)
 marks = {"complete": "\033[32m●\033[0m", "in_progress": "\033[33m◐\033[0m",
