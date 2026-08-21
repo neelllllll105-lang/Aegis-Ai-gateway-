@@ -1,0 +1,149 @@
+# Aegis self-hosted stack (P6.3).
+#
+#   cp infra/self-hosted.env.example infra/self-hosted.env
+#   # edit infra/self-hosted.env — at minimum set the three secrets it names
+#   docker compose -f infra/docker-compose.self-hosted.yml --env-file infra/self-hosted.env up -d
+#
+# This differs from `docker-compose.yml` in intent. That file is a development
+# convenience: infrastructure only, ports on localhost, gateway and dashboard run from
+# your shell with hot reload. This file is the whole product, built from source, meant to
+# run unattended on a customer's own machine — the deployment an enterprise reaches for
+# when its data may not leave its own network at all.
+#
+# What it does NOT do, deliberately:
+#
+#   - No TLS termination. Put this behind your existing ingress (nginx, Traefik, a cloud
+#     load balancer). Baking in a certificate story would be guesswork about a network we
+#     cannot see, and a wrong guess here is an outage on day one.
+#   - No automatic backups. `docs/runbooks/restore.md` covers what to back up and how to
+#     prove the backup works. A backup nobody has restored is not a backup.
+#   - No secret generation. Secrets come from the env file, so they live in whatever
+#     secret store the operator already trusts rather than in a container layer.
+
+name: aegis-self-hosted
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    <<: *restart
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aegis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-aegis}
+      # Checksums cost a few percent of write throughput and turn silent disk corruption
+      # into a loud error. On a billing database that trade is not close.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aegis} -d ${POSTGRES_DB:-aegis}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # Not published. Only the gateway needs it, and a database reachable from the host is
+    # one firewall mistake away from being reachable from everywhere.
+    expose:
+      - "5432"
+
+  redis:
+    image: redis:7-alpine
+    <<: *restart
+    # `--appendonly yes` matters here in a way it does not in development: rate limit and
+    # budget counters live in Redis, and losing them on restart means a customer briefly
+    # gets their whole monthly budget back.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    expose:
+      - "6379"
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    <<: *restart
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      # Qdrant's image has no shell utilities beyond this, so the check is deliberately
+      # crude: the process answering on its own port is the signal.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/6333 && echo ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    expose:
+      - "6333"
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: apps/gateway/Dockerfile
+    <<: *restart
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    environment:
+      AEGIS_ENV: production
+      AEGIS_REGION: ${AEGIS_REGION:-self-hosted}
+      PORT: "8080"
+      DATABASE_URL: postgres://${POSTGRES_USER:-aegis}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-aegis}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      QDRANT_URL: http://qdrant:6333
+      # Encrypts every stored provider credential. Losing this means losing access to
+      # every BYOK key in the database — they are not recoverable by any other means.
+      AEGIS_MASTER_KEY: ${AEGIS_MASTER_KEY:?AEGIS_MASTER_KEY must be set (32 bytes, base64)}
+      AEGIS_APP_URL: ${AEGIS_APP_URL:?AEGIS_APP_URL must be set, e.g. https://aegis.internal}
+      AEGIS_LICENSE_KEY: ${AEGIS_LICENSE_KEY:-}
+      RUST_LOG: ${RUST_LOG:-info,aegis_gateway=info}
+    healthcheck:
+      # The binary checks its own dependencies and exits non-zero if any are unreachable,
+      # so this is a real readiness signal rather than "the port is open".
+      test: ["CMD", "/usr/local/bin/aegis-gateway", "--health-check"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    ports:
+      - "${GATEWAY_BIND:-127.0.0.1}:8080:8080"
+
+  web:
+    build:
+      context: ../apps/web
+      args:
+        # Baked at build time: Next.js inlines NEXT_PUBLIC_* into the client bundle, so
+        # this cannot be supplied at run time however much one would prefer it.
+        NEXT_PUBLIC_AEGIS_API_URL: ${AEGIS_API_PUBLIC_URL:?AEGIS_API_PUBLIC_URL must be set — the URL a browser uses to reach the gateway}
+        NEXT_PUBLIC_SITE_URL: ${AEGIS_APP_URL}
+    <<: *restart
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:3000:3000"
+
+volumes:
+  postgres-data:
+  redis-data:
+  qdrant-data:

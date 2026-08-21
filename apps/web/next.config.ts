@@ -4,6 +4,11 @@ const config: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
 
+  // Emit a self-contained server plus only the node_modules actually reached at run
+  // time. The self-hosted image copies `.next/standalone` rather than the whole tree,
+  // which is roughly a tenth of the size and contains no build tooling.
+  output: "standalone",
+
   async headers() {
     return [
       {
