@@ -1,0 +1,91 @@
+{
+  "$comment": "Machine-readable project state. The human-readable companion is MEMORY.md; keep the two in agreement. Validated by scripts/check-memory-freshness.sh in CI.",
+  "schema_version": 1,
+  "project": "aegis",
+  "last_updated": "2026-08-20",
+  "current_phase": 4,
+  "next_task": "Build the Next.js dashboard and marketing site (P4.1, P4.6), then verify against live Postgres/Redis.",
+  "phases": [
+    {
+      "id": 0,
+      "name": "Foundation",
+      "status": "complete",
+      "evidence": "Workspace, schema migrations, typed config, CI, health endpoints, ADRs 001-004."
+    },
+    {
+      "id": 1,
+      "name": "Auth, keys, orgs",
+      "status": "in_progress",
+      "evidence": "Gateway side complete: argon2id auth, sessions, API key CRUD with LRU+Redis cache, audit log, org/member management. Dashboard UI outstanding.",
+      "remaining": ["P1.5 dashboard signup/login/keys pages"]
+    },
+    {
+      "id": 2,
+      "name": "Core gateway",
+      "status": "complete",
+      "evidence": "Nine provider adapters, full pipeline with rate limiting, budgets, BYOK, shared key pool, usage worker, metrics. 622 unit tests."
+    },
+    {
+      "id": 3,
+      "name": "Optimization engine",
+      "status": "complete",
+      "evidence": "Classifier 98% on 100 labelled fixtures, router with conservative defaults, exact + semantic cache, compressor, circuit breakers, savings attribution."
+    },
+    {
+      "id": 4,
+      "name": "Dashboards, billing, launch prep",
+      "status": "in_progress",
+      "evidence": "Stripe webhook verification, invoice assembly, budget alerts, admin console, savings CSV export complete.",
+      "remaining": [
+        "P4.1 dashboard pages",
+        "P4.6 landing page",
+        "P4.8 execute the load test",
+        "P4.10 runbooks"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "Launch + provider expansion",
+      "status": "in_progress",
+      "evidence": "All five expansion providers implemented and tested. Classifier v2 trained via a real dump/fit pipeline. Status page endpoint live.",
+      "remaining": ["P5.1 launch playbook", "P5.5 Slack digest wiring", "P5.6 referral program"]
+    },
+    {
+      "id": 6,
+      "name": "Enterprise readiness",
+      "status": "in_progress",
+      "evidence": "Offline license validation with grace period, SCIM 2.0 shapes, SSO assertion validation with replay detection, per-tenant HKDF keys, region pinning, admin TOTP.",
+      "remaining": ["P6.6 compliance pack", "P6.8 read replica routing"]
+    },
+    {
+      "id": 7,
+      "name": "Scale + moat",
+      "status": "in_progress",
+      "evidence": "UCB1 outcome bandit with a replay test showing it beats static routing.",
+      "remaining": ["P7.2 multi-region", "P7.4 SDKs", "P7.5 model auto-discovery", "P7.8 DD pack"]
+    }
+  ],
+  "blockers": [
+    {
+      "id": "docker-unavailable",
+      "summary": "Docker Desktop was not running on the build machine, so nothing has been verified against live Postgres, Redis, or Qdrant.",
+      "impact": "Integration tests are written but unexecuted locally. CI runs them against service containers.",
+      "workaround": "The gateway compiles and unit-tests with no external service. Set AEGIS_TEST_DATABASE_URL to run the integration suite."
+    }
+  ],
+  "launch_blockers": [
+    {
+      "id": "pricing-unverified",
+      "summary": "Seed pricing in metering/pricing.rs was written from memory, not fetched from provider price sheets.",
+      "impact": "Every savings figure and invoice line depends on these numbers being right.",
+      "action": "Follow docs/runbooks/pricing-update.md and confirm all 28 rows before billing any customer."
+    }
+  ],
+  "verification": {
+    "unit_tests": 622,
+    "unit_tests_passing": true,
+    "clippy_clean": true,
+    "fmt_clean": true,
+    "integration_tests_run_locally": false
+  }
+}

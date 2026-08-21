@@ -1,0 +1,123 @@
+# Aegis local development stack.
+#
+#   docker compose -f infra/docker-compose.yml up -d
+#
+# Brings up Postgres, Redis, and Qdrant. The gateway and dashboard are commented out by
+# default: during development you want them running from `cargo run` and `npm run dev`
+# with hot reload, not rebuilt as containers on every change. Uncomment them to test the
+# production images.
+#
+# Everything binds to 127.0.0.1 rather than 0.0.0.0. A development database listening on
+# every interface is how a laptop on a coffee shop network ends up with an open Postgres.
+
+name: aegis
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: aegis_dev_password
+      POSTGRES_DB: aegis
+      # Faster startup for a throwaway development database.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    command:
+      - "postgres"
+      # Part 4 requires both of these.
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "pg_stat_statements.track=all"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    command:
+      - "redis-server"
+      # AOF persistence: the usage stream is the only copy of a metered request between
+      # emission and the writer persisting it. Losing it on restart loses revenue.
+      - "--appendonly"
+      - "yes"
+      - "--appendfsync"
+      - "everysec"
+      # Bounded memory with LRU eviction for the cache keyspace.
+      - "--maxmemory"
+      - "1gb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # The Qdrant image has no shell and no curl, so the check runs its own binary.
+      test: ["CMD", "/qdrant/qdrant", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Application services -----------------------------------------------------
+  # Uncomment to run the built images rather than local dev servers.
+  #
+  # gateway:
+  #   build:
+  #     context: ..
+  #     dockerfile: apps/gateway/Dockerfile
+  #   restart: unless-stopped
+  #   ports:
+  #     - "127.0.0.1:8080:8080"
+  #   environment:
+  #     AEGIS_ENV: dev
+  #     AEGIS_BIND: 0.0.0.0:8080
+  #     DATABASE_URL: postgres://aegis:aegis_dev_password@postgres:5432/aegis
+  #     REDIS_URL: redis://redis:6379
+  #     QDRANT_URL: http://qdrant:6333
+  #     AEGIS_LOG: info,aegis_gateway=debug
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #
+  # web:
+  #   build:
+  #     context: ..
+  #     dockerfile: apps/web/Dockerfile
+  #   restart: unless-stopped
+  #   ports:
+  #     - "127.0.0.1:3000:3000"
+  #   environment:
+  #     NEXT_PUBLIC_AEGIS_API_URL: http://localhost:8080
+  #   depends_on:
+  #     - gateway
+
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:

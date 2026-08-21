@@ -33,11 +33,48 @@ use tower_http::trace::TraceLayer;
 
 #[tokio::main]
 async fn main() {
+    // The container healthcheck runs this binary rather than requiring curl in the
+    // runtime image. Keeping the image free of shell utilities is worth a few lines here.
+    if std::env::args().any(|arg| arg == "--health-check") {
+        std::process::exit(health_check().await);
+    }
+
     if let Err(error) = run().await {
         // Startup failures print rather than log: tracing may not be initialised yet, and
         // an operator staring at a crashed container needs the reason on stderr.
         eprintln!("aegis-gateway failed to start: {error}");
         std::process::exit(1);
+    }
+}
+
+/// Probe the local readiness endpoint. Returns a process exit code.
+///
+/// Deliberately checks `/ready`, not `/health`: an instance whose store is unreachable
+/// should be drained by the load balancer, and the orchestrator should not restart a
+/// process that is itself perfectly healthy.
+async fn health_check() -> i32 {
+    let bind = std::env::var("AEGIS_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let port = bind.rsplit(':').next().unwrap_or("8080");
+    let url = format!("http://127.0.0.1:{port}/ready");
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return 1,
+    };
+
+    match client.get(&url).send().await {
+        Ok(response) if response.status().is_success() => 0,
+        Ok(response) => {
+            eprintln!("health check: {url} returned {}", response.status());
+            1
+        }
+        Err(e) => {
+            eprintln!("health check: {url} unreachable: {e}");
+            1
+        }
     }
 }
 
