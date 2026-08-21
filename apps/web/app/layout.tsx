@@ -63,7 +63,7 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" className={`${sans.variable} ${mono.variable}`}>
-      <body className="min-h-screen bg-[var(--color-base)] text-[var(--color-ink)] font-sans antialiased selection:bg-[var(--color-accent-wash)] selection:text-[var(--color-accent-dark)]">
+      <body className="min-h-screen bg-[var(--color-bg)] text-[var(--color-ink)] font-sans antialiased selection:bg-[var(--color-accent-bg)] selection:text-[var(--color-accent-dark)]">
         {children}
       </body>
     </html>

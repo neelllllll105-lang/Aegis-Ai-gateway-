@@ -110,16 +110,16 @@ export default function KeysPage() {
 
       {/* The key is shown once. Everything about this panel says so. */}
       {created && (
-        <Card className="mb-6 border-[var(--color-accent-dim)] bg-[var(--color-accent-wash)] p-5">
+        <Card className="mb-6 border-[var(--color-accent-dark)] bg-[var(--color-accent-bg)] p-5">
           <h3 className="text-sm font-medium text-[var(--color-accent)]">
             Copy this key now — it will not be shown again
           </h3>
-          <p className="mt-1 text-xs text-[var(--color-ink-muted)]">
+          <p className="mt-1 text-xs text-[var(--color-muted)]">
             {created.warning}
           </p>
 
           <div className="mt-4 flex flex-wrap items-center gap-2">
-            <code className="tabular flex-1 overflow-x-auto rounded-[var(--radius)] border border-[var(--color-line-strong)] bg-[var(--color-base)] px-3 py-2 text-xs text-[var(--color-ink)]">
+            <code className="tabular flex-1 overflow-x-auto rounded-[var(--radius)] border border-[var(--color-line-dark)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-ink)]">
               {created.key}
             </code>
             <Button variant="secondary" onClick={copyKey}>
@@ -152,7 +152,7 @@ export default function KeysPage() {
 
       <Card>
         {loading ? (
-          <p className="px-6 py-10 text-center text-sm text-[var(--color-ink-subtle)]">
+          <p className="px-6 py-10 text-center text-sm text-[var(--color-muted-light)]">
             Loading…
           </p>
         ) : keys.length === 0 ? (
@@ -200,7 +200,7 @@ export default function KeysPage() {
                         <button
                           type="button"
                           onClick={() => handleRevoke(key)}
-                          className="text-sm text-[var(--color-ink-subtle)] transition-colors hover:text-[var(--color-danger)]"
+                          className="text-sm text-[var(--color-muted-light)] transition-colors hover:text-[var(--color-red)]"
                         >
                           Revoke
                         </button>

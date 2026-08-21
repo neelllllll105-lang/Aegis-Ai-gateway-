@@ -143,7 +143,7 @@ export default function FaqPage() {
                 <tr
                   key={idx}
                   className={`border-b border-[#D9CFC7] last:border-0 ${
-                    row.isAegis ? "bg-[#EFE9E3] font-bold" : "hover:bg-[#FAF8F5]"
+                    row.isAegis ? "bg-[#EFE9E3] font-bold" : "hover:bg-[#F9F8F6]"
                   }`}
                 >
                   <th className="px-4 py-3.5">

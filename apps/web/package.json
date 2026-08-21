@@ -7,8 +7,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "lint": "eslint . && node scripts/check-design-tokens.mjs",
+    "typecheck": "tsc --noEmit",
+    "check:tokens": "node scripts/check-design-tokens.mjs"
   },
   "dependencies": {
     "next": "^15.1.0",

@@ -42,7 +42,7 @@ export default function SettingsPage() {
   }, []);
 
   if (loading) {
-    return <p className="text-sm text-[var(--color-ink-subtle)]">Loading…</p>;
+    return <p className="text-sm text-[var(--color-muted-light)]">Loading…</p>;
   }
   if (error) {
     return <ErrorState message={error} />;
@@ -72,7 +72,7 @@ export default function SettingsPage() {
           <div className="flex items-start justify-between gap-4">
             <div>
               <h3 className="text-sm font-medium text-[var(--color-ink)]">Plan</h3>
-              <p className="mt-1 text-xs text-[var(--color-ink-subtle)]">
+              <p className="mt-1 text-xs text-[var(--color-muted-light)]">
                 We charge a share of savings only when there are savings to share.
               </p>
             </div>
@@ -112,7 +112,7 @@ export default function SettingsPage() {
 
           <div className="mt-5 border-t border-[var(--color-line)] pt-4">
             <div className="flex items-baseline justify-between gap-4 text-sm">
-              <span className="text-[var(--color-ink-subtle)]">
+              <span className="text-[var(--color-muted-light)]">
                 Month-to-date spend
               </span>
               <span className="tabular text-[var(--color-ink)]">
@@ -120,7 +120,7 @@ export default function SettingsPage() {
               </span>
             </div>
             <div className="mt-2 flex items-baseline justify-between gap-4 text-sm">
-              <span className="text-[var(--color-ink-subtle)]">
+              <span className="text-[var(--color-muted-light)]">
                 Month-to-date savings
               </span>
               <span className="tabular text-[var(--color-accent)]">
@@ -132,7 +132,7 @@ export default function SettingsPage() {
 
         <Card className="p-6">
           <h3 className="text-sm font-medium text-[var(--color-ink)]">Data handling</h3>
-          <p className="mt-1 text-xs text-[var(--color-ink-subtle)]">
+          <p className="mt-1 text-xs text-[var(--color-muted-light)]">
             Prompt and response content is never stored unless you explicitly opt in.
           </p>
 
@@ -157,10 +157,10 @@ export default function SettingsPage() {
             />
           </dl>
 
-          <p className="mt-5 rounded-[var(--radius)] border border-[var(--color-line)] bg-[var(--color-base)] p-3 text-xs leading-relaxed text-[var(--color-ink-subtle)]">
+          <p className="mt-5 rounded-[var(--radius)] border border-[var(--color-line)] bg-[var(--color-bg)] p-3 text-xs leading-relaxed text-[var(--color-muted-light)]">
             Changing either setting invalidates your cache and is recorded in the audit
             log. Contact support to change them, or use{" "}
-            <code className="text-[var(--color-ink-muted)]">PATCH /api/org</code>.
+            <code className="text-[var(--color-muted)]">PATCH /api/org</code>.
           </p>
         </Card>
       </div>
@@ -182,15 +182,15 @@ function SettingRow({
   return (
     <div>
       <div className="flex items-baseline justify-between gap-4">
-        <dt className="text-sm text-[var(--color-ink-subtle)]">{label}</dt>
+        <dt className="text-sm text-[var(--color-muted-light)]">{label}</dt>
         <dd
-          className={`text-sm text-[var(--color-ink-muted)] ${mono ? "tabular" : ""}`}
+          className={`text-sm text-[var(--color-muted)] ${mono ? "tabular" : ""}`}
         >
           {value}
         </dd>
       </div>
       {hint && (
-        <p className="mt-1 text-xs leading-relaxed text-[var(--color-ink-faint)]">
+        <p className="mt-1 text-xs leading-relaxed text-[var(--color-muted-light)]">
           {hint}
         </p>
       )}

@@ -79,6 +79,7 @@ pub fn build_router(state: AppState) -> Router {
             get(management::list_budgets).post(management::create_budget),
         )
         .route("/api/budgets/{id}", delete(management::delete_budget))
+        .route("/api/models", get(management::model_catalogue))
         .route("/api/usage/summary", get(management::usage_summary))
         .route("/api/requests", get(management::list_requests))
         .route(

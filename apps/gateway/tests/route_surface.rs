@@ -100,6 +100,7 @@ fn advertised_routes() -> Vec<(&'static str, &'static str)> {
             "/api/budgets/00000000-0000-0000-0000-000000000000",
         ),
         // Reporting.
+        ("GET", "/api/models"),
         ("GET", "/api/usage/summary"),
         ("GET", "/api/usage/anomalies"),
         ("GET", "/api/usage/chargeback"),
@@ -173,6 +174,7 @@ async fn the_management_api_rejects_anonymous_callers_rather_than_serving_them()
     let must_be_guarded = [
         ("GET", "/api/keys"),
         ("GET", "/api/org"),
+        ("GET", "/api/models"),
         ("GET", "/api/usage/summary"),
         ("GET", "/api/usage/chargeback"),
         ("GET", "/api/billing/credits"),

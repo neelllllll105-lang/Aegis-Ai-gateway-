@@ -106,7 +106,7 @@ export default function UsagePage() {
   );
 
   if (loading) {
-    return <p className="text-sm text-[var(--color-ink-subtle)]">Loading…</p>;
+    return <p className="text-sm text-[var(--color-muted-light)]">Loading…</p>;
   }
   if (error) {
     return <ErrorState message={error} />;
@@ -133,8 +133,8 @@ export default function UsagePage() {
               <h3 className="text-sm font-medium text-[var(--color-ink)]">
                 Spend vs baseline
               </h3>
-              <div className="text-xs text-[var(--color-ink-subtle)]">
-                <span className="tabular text-[var(--color-ink-muted)]">
+              <div className="text-xs text-[var(--color-muted-light)]">
+                <span className="tabular text-[var(--color-muted)]">
                   {formatCount(totals.requests)}
                 </span>{" "}
                 requests ·{" "}
@@ -155,12 +155,12 @@ export default function UsagePage() {
                     <linearGradient id="baselineFill" x1="0" y1="0" x2="0" y2="1">
                       <stop
                         offset="0%"
-                        stopColor="var(--color-ink-faint)"
+                        stopColor="var(--color-muted-light)"
                         stopOpacity={0.25}
                       />
                       <stop
                         offset="100%"
-                        stopColor="var(--color-ink-faint)"
+                        stopColor="var(--color-muted-light)"
                         stopOpacity={0.02}
                       />
                     </linearGradient>
@@ -185,13 +185,13 @@ export default function UsagePage() {
                   />
                   <XAxis
                     dataKey="label"
-                    stroke="var(--color-ink-faint)"
+                    stroke="var(--color-muted-light)"
                     fontSize={11}
                     tickLine={false}
                     axisLine={{ stroke: "var(--color-line)" }}
                   />
                   <YAxis
-                    stroke="var(--color-ink-faint)"
+                    stroke="var(--color-muted-light)"
                     fontSize={11}
                     tickLine={false}
                     axisLine={false}
@@ -199,8 +199,8 @@ export default function UsagePage() {
                   />
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: "var(--color-overlay)",
-                      border: "1px solid var(--color-line-strong)",
+                      backgroundColor: "var(--color-surface2)",
+                      border: "1px solid var(--color-line-dark)",
                       borderRadius: "6px",
                       fontSize: "12px",
                     }}
@@ -216,7 +216,7 @@ export default function UsagePage() {
                     type="monotone"
                     dataKey="baselineUsd"
                     name="Would have cost"
-                    stroke="var(--color-ink-subtle)"
+                    stroke="var(--color-muted-light)"
                     strokeDasharray="4 3"
                     fill="url(#baselineFill)"
                     strokeWidth={1.5}
@@ -240,19 +240,19 @@ export default function UsagePage() {
               <table className="w-full min-w-[420px] text-sm">
                 <thead>
                   <tr>
-                    <th className="hairline px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-[var(--color-ink-subtle)]">
+                    <th className="hairline px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-[var(--color-muted-light)]">
                       Day
                     </th>
-                    <th className="hairline px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-[var(--color-ink-subtle)]">
+                    <th className="hairline px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-[var(--color-muted-light)]">
                       Requests
                     </th>
-                    <th className="hairline px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-[var(--color-ink-subtle)]">
+                    <th className="hairline px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-[var(--color-muted-light)]">
                       Baseline
                     </th>
-                    <th className="hairline px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-[var(--color-ink-subtle)]">
+                    <th className="hairline px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-[var(--color-muted-light)]">
                       Actual
                     </th>
-                    <th className="hairline px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-[var(--color-ink-subtle)]">
+                    <th className="hairline px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-[var(--color-muted-light)]">
                       Saved
                     </th>
                   </tr>
@@ -260,16 +260,16 @@ export default function UsagePage() {
                 <tbody>
                   {[...daily].reverse().map((entry) => (
                     <tr key={entry.day}>
-                      <td className="hairline px-3 py-2 text-[var(--color-ink-muted)]">
+                      <td className="hairline px-3 py-2 text-[var(--color-muted)]">
                         {entry.day}
                       </td>
-                      <td className="tabular hairline px-3 py-2 text-right text-[var(--color-ink-muted)]">
+                      <td className="tabular hairline px-3 py-2 text-right text-[var(--color-muted)]">
                         {formatCount(entry.requests)}
                       </td>
-                      <td className="tabular hairline px-3 py-2 text-right text-[var(--color-ink-subtle)]">
+                      <td className="tabular hairline px-3 py-2 text-right text-[var(--color-muted-light)]">
                         {formatUsd(entry.baseline)}
                       </td>
-                      <td className="tabular hairline px-3 py-2 text-right text-[var(--color-ink-muted)]">
+                      <td className="tabular hairline px-3 py-2 text-right text-[var(--color-muted)]">
                         {formatUsd(entry.actual)}
                       </td>
                       <td className="tabular hairline px-3 py-2 text-right text-[var(--color-accent)]">

@@ -66,7 +66,7 @@ export default function RequestsPage() {
       ) : (
         <Card>
           {loading ? (
-            <p className="px-6 py-10 text-center text-sm text-[var(--color-ink-subtle)]">
+            <p className="px-6 py-10 text-center text-sm text-[var(--color-muted-light)]">
               Loading…
             </p>
           ) : rows.length === 0 ? (
@@ -123,7 +123,7 @@ export default function RequestsPage() {
                           {formatUsd(row.gross_savings_mc)}
                         </span>
                       ) : (
-                        <span className="text-[var(--color-ink-faint)]">—</span>
+                        <span className="text-[var(--color-muted-light)]">—</span>
                       )}
                     </Td>
                     <Td align="right" mono muted>
@@ -170,5 +170,5 @@ function RoutingBadge({
 function StatusBadge({ status }: { status: number }) {
   if (status >= 500) return <Badge tone="danger">{status}</Badge>;
   if (status >= 400) return <Badge tone="warn">{status}</Badge>;
-  return <span className="text-[var(--color-ink-faint)]">{status}</span>;
+  return <span className="text-[var(--color-muted-light)]">{status}</span>;
 }

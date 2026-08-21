@@ -1545,6 +1545,111 @@ pub async fn billing_plan(State(state): State<AppState>, headers: HeaderMap) -> 
     }
 }
 
+/// `GET /api/models`
+///
+/// The model catalogue as the dashboard needs to see it: every model Aegis can route to,
+/// what it costs, and — the part that matters — what the cheapest equivalent in its tier
+/// costs, so a human can see the substitution the router would make and judge it.
+///
+/// This exists separately from `/v1/models` (bearer-authenticated, OpenAI-shaped) and
+/// `/api/admin/pricing` (admin-only, raw table) because the dashboard has a session
+/// cookie and a reader role, and neither of those routes accepts that combination.
+pub async fn model_catalogue(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match async {
+        require_reader(&state, &headers).await?;
+
+        let all: Vec<_> = state.pricing.all().collect();
+
+        // Cheapest blended price within each tier — this is the number the router is
+        // actually comparing against when it considers a downgrade.
+        let mut cheapest_in_tier: std::collections::HashMap<&str, i64> =
+            std::collections::HashMap::new();
+        for m in &all {
+            if !m.is_active {
+                continue;
+            }
+            let blended = m.blended_per_mtok().as_i64();
+            cheapest_in_tier
+                .entry(m.tier.as_str())
+                .and_modify(|current| {
+                    if blended < *current {
+                        *current = blended;
+                    }
+                })
+                .or_insert(blended);
+        }
+
+        let mut models: Vec<serde_json::Value> = all
+            .iter()
+            .map(|m| {
+                let blended = m.blended_per_mtok().as_i64();
+                let floor = cheapest_in_tier
+                    .get(m.tier.as_str())
+                    .copied()
+                    .unwrap_or(blended);
+
+                // Percentage saved by taking the cheapest model in this tier instead of
+                // this one. Zero for the cheapest model itself, which is correct.
+                let potential_saving_pct = if blended > 0 && floor < blended {
+                    ((blended - floor) as f64 / blended as f64 * 100.0).round() as i64
+                } else {
+                    0
+                };
+
+                serde_json::json!({
+                    "model_id": m.model_id,
+                    "provider": m.provider,
+                    "tier": m.tier.as_str(),
+                    "input_per_mtok_mc": m.input_per_mtok.as_i64(),
+                    "output_per_mtok_mc": m.output_per_mtok.as_i64(),
+                    "blended_per_mtok_mc": blended,
+                    "cheapest_in_tier_mc": floor,
+                    "potential_saving_pct": potential_saving_pct,
+                    "context_window": m.context_window,
+                    "supports_vision": m.supports_vision,
+                    "supports_tools": m.supports_tools,
+                    "is_active": m.is_active,
+                    // Provenance travels with the price. A number nobody can trace is a
+                    // number nobody should bill against.
+                    "source": m.source,
+                })
+            })
+            .collect();
+
+        // Cheapest first within tier, tiers in escalating order — the order a human reads
+        // when asking "what could I use instead".
+        models.sort_by(|a, b| {
+            let tier_rank = |v: &serde_json::Value| match v["tier"].as_str().unwrap_or("") {
+                "economy" => 0,
+                "standard" => 1,
+                "premium" => 2,
+                _ => 3,
+            };
+            tier_rank(a).cmp(&tier_rank(b)).then(
+                a["blended_per_mtok_mc"]
+                    .as_i64()
+                    .cmp(&b["blended_per_mtok_mc"].as_i64()),
+            )
+        });
+
+        let active = models.iter().filter(|m| m["is_active"] == true).count();
+
+        Ok::<_, AegisError>(respond(
+            StatusCode::OK,
+            serde_json::json!({
+                "models": models,
+                "count": models.len(),
+                "active_count": active,
+            }),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Governance: anomalies, chargeback, credits
 // ---------------------------------------------------------------------------

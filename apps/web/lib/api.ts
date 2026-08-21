@@ -228,6 +228,102 @@ export interface BillingPlan {
   };
 }
 
+
+export interface ModelPrice {
+  model_id: string;
+  provider: string;
+  tier: "economy" | "standard" | "premium";
+  input_per_mtok_mc: number;
+  output_per_mtok_mc: number;
+  blended_per_mtok_mc: number;
+  cheapest_in_tier_mc: number;
+  potential_saving_pct: number;
+  context_window: number;
+  supports_vision: boolean;
+  supports_tools: boolean;
+  is_active: boolean;
+  /** Where this price came from. A number nobody can trace is a number nobody should bill against. */
+  source: string;
+}
+
+export interface Team {
+  id: string;
+  org_id: string;
+  name: string;
+  monthly_budget_mc: number | null;
+  created_at: string;
+}
+
+export interface Member {
+  user_id: string;
+  email: string;
+  name: string | null;
+  role: string;
+  joined_at: string;
+}
+
+export interface Policy {
+  id: string;
+  org_id: string;
+  name: string;
+  rules: Record<string, unknown>;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface Budget {
+  id: string;
+  org_id: string;
+  team_id: string | null;
+  api_key_id: string | null;
+  period: string;
+  limit_mc: number;
+  hard_limit: boolean;
+  created_at: string;
+}
+
+export interface AnomalyReport {
+  org_id: string;
+  /** The spend being judged. */
+  observed_mc: number;
+  /** Mean daily spend over the baseline window. */
+  baseline_mean_mc: number;
+  baseline_stddev_mc: number;
+  /** How many standard deviations from the mean. Zero when undefined. */
+  z_score: number;
+  is_anomalous: boolean;
+  /** Why the detector reached its conclusion, in words an operator can act on. */
+  explanation: string;
+}
+
+export interface ChargebackLine {
+  cost_center: string;
+  requests: number;
+  spend_mc: number;
+  savings_mc: number;
+  fee_mc: number;
+  /** Share of total organisation spend, as a percentage. */
+  share_percent: number;
+}
+
+export interface ChargebackReport {
+  org_id: string;
+  period_start: string;
+  period_end: string;
+  lines: ChargebackLine[];
+  total_spend_mc: number;
+  /** Spend that could not be attributed to any cost center. */
+  unattributed_mc: number;
+}
+
+export interface CreditsResponse {
+  balance_mc: number;
+  referral_code: string;
+  referral_url: string;
+  credit_per_referral_mc: number;
+  terms: string;
+}
+
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
@@ -308,5 +404,77 @@ export const api = {
   billingPlan: () => apiRequest<BillingPlan>("/api/billing/plan"),
 
   /** URL for the CSV export. A direct link, so the browser handles the download. */
+
+  models: () =>
+    apiRequest<{ models: ModelPrice[]; count: number; active_count: number }>(
+      "/api/models",
+    ),
+
+  listTeams: () => apiRequest<{ teams: Team[] }>("/api/org/teams"),
+
+  createTeam: (name: string, monthly_budget_mc?: number | null) =>
+    apiRequest<{ team: Team }>("/api/org/teams", {
+      method: "POST",
+      body: { name, monthly_budget_mc: monthly_budget_mc ?? null },
+    }),
+
+  deleteTeam: (id: string) =>
+    apiRequest<void>(`/api/org/teams/${id}`, { method: "DELETE" }),
+
+  listMembers: () => apiRequest<{ members: Member[] }>("/api/org/members"),
+
+  inviteMember: (email: string, role: string) =>
+    apiRequest<{ member: Member } | { invited: boolean }>(
+      "/api/org/members/invite",
+      { method: "POST", body: { email, role } },
+    ),
+
+  removeMember: (userId: string) =>
+    apiRequest<void>(`/api/org/members/${userId}`, { method: "DELETE" }),
+
+  listPolicies: () => apiRequest<{ policies: Policy[] }>("/api/policies"),
+
+  createPolicy: (name: string, rules: Record<string, unknown>) =>
+    apiRequest<{ policy: Policy }>("/api/policies", {
+      method: "POST",
+      body: { name, rules },
+    }),
+
+  deletePolicy: (id: string) =>
+    apiRequest<void>(`/api/policies/${id}`, { method: "DELETE" }),
+
+  listBudgets: () => apiRequest<{ budgets: Budget[] }>("/api/budgets"),
+
+  createBudget: (input: {
+    team_id?: string | null;
+    api_key_id?: string | null;
+    period: string;
+    limit_mc: number;
+    hard_limit: boolean;
+  }) => apiRequest<{ budget: Budget }>("/api/budgets", { method: "POST", body: input }),
+
+  deleteBudget: (id: string) =>
+    apiRequest<void>(`/api/budgets/${id}`, { method: "DELETE" }),
+
+  anomalies: () => apiRequest<AnomalyReport>("/api/usage/anomalies"),
+
+  chargeback: (start?: string, end?: string) => {
+    const query = new URLSearchParams();
+    if (start) query.set("start", start);
+    if (end) query.set("end", end);
+    const suffix = query.toString() ? `?${query}` : "";
+    return apiRequest<ChargebackReport>(`/api/usage/chargeback${suffix}`);
+  },
+
+  chargebackCsvUrl: () => `${API_URL}/api/usage/chargeback.csv`,
+
+  credits: () => apiRequest<CreditsResponse>("/api/billing/credits"),
+
+  claimReferral: (code: string) =>
+    apiRequest<{ credited_mc: number; message: string }>("/api/billing/referral", {
+      method: "POST",
+      body: { code },
+    }),
+
   savingsCsvUrl: () => `${API_URL}/api/savings/report.csv`,
 };

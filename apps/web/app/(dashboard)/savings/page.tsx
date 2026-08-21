@@ -110,7 +110,7 @@ export default function SavingsPage() {
   }, [rows]);
 
   if (loading) {
-    return <p className="text-sm text-[var(--color-ink-subtle)]">Loading…</p>;
+    return <p className="text-sm text-[var(--color-muted-light)]">Loading…</p>;
   }
   if (error) {
     return <ErrorState message={error} />;
@@ -128,7 +128,7 @@ export default function SavingsPage() {
         action={
           <a
             href={api.savingsCsvUrl()}
-            className="inline-block rounded-[var(--radius)] border border-[var(--color-line-strong)] px-3 py-1.5 text-sm text-[var(--color-ink-muted)] transition-colors hover:bg-[var(--color-raised)] hover:text-[var(--color-ink)]"
+            className="inline-block rounded-[var(--radius)] border border-[var(--color-line-dark)] px-3 py-1.5 text-sm text-[var(--color-muted)] transition-colors hover:bg-[var(--color-surface)] hover:text-[var(--color-ink)]"
           >
             Export CSV
           </a>
@@ -174,7 +174,7 @@ export default function SavingsPage() {
               <h3 className="text-sm font-medium text-[var(--color-ink)]">
                 Savings by served model
               </h3>
-              <p className="mt-1 text-xs text-[var(--color-ink-subtle)]">
+              <p className="mt-1 text-xs text-[var(--color-muted-light)]">
                 What each model cost, against what it saved versus the model requested.
               </p>
 
@@ -191,23 +191,23 @@ export default function SavingsPage() {
                     />
                     <XAxis
                       dataKey="model"
-                      stroke="var(--color-ink-faint)"
+                      stroke="var(--color-muted-light)"
                       fontSize={11}
                       tickLine={false}
                       axisLine={{ stroke: "var(--color-line)" }}
                     />
                     <YAxis
-                      stroke="var(--color-ink-faint)"
+                      stroke="var(--color-muted-light)"
                       fontSize={11}
                       tickLine={false}
                       axisLine={false}
                       tickFormatter={(value: number) => `$${Number(value).toFixed(2)}`}
                     />
                     <Tooltip
-                      cursor={{ fill: "var(--color-raised)" }}
+                      cursor={{ fill: "var(--color-surface)" }}
                       contentStyle={{
-                        backgroundColor: "var(--color-overlay)",
-                        border: "1px solid var(--color-line-strong)",
+                        backgroundColor: "var(--color-surface2)",
+                        border: "1px solid var(--color-line-dark)",
                         borderRadius: "6px",
                         fontSize: "12px",
                       }}
@@ -222,7 +222,7 @@ export default function SavingsPage() {
                     <Bar
                       dataKey="spentUsd"
                       name="Spent"
-                      fill="var(--color-ink-faint)"
+                      fill="var(--color-muted-light)"
                       radius={[2, 2, 0, 0]}
                     />
                     <Bar
@@ -241,13 +241,13 @@ export default function SavingsPage() {
             <h3 className="text-sm font-medium text-[var(--color-ink)]">
               How the fee is calculated
             </h3>
-            <p className="mt-2 text-sm leading-relaxed text-[var(--color-ink-muted)]">
+            <p className="mt-2 text-sm leading-relaxed text-[var(--color-muted)]">
               We charge a share of savings we actually delivered, and only when the figure
               is positive. If a routing decision costs more than the model you asked for
               would have, the saving floors at zero and no fee applies — that overspend is
               ours to absorb.
             </p>
-            <pre className="tabular mt-4 overflow-x-auto rounded-[var(--radius)] border border-[var(--color-line)] bg-[var(--color-base)] p-4 text-xs text-[var(--color-ink-muted)]">
+            <pre className="tabular mt-4 overflow-x-auto rounded-[var(--radius)] border border-[var(--color-line)] bg-[var(--color-bg)] p-4 text-xs text-[var(--color-muted)]">
               <code>{`baseline_cost  = ${formatUsd(summary?.baseline_cost_mc ?? 0)}
 actual_cost    = ${formatUsd(summary?.actual_cost_mc ?? 0)}
 gross_savings  = ${formatUsd(summary?.gross_savings_mc ?? 0)}

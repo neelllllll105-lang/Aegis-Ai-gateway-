@@ -142,7 +142,7 @@ export default function ProvidersPage() {
             <div>
               <label
                 htmlFor="provider"
-                className="block text-sm font-medium text-[var(--color-ink-muted)]"
+                className="block text-sm font-medium text-[var(--color-muted)]"
               >
                 Provider
               </label>
@@ -150,7 +150,7 @@ export default function ProvidersPage() {
                 id="provider"
                 value={provider}
                 onChange={(event) => setProvider(event.target.value)}
-                className="mt-1.5 w-full rounded-[var(--radius)] border border-[var(--color-line-strong)] bg-[var(--color-base)] px-3 py-2 text-sm text-[var(--color-ink)]"
+                className="mt-1.5 w-full rounded-[var(--radius)] border border-[var(--color-line-dark)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-ink)]"
               >
                 {PROVIDERS.map((id) => (
                   <option key={id} value={id}>
@@ -199,7 +199,7 @@ export default function ProvidersPage() {
 
       <Card>
         {loading ? (
-          <p className="px-6 py-10 text-center text-sm text-[var(--color-ink-subtle)]">
+          <p className="px-6 py-10 text-center text-sm text-[var(--color-muted-light)]">
             Loading…
           </p>
         ) : credentials.length === 0 ? (
@@ -225,14 +225,14 @@ export default function ProvidersPage() {
                       <Badge tone="danger">failing</Badge>
                     )}
                   </div>
-                  <div className="mt-1 text-xs text-[var(--color-ink-subtle)]">
+                  <div className="mt-1 text-xs text-[var(--color-muted-light)]">
                     <span className="tabular">{credential.key_hint ?? "••••"}</span>
                     {credential.label && <> · {credential.label}</>}
                     {credential.base_url && <> · {credential.base_url}</>}
                     <> · added {formatRelative(credential.created_at)}</>
                   </div>
                   {testResult[credential.id] && (
-                    <div className="mt-1.5 text-xs text-[var(--color-ink-muted)]">
+                    <div className="mt-1.5 text-xs text-[var(--color-muted)]">
                       {testResult[credential.id]}
                     </div>
                   )}

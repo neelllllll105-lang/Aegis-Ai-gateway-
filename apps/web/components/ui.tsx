@@ -438,7 +438,7 @@ export function CodeBlock({
           <button
             type="button"
             onClick={handleCopy}
-            className="flex items-center gap-1 rounded bg-[#2A2420] px-2 py-1 text-[10px] font-bold text-[#F9F8F6] hover:bg-[#3D362F] transition-colors"
+            className="flex items-center gap-1 rounded bg-[#2A2420] px-2 py-1 text-[10px] font-bold text-[#F9F8F6] hover:bg-[#403B35] transition-colors"
             aria-label="Copy code"
           >
             {copied ? (

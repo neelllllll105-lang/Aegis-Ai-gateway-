@@ -61,7 +61,7 @@ export default function DashboardPage() {
   }, []);
 
   if (loading) {
-    return <p className="text-sm text-[var(--color-ink-subtle)]">Loading…</p>;
+    return <p className="text-sm text-[var(--color-muted-light)]">Loading…</p>;
   }
 
   if (error) {
@@ -130,7 +130,7 @@ export default function DashboardPage() {
             <h3 className="text-sm font-medium text-[var(--color-ink)]">
               Where the money went
             </h3>
-            <p className="mt-1 text-xs text-[var(--color-ink-subtle)]">
+            <p className="mt-1 text-xs text-[var(--color-muted-light)]">
               Every figure below is the sum of per-request records. Export the itemised CSV
               from the Savings page and the totals will match exactly.
             </p>
@@ -168,7 +168,7 @@ export default function DashboardPage() {
 
           <div className="mt-6 grid gap-4 sm:grid-cols-3">
             <Card className="p-5">
-              <div className="text-xs uppercase tracking-wide text-[var(--color-ink-subtle)]">
+              <div className="text-xs uppercase tracking-wide text-[var(--color-muted-light)]">
                 Tokens processed
               </div>
               <div className="tabular mt-2 text-xl text-[var(--color-ink)]">
@@ -176,32 +176,32 @@ export default function DashboardPage() {
                   (summary?.input_tokens ?? 0) + (summary?.output_tokens ?? 0),
                 )}
               </div>
-              <div className="mt-1 text-xs text-[var(--color-ink-faint)]">
+              <div className="mt-1 text-xs text-[var(--color-muted-light)]">
                 {formatTokens(summary?.input_tokens ?? 0)} in ·{" "}
                 {formatTokens(summary?.output_tokens ?? 0)} out
               </div>
             </Card>
 
             <Card className="p-5">
-              <div className="text-xs uppercase tracking-wide text-[var(--color-ink-subtle)]">
+              <div className="text-xs uppercase tracking-wide text-[var(--color-muted-light)]">
                 Cache hits
               </div>
               <div className="tabular mt-2 text-xl text-[var(--color-ink)]">
                 {formatCount(summary?.cache_hits ?? 0)}
               </div>
-              <div className="mt-1 text-xs text-[var(--color-ink-faint)]">
+              <div className="mt-1 text-xs text-[var(--color-muted-light)]">
                 served without an upstream call
               </div>
             </Card>
 
             <Card className="p-5">
-              <div className="text-xs uppercase tracking-wide text-[var(--color-ink-subtle)]">
+              <div className="text-xs uppercase tracking-wide text-[var(--color-muted-light)]">
                 This month
               </div>
               <div className="tabular mt-2 text-xl text-[var(--color-ink)]">
                 {formatCount(org?.usage.month_to_date_requests ?? 0)}
               </div>
-              <div className="mt-1 text-xs text-[var(--color-ink-faint)]">
+              <div className="mt-1 text-xs text-[var(--color-muted-light)]">
                 requests month to date
               </div>
             </Card>
@@ -227,7 +227,7 @@ function LedgerRow({
     <div className="flex items-baseline justify-between gap-6">
       <dt
         className={`text-sm ${
-          emphasis ? "text-[var(--color-ink)]" : "text-[var(--color-ink-subtle)]"
+          emphasis ? "text-[var(--color-ink)]" : "text-[var(--color-muted-light)]"
         }`}
       >
         {label}
@@ -238,7 +238,7 @@ function LedgerRow({
             ? "text-[var(--color-accent)]"
             : emphasis
               ? "text-[var(--color-ink)]"
-              : "text-[var(--color-ink-muted)]"
+              : "text-[var(--color-muted)]"
         }`}
       >
         {value}
