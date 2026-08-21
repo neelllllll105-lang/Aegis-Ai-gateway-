@@ -239,7 +239,19 @@ pub async fn authenticate_api_key(state: &AppState, token: &str) -> Result<AuthC
         }
     }
 
-    let pool = state.db()?;
+    // Running without persistence is a supported development mode, but it means no key
+    // can be resolved. Say that plainly rather than surfacing a generic internal error,
+    // which sends the reader looking for a bug that is not there.
+    let Some(pool) = state.db.as_ref() else {
+        return Err(AegisError::Unauthorized(
+            concat!(
+                "this gateway is running without a database, so API keys cannot be ",
+                "verified. Set DATABASE_URL and restart, or see docs/HANDOFF.md."
+            )
+            .into(),
+        ));
+    };
+
     let Some(context) = repo::resolve_key(pool, &key_hash).await? else {
         // Deliberately identical for unknown, revoked, and expired keys: distinguishing
         // them tells an attacker which of their guesses was once real.
@@ -602,7 +614,15 @@ mod tests {
         // passes validation and misses both caches.
         let state = AppState::for_tests();
         let key = crypto::generate_api_key();
-        assert!(authenticate_api_key(&state, &key.plaintext).await.is_err());
+        let err = authenticate_api_key(&state, &key.plaintext)
+            .await
+            .unwrap_err();
+
+        // 401, not 500. Without a database the gateway genuinely cannot verify the key,
+        // but that is an authentication outcome from the caller point of view, and the
+        // message has to tell a developer what is actually wrong.
+        assert_eq!(err.error_type(), "unauthorized");
+        assert!(format!("{err}").contains("without a database"), "{err}");
     }
 
     #[tokio::test]
