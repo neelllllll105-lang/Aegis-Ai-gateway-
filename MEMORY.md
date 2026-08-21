@@ -27,7 +27,7 @@ First commands:
 
 ```bash
 bash scripts/status.sh          # what the repo actually contains right now
-cargo test --lib                # 623 tests, ~3s, no database needed
+cargo test --lib                # 622 tests, ~3s, no database needed
 bash scripts/verify-phase.sh 3  # automated acceptance checks for a phase
 ```
 
@@ -62,7 +62,7 @@ That is the next block of work, and it is what stands between "built" and "worki
 
 ## What Actually Works — Verified
 
-`cargo test --lib` → **623 passing, 0 failing**. `clippy -D warnings` clean. `cargo fmt`
+`cargo test --lib` → **622 passing, 0 failing**. `clippy -D warnings` clean. `cargo fmt`
 clean. Dashboard: `tsc` and `eslint` clean, 15 routes build.
 
 Executed and confirmed by hand this session:
@@ -245,4 +245,4 @@ MEMORY.md staleness gate, seed data, Grafana dashboard.
 **Found by running it rather than testing it:** a well-formed unknown API key returned
 `internal_error` instead of `unauthorized` when no database is configured. Fixed.
 
-623 unit tests passing, clippy and rustfmt clean, dashboard builds clean.
+622 unit tests passing, clippy and rustfmt clean, dashboard builds clean.
