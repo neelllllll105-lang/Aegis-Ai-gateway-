@@ -39,7 +39,10 @@
   /* Semantic Alerts */
   --color-amber: #B45309;
   --color-red: #DC2626;
-  --color-green: #15803D;
+  /* "Good" states (low complexity, cache hit, savings) read as a deep, warm coffee
+     brown rather than green — green reads as a foreign hue against a cream/camel
+     palette built entirely from warm neutrals. */
+  --color-positive: #6B4423;
 
   --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;

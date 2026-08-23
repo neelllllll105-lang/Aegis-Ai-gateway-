@@ -190,7 +190,7 @@ export default function ModelsPage() {
                 </Td>
                 <Td align="right" mono>
                   {model.potential_saving_pct > 0 ? (
-                    <span className="font-black text-[#15803D]">
+                    <span className="font-black text-[var(--color-positive)]">
                       &minus;{model.potential_saving_pct}%
                     </span>
                   ) : (

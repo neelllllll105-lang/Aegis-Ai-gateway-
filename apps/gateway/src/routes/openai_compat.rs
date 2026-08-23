@@ -24,6 +24,7 @@ use crate::engine::compressor::{self, CompressorConfig};
 use crate::engine::fallback::{self, FallbackChain};
 use crate::engine::policy::RoutingPolicy;
 use crate::engine::router::{Router, RoutingInputs};
+use crate::enterprise::residency;
 use crate::error::{AegisError, Result};
 use crate::metering::savings::SavingsBreakdown;
 use crate::metering::usage::{self, UsageEvent};
@@ -592,11 +593,35 @@ async fn handle_chat(
     })?;
     let auth_context = auth::authenticate_api_key(state, &token).await?;
 
+    // ---- [1b] Data residency ------------------------------------------------------
+    // An organisation pinned to a region must never be served by an instance running
+    // elsewhere -- the backstop that makes a misrouted request fail loudly instead of
+    // quietly processing data in the wrong jurisdiction. Checked right after identity is
+    // established, before anything else touches this request.
+    if let Err(e) = residency::enforce(&state.config.region, &auth_context.region) {
+        record_rejection(
+            state,
+            &auth_context,
+            "/v1/chat/completions",
+            403,
+            "region_mismatch",
+        )
+        .await;
+        return Err(e);
+    }
+
     // ---- [2] Rate limiting -------------------------------------------------------
     let limit = rate_limit::check(state.store.as_ref(), &auth_context).await?;
     if !limit.allowed {
         state.metrics.record_rate_limited(limit.scope);
-        record_rejection(state, &auth_context, 429, "rate_limit_exceeded").await;
+        record_rejection(
+            state,
+            &auth_context,
+            "/v1/chat/completions",
+            429,
+            "rate_limit_exceeded",
+        )
+        .await;
         return Err(limit.into_error());
     }
 
@@ -605,7 +630,14 @@ async fn handle_chat(
         budget::check(state.store.as_ref(), &auth_context, None, None, None).await?;
     if !budget_decision.allowed {
         state.metrics.record_budget_blocked(budget_decision.scope);
-        record_rejection(state, &auth_context, 402, "budget_exceeded").await;
+        record_rejection(
+            state,
+            &auth_context,
+            "/v1/chat/completions",
+            402,
+            "budget_exceeded",
+        )
+        .await;
         return Err(budget_decision.into_error());
     }
 
@@ -830,7 +862,13 @@ async fn stream_chat(
 /// Meter a request rejected before it reached a provider.
 ///
 /// Principle 2: every request produces a usage record, including the ones we refuse.
-async fn record_rejection(state: &AppState, auth: &AuthContext, status: u16, error_type: &str) {
+async fn record_rejection(
+    state: &AppState,
+    auth: &AuthContext,
+    path: &str,
+    status: u16,
+    error_type: &str,
+) {
     let event = UsageEvent::rejected(
         Uuid::new_v4(),
         auth.org_id,
@@ -842,7 +880,7 @@ async fn record_rejection(state: &AppState, auth: &AuthContext, status: u16, err
     );
     let _ = usage::emit(state.store.as_ref(), &event).await;
     state.metrics.record_usage_event();
-    state.metrics.record_request("/v1/chat/completions", status);
+    state.metrics.record_request(path, status);
 }
 
 /// Render the outcome as an OpenAI chat completion.
@@ -966,6 +1004,18 @@ pub async fn embeddings(
         Ok(context) => context,
         Err(e) => return e.into_response(),
     };
+
+    if let Err(e) = residency::enforce(&state.config.region, &auth_context.region) {
+        record_rejection(
+            &state,
+            &auth_context,
+            "/v1/embeddings",
+            403,
+            "region_mismatch",
+        )
+        .await;
+        return e.into_response();
+    }
 
     let request: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
@@ -1582,5 +1632,122 @@ mod tests {
         };
         outcome.response.raw = Some(serde_json::json!({"system_fingerprint": "fp_x"}));
         assert_eq!(to_openai_response(&outcome)["system_fingerprint"], "fp_x");
+    }
+
+    // -----------------------------------------------------------------------------
+    // Data residency enforcement
+    //
+    // Every other test in this module calls `execute()` directly, which starts at
+    // pipeline stage [3] and never passes through HTTP-layer auth — so none of them
+    // would notice if residency enforcement were removed from `handle_chat` or
+    // `embeddings` entirely. These two go through the real handlers instead, proving
+    // the wiring itself rather than `residency::enforce`'s own logic (already covered
+    // in `enterprise::residency`'s tests).
+    // -----------------------------------------------------------------------------
+
+    /// Seed a resolvable API key in the test state's cache and return the bearer token
+    /// that resolves to it, so a handler test can authenticate without a database.
+    fn seed_key(state: &AppState, org_region: &str) -> String {
+        let token = format!("aegis_sk_{}", "a".repeat(crate::crypto::API_KEY_RANDOM_LEN));
+        let context = crate::db::repo::KeyContext {
+            api_key_id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            team_id: None,
+            rate_limit_per_minute: 1_000,
+            monthly_budget_mc: None,
+            allowed_models: None,
+            plan: "pro".to_string(),
+            savings_share_bp: 2_000,
+            zero_retention: false,
+            org_region: org_region.to_string(),
+        };
+        state
+            .key_cache
+            .put(&crate::crypto::hash_token(&token), context);
+        token
+    }
+
+    fn bearer_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn chat_completions_refuses_a_request_from_the_wrong_region() {
+        let mock = Arc::new(MockProvider::returning("answer"));
+        let mut state = test_state(Arc::clone(&mock));
+        // The instance is pinned to eu-central; the organisation is pinned elsewhere.
+        let mut config = (*state.config).clone();
+        config.region = "eu-central".to_string();
+        state.config = std::sync::Arc::new(config);
+
+        let token = seed_key(&state, "us-east");
+        let headers = bearer_headers(&token);
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "mock/mock-premium",
+                "messages": [{"role": "user", "content": "hi"}]
+            })
+            .to_string(),
+        );
+
+        let err = handle_chat(&state, &headers, body).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            mock.call_count(),
+            0,
+            "a misrouted request must never reach a provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_completions_allows_a_request_from_the_matching_region() {
+        let mock = Arc::new(MockProvider::returning("answer"));
+        let mut state = test_state(Arc::clone(&mock));
+        let mut config = (*state.config).clone();
+        config.region = "eu-central".to_string();
+        state.config = std::sync::Arc::new(config);
+
+        let token = seed_key(&state, "eu-central");
+        let headers = bearer_headers(&token);
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "mock/mock-premium",
+                "messages": [{"role": "user", "content": "hi"}]
+            })
+            .to_string(),
+        );
+
+        let response = handle_chat(&state, &headers, body).await;
+        assert!(
+            response.is_ok(),
+            "a matching region must be served: {response:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn embeddings_also_refuses_a_request_from_the_wrong_region() {
+        let mock = Arc::new(MockProvider::returning("unused"));
+        let mut state = test_state(Arc::clone(&mock));
+        let mut config = (*state.config).clone();
+        config.region = "eu-central".to_string();
+        state.config = std::sync::Arc::new(config);
+
+        let token = seed_key(&state, "ap-southeast");
+        let headers = bearer_headers(&token);
+        let body = axum::body::Bytes::from(
+            serde_json::json!({"model": "mock/mock-cheap", "input": "hi"}).to_string(),
+        );
+
+        let response = embeddings(State(state), headers, body).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

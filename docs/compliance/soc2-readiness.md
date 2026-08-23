@@ -77,7 +77,7 @@ close and the one most likely to be left until last.
 
 | Criterion | Status | Evidence / gap |
 |---|---|---|
-| CC7.1 Vulnerability detection | ✅ | `cargo audit`, `cargo deny` licence check, and `npm audit` all run in CI (`.github/workflows/ci.yml`, `security` job). |
+| CC7.1 Vulnerability detection | ✅ | `cargo audit` (fails on any advisory), `cargo license` with a grep gate rejecting GPL/AGPL dependencies, and `npm audit` all run in CI (`.github/workflows/ci.yml`, `security` job). |
 | CC7.2 Monitoring for anomalies | ✅ | Metrics, alerts, spend anomaly detection, reconciliation worker. |
 | CC7.3 Incident evaluation | ⚠️ | Runbooks exist (`docs/runbooks/`). No formal severity classification. |
 | CC7.4 Incident response | ⚠️ | Documented; **never exercised**. |

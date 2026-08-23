@@ -11,6 +11,7 @@
 //! metering, and savings attribution are the same code, so a customer on `/v1/messages`
 //! gets exactly the same optimization and the same auditable numbers.
 
+use crate::enterprise::residency;
 use crate::error::{AegisError, Result};
 use crate::metering::usage;
 use crate::middleware::auth;
@@ -223,6 +224,10 @@ async fn handle_messages(
         )
     })?;
     let auth_context = auth::authenticate_api_key(state, &token).await?;
+
+    // [1b] Data residency. An organisation pinned to a region must never be served by an
+    // instance running elsewhere — see openai_compat.rs for the full reasoning.
+    residency::enforce(&state.config.region, &auth_context.region)?;
 
     // [2] Rate limiting.
     let limit = rate_limit::check(state.store.as_ref(), &auth_context).await?;
@@ -960,5 +965,54 @@ mod tests {
         let body = to_anthropic_response(&outcome);
         assert!(body["content"].is_array());
         assert_eq!(body["content"].as_array().unwrap().len(), 0);
+    }
+
+    /// `/v1/messages` must enforce data residency exactly as `/v1/chat/completions` does.
+    ///
+    /// Every other test in this module works at the SSE/JSON-shaping level and never
+    /// constructs an `AppState`, so none of them would notice if this check were removed
+    /// from `handle_messages`. This goes through the real handler to prove the wiring.
+    #[tokio::test]
+    async fn messages_refuses_a_request_from_the_wrong_region() {
+        let mut config = crate::config::Config::for_tests();
+        config.region = "eu-central".to_string();
+        let state = AppState {
+            config: std::sync::Arc::new(config),
+            ..AppState::for_tests()
+        };
+
+        let token = format!("aegis_sk_{}", "a".repeat(crate::crypto::API_KEY_RANDOM_LEN));
+        let context = crate::db::repo::KeyContext {
+            api_key_id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            team_id: None,
+            rate_limit_per_minute: 1_000,
+            monthly_budget_mc: None,
+            allowed_models: None,
+            plan: "pro".to_string(),
+            savings_share_bp: 2_000,
+            zero_retention: false,
+            org_region: "us-east".to_string(),
+        };
+        state
+            .key_cache
+            .put(&crate::crypto::hash_token(&token), context);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "mock/mock-premium",
+                "max_tokens": 100,
+                "messages": [{"role": "user", "content": "hi"}]
+            })
+            .to_string(),
+        );
+
+        let err = handle_messages(&state, &headers, body).await.unwrap_err();
+        assert_eq!(err.status(), axum::http::StatusCode::FORBIDDEN);
     }
 }

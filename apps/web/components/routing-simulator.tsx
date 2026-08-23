@@ -123,7 +123,7 @@ export function RoutingSimulator() {
 
   const complexityBarColor =
     current.complexityLabel === "Low"
-      ? "bg-[#15803D]"
+      ? "bg-[var(--color-positive)]"
       : current.complexityLabel === "Medium"
         ? "bg-[#B45309]"
         : "bg-black";
@@ -221,14 +221,14 @@ export function RoutingSimulator() {
                     className={`inline-block h-2.5 w-2.5 rounded-full ${
                       current.cacheStatus === "miss"
                         ? "bg-[#B45309]"
-                        : "bg-[#15803D]"
+                        : "bg-[var(--color-positive)]"
                     }`}
                   />
                   <span
                     className={`text-xs font-black capitalize ${
                       current.cacheStatus === "miss"
                         ? "text-[#B45309]"
-                        : "text-[#15803D]"
+                        : "text-[var(--color-positive)]"
                     }`}
                   >
                     {current.cacheStatus.replace("_", " ")}
