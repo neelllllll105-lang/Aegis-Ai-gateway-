@@ -27,7 +27,7 @@ First commands:
 
 ```bash
 bash scripts/status.sh          # what the repo actually contains right now
-cargo test --lib                # 678 tests, ~2s, no database needed
+cargo test --lib                # 682 tests, ~3s, no database needed
 bash scripts/verify-phase.sh 3  # automated acceptance checks for a phase
 ```
 
@@ -40,26 +40,32 @@ bash scripts/verify-phase.sh 3  # automated acceptance checks for a phase
 | 0 | Foundation: repo, CI, dev stack, schema, config | 🟢 complete |
 | 1 | Auth, keys, orgs | 🟢 complete |
 | 2 | Core gateway (proxy + metering) | 🟢 complete |
-| 3 | Optimization engine | 🟢 complete |
+| 3 | Optimization engine | 🟡 exact cache/router/classifier/compressor complete; semantic cache never wired (found session 3) |
 | 4 | Dashboards, billing, launch prep | 🟡 built; load test only partially executed (see below) |
 | 5 | Launch + provider expansion | 🟢 complete |
-| 6 | Enterprise readiness | 🟡 code + routes complete; never tested against a real IdP |
-| 7 | Scale + moat | 🟢 complete |
+| 6 | Enterprise readiness | 🟡 SSO/SCIM/residency wired; TOTP has no repo layer or login check (found session 3) |
+| 7 | Scale + moat | 🟡 bandit records outcomes live but is never read from for routing (found session 3) |
 
 Legend: ⚪ not started · 🟡 in progress · 🟢 complete · 🔴 blocked
 
-> `scripts/check-memory-freshness.sh` will warn that phases 5 and 7 show complete while
-> phase 4 does not, since phases are meant to be strictly ordered. **This is known and
-> intentional, not an oversight:** phase 4's only remaining item (P4.8, the k6 load test
-> against a deployed instance) is pure infrastructure execution with zero code
-> dependencies for anything in phases 5–7 — nothing in those phases builds on a load test
-> having been run. The warning is correct to flag it; this note is the confirmation it
-> asks for.
+> `scripts/check-memory-freshness.sh` will warn that phase 5 shows complete while phase 3
+> does not, since phases are meant to be strictly ordered. **This is known and
+> intentional, not an oversight:** phase 3 was genuinely complete when phase 5 was built —
+> it was only downgraded in session 3, retroactively, after an audit found the semantic
+> cache had been marked done without ever being wired into the pipeline. Nothing in phase
+> 5 depends on semantic caching. Phase 4's remaining item (P4.8, the k6 load test) is
+> similarly pure infrastructure execution with no dependency on anything after it. The
+> warning is correct to flag both; this note is the confirmation it asks for.
 
-**68 of 69 tasks across all eight phases are checked off in `docs/PHASES.md`.** The one
-remaining line item, and the only thing standing between "built" and "verified in
-production," is execution against live infrastructure — Docker was not available on this
-machine at any point in the build (see Blockers). Everything code-shaped is done.
+**65 of 69 tasks across all eight phases are checked off in `docs/PHASES.md`.** (Was 68/69
+after session 2; a session 3 audit unchecked three that had been marked done in error —
+semantic cache, TOTP, and bandit-informed routing — because each is implemented and
+tested but never actually invoked from live code. See Known Limitations item 0 for the
+full list, which also includes budget threshold alerts, a task line ledger still counts
+as done because its UI and enforcement halves are genuinely complete.) One remaining item
+(P4.8, the load test) is pure infrastructure execution. The other three are real
+feature-completion work, not documentation corrections — "built" no longer means
+"finished" for those three until they are actually wired in.
 
 Detail with per-criterion evidence: `docs/PHASES.md`. Machine-readable: `.aegis/state.json`.
 
@@ -68,11 +74,23 @@ Detail with per-criterion evidence: `docs/PHASES.md`. Machine-readable: `.aegis/
 ## Current Focus
 
 All eight phases are code-complete: every handler, every route, every worker described in
-`MASTER_BUILD.md` exists, compiles, and is tested. This session closed the last eleven open
+`MASTER_BUILD.md` exists, compiles, and is tested. Session 2 closed the last eleven open
 phase-task lines (dashboard pages, Anthropic streaming, SCIM/SSO route wiring, the
 scheduler, read replica, regional budgets, referral program, compliance pack, investor
 pack, self-hosted deployment, changelog) and added a route-surface test plus an in-process
 concurrency measurement of gateway overhead.
+
+**Session 3 ran a "is everything we built actually connected" audit**, prompted by the
+user's concern that features assembled from different sources might not genuinely work
+together. Found a real, consistent pattern: several sophisticated features were built and
+thoroughly tested *in isolation* but never wired into the live request path. See "Built
+but not wired" under Known Limitations below — this is now the most important thing for
+the next session to read, because it changes what several existing documents (this file
+included, in earlier revisions) claimed was working. One item (data residency enforcement)
+was small and safety-critical enough to fix immediately; it is now genuinely live and
+covered by wiring-proof tests. The rest are real feature-completion work, not quick
+fixes, and are listed with honest effort estimates rather than attempted under time
+pressure.
 
 **What remains is entirely "run it against something real," not "build it":**
 
@@ -91,12 +109,36 @@ does not have.
 
 ## What Actually Works — Verified
 
-`cargo test --lib` → **678 passing, 0 failing**. Full `cargo test` (lib + 4 integration
-binaries, one of which drives real concurrency) → **698 passing, 0 failing**. `clippy -D
+`cargo test --lib` → **682 passing, 0 failing**. Full `cargo test` (lib + 4 integration
+binaries, one of which drives real concurrency) → **702 passing, 0 failing**. `clippy -D
 warnings` clean. `cargo fmt --check` clean. Dashboard: `tsc --noEmit` and `eslint .` clean,
 all 21 routes build, `next build` produces standalone output.
 
-Executed and confirmed by hand this session:
+Executed and confirmed by hand this session (session 3):
+
+- **Data residency enforcement is now genuinely live**, not just implemented and
+  self-tested. `enterprise::residency::enforce()` existed and was correct in isolation but
+  was never called from `/v1/chat/completions`, `/v1/embeddings`, or `/v1/messages` — an
+  organisation pinned to a region was never actually protected from being served by an
+  instance elsewhere, despite `docs/compliance/security-whitepaper.md` describing this as
+  an active control. Wired into all three entry points, immediately after auth. Four new
+  tests prove the *wiring* (not just the logic, which already had its own tests): a
+  mismatched region is refused with zero provider calls made; a matching region is served;
+  same independently for embeddings and messages.
+- **The landing page's green was found and replaced.** The interactive routing simulator
+  (`components/routing-simulator.tsx`) and both auth pages used a saturated green
+  (`#15803D` / `#059669`) that read as a foreign hue against the cream/camel palette
+  everywhere else. Replaced with a new `--color-positive` token (`#6B4423`, a deep coffee
+  brown), applied consistently for every "good" indicator — cache hit, low complexity,
+  savings percentage — across marketing and dashboard alike. Verified live: the CSS
+  variable resolves to the correct hex on the running page after interacting with the
+  simulator.
+- **A hardcoded metrics-path bug was caught before it shipped.** Wiring residency into the
+  embeddings handler meant reusing `record_rejection()`, which had `/v1/chat/completions`
+  hardcoded as the Prometheus path label regardless of which endpoint actually rejected
+  the request. Fixed to take the path explicitly before it could mislabel a real metric.
+
+Executed and confirmed by hand in session 2:
 
 - **The full dashboard renders correctly**, verified in a real browser (Claude's Browser
   pane) against a throwaway fixture API standing in for the gateway (scratchpad only, never
@@ -217,6 +259,22 @@ Covered by tests (not hand-executed against live infra):
 ---
 
 ## Known Limitations (be honest about these)
+
+0. **Built but not wired — found by an explicit audit in session 3, not by accident.**
+   Each of these is fully implemented and has its own passing unit tests, but nothing in
+   the live request path calls it. This is a materially different (and worse) situation
+   than "not started": the tests give false confidence that the feature works end to end.
+
+   | Feature | What exists | What's missing |
+   |---|---|---|
+   | **Semantic cache** | `cache/semantic.rs`, 624 lines, 15 tests, an HTTP-based Qdrant client and an in-memory test double behind a `VectorStore` trait, tenant-isolated by collection. `CacheOutcome::Semantic` is a real enum variant. | Nothing in the pipeline generates an embedding for an inbound request or calls `SemanticCache::lookup()`. `CacheOutcome::Semantic` is never constructed outside tests. The landing page's routing simulator *demonstrates* a semantic hit — that demo is scripted fixture data, not a real gateway response. **Wiring this changes the pipeline's cost/latency profile** (an embedding call before every cache-miss request), which is a real product decision, not a pure bug fix — flagged rather than silently done. |
+   | **Outcome-trained bandit** | `engine/bandit.rs`, UCB1, a 3,000-step replay proving it beats static routing in isolation. `state.bandit.record(...)` **is** called live after every request. | The router never reads the bandit back to *make* a routing decision — it is a write-only data collector right now. The "outcome-trained routing intelligence" claim in `MEMORY.md` and the founder walkthrough artifact describes the intended behaviour, not the current one. |
+   | **Budget threshold alerts** (Slack/webhook/email at 50/80/100%) | `workers/budget_alerts.rs`: `crossed_threshold()`, `render()`, `deliver()`, all tested. | None of it is called from the live budget-check path or from any worker. (The **weekly digest** is a different feature in the same file and *is* correctly wired via `workers/scheduler.rs` — do not confuse the two.) Needs a "last threshold alerted" watermark and a decision on whether detection happens inline (adds I/O risk to the 0.1ms-budgeted hot path) or via a periodic job (simpler, small delay). |
+   | **TOTP two-factor auth** | `enterprise/totp.rs`, RFC 6238, correct and tested. `users.totp_secret_encrypted` exists in the schema. `users.totp_enabled` is read on every user fetch. | No repo function reads or writes `totp_secret_encrypted` at all. No enrollment endpoint (generate secret, show provisioning URI/QR, confirm a code). No verification step in `POST /api/auth/login`. This is the largest of the four — needs new endpoints, per-user encryption key derivation (existing crypto derives per-*tenant*, not per-*user*), and dashboard UI. |
+
+   **Action needed:** decide priority and scope with the user before building further —
+   these are feature-completion work of real size, not one-line fixes like the residency
+   wiring above was.
 
 1. **Classifier V2 does not beat V1.** Both sit at 98% on the fixture set — 100
    hand-written cases cannot separate them. The test asserts "does not regress," not
@@ -361,6 +419,35 @@ Each of these cost real time during the build.
 ## Session Log
 
 Newest first.
+
+### 2026-08-21 — Session 3 — Claude Opus 5
+
+User asked for four things in one message: setup/run requirements, a beta-testing plan,
+a feature audit ("make sure everything taken from different open-source things actually
+works"), and a landing-page color fix (a green they disliked).
+
+**Color fix:** found the green — `components/routing-simulator.tsx` (the homepage's
+interactive demo) plus both auth pages' link hover states, `#15803D`/`#059669`. Replaced
+with a new `--color-positive: #6B4423` token (deep coffee brown), applied consistently
+across marketing and dashboard. Verified live in a browser.
+
+**Feature audit — the important part.** Systematically checked every module under
+`engine/`, `enterprise/`, and `workers/` for whether its public API is actually referenced
+from a live route or another wired module, versus only from its own tests. Found four
+built-and-tested-but-never-connected features: semantic caching, the outcome bandit
+(records but is never read from), budget threshold alerts, and TOTP 2FA (also missing its
+repo layer and enrollment endpoint entirely). Full detail in Known Limitations item 0
+above. Fixed the one that was both small and security-relevant: data residency
+enforcement was implemented and tested in isolation but never called from any live
+request path, despite the compliance whitepaper describing it as active. Wired it into
+all three authenticated entry points with four new wiring-proof tests. Caught and fixed a
+latent metrics-mislabeling bug along the way (`record_rejection` had a hardcoded path).
+
+The other three findings are real feature-completion work (new endpoints, a cost/latency
+tradeoff decision for semantic caching, a per-user crypto path for TOTP) and were
+deliberately left for a scoping conversation rather than rushed.
+
+682 lib tests passing (was 678), clippy clean, web typecheck/lint clean.
 
 ### 2026-08-21 — Session 2 — Claude Opus 5
 

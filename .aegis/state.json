@@ -27,16 +27,20 @@
     {
       "id": 3,
       "name": "Optimization engine",
-      "status": "complete",
-      "evidence": "Classifier 98% on 100 labelled fixtures, router with conservative defaults, exact + semantic cache, compressor, circuit breakers, savings attribution. verify-phase.sh 3 passes."
+      "status": "in_progress",
+      "evidence": "Classifier 98% on 100 labelled fixtures, router with conservative defaults, exact cache, compressor, circuit breakers, savings attribution. verify-phase.sh 3 passes. Semantic cache (cache/semantic.rs, 624 lines, 15 tests, Qdrant-backed) is fully implemented and tested but -- found by a session 3 audit -- was never called from the live pipeline: no embedding is generated for an inbound request, CacheOutcome::Semantic is never produced outside tests. Downgraded from 'complete' to 'in_progress' to reflect this; it was marked complete in error.",
+      "remaining": [
+        "Wire cache/semantic.rs into the pipeline: generate an embedding on a cache miss, call SemanticCache::lookup(), produce CacheOutcome::Semantic. This is a product decision as much as a code change -- it adds an embedding-API call and its latency to every cache-miss request, which needs sign-off before implementing."
+      ]
     },
     {
       "id": 4,
       "name": "Dashboards, billing, launch prep",
       "status": "in_progress",
-      "evidence": "Stripe webhook verification, invoice assembly with an independent fee-consistency check, budget alerts, admin console, landing page, docs, savings CSV export, runbooks. All 12 dashboard pages built and browser-verified (models/policies/budgets/team/billing added this session). tests/overhead_under_load.rs measures real pipeline overhead under 64-way concurrency: P99 1.27ms on a debug build.",
+      "evidence": "Stripe webhook verification, invoice assembly with an independent fee-consistency check, budget enforcement (hard/soft limits actually block requests), admin console, landing page, docs, savings CSV export, runbooks. All 12 dashboard pages built and browser-verified (models/policies/budgets/team/billing added session 2). tests/overhead_under_load.rs measures real pipeline overhead under 64-way concurrency: P99 1.27ms on a debug build.",
       "remaining": [
-        "P4.8 EXECUTE infra/loadtest/k6-gateway.js against a deployed instance (1k RPS over a real network + database) — the in-process concurrency test is real evidence but is a narrower claim"
+        "P4.8 EXECUTE infra/loadtest/k6-gateway.js against a deployed instance (1k RPS over a real network + database) — the in-process concurrency test is real evidence but is a narrower claim",
+        "P4.2 was marked complete for 'budget alert delivery (email, Slack webhook)' -- session 3 audit found the delivery machinery (workers/budget_alerts.rs: crossed_threshold/render/deliver) is implemented and tested but never called from any live path. Budget *enforcement* (blocking requests) genuinely works; budget *notification* on crossing 50/80/100% does not yet fire. Needs a decision on inline vs periodic-job detection before wiring."
       ]
     },
     {
@@ -49,16 +53,20 @@
       "id": 6,
       "name": "Enterprise readiness",
       "status": "in_progress",
-      "evidence": "Offline license validation with grace period, SCIM 2.0 shapes handling both Okta and Entra deprovisioning, SSO assertion validation with replay detection, per-tenant HKDF keys, region pinning, admin TOTP with the RFC 6238 vector. SCIM/SSO HTTP routes now wired and reachable (tests/route_surface.rs). Compliance pack written (docs/compliance/): security whitepaper, subprocessor list, DPA template, data-flow doc, honest SOC 2 gap analysis. Read replica routing live (AppState::analytics_db()). Self-hosted docker-compose + web Dockerfile added.",
+      "evidence": "Offline license validation with grace period, SCIM 2.0 shapes handling both Okta and Entra deprovisioning, SSO assertion validation with replay detection, per-tenant HKDF keys, region pinning, admin TOTP algorithm with the RFC 6238 vector. SCIM/SSO HTTP routes now wired and reachable (tests/route_surface.rs). Data residency enforcement now genuinely wired into all three authenticated entry points as of session 3 (previously implemented+tested but never called live) with 4 wiring-proof tests. Compliance pack written (docs/compliance/): security whitepaper, subprocessor list, DPA template, data-flow doc, honest SOC 2 gap analysis. Read replica routing live (AppState::analytics_db()). Self-hosted docker-compose + web Dockerfile added.",
       "remaining": [
-        "Verify SSO/SCIM against a real Okta or Entra tenant — never done, only shape-tested"
+        "Verify SSO/SCIM against a real Okta or Entra tenant — never done, only shape-tested",
+        "TOTP: algorithm is correct and tested but has no repo layer (totp_secret_encrypted is never read/written), no enrollment endpoint, and no login-time verification — 2FA cannot actually be turned on today"
       ]
     },
     {
       "id": 7,
       "name": "Scale + moat",
-      "status": "complete",
-      "evidence": "UCB1 outcome bandit with a 3000-step replay showing it beats static routing. TypeScript and Python SDKs, both verified. Regional budgets (fourth scope, isolated per org+region, case-insensitive). Nightly pricing-drift job (reports, never auto-applies). Spend anomaly detection (z-score against org's own 30-day baseline) surfaced at GET /api/usage/anomalies and on the /budgets page. Cost-center chargeback in JSON and CSV. Investor pack (docs/investor/): metrics definitions naming their source code, data-room index."
+      "status": "in_progress",
+      "evidence": "UCB1 outcome bandit with a 3000-step replay showing it beats static routing in a standalone simulation -- NOTE (session 3 audit): the live router records outcomes into the bandit but never reads it back to make a routing decision, so it has zero effect on production traffic today; this is a real gap, not a documentation error. TypeScript and Python SDKs, both verified. Regional budgets (fourth scope, isolated per org+region, case-insensitive). Nightly pricing-drift job (reports, never auto-applies). Spend anomaly detection (z-score against org's own 30-day baseline) surfaced at GET /api/usage/anomalies and on the /budgets page. Cost-center chargeback in JSON and CSV. Investor pack (docs/investor/): metrics definitions naming their source code, data-room index.",
+      "remaining": [
+        "Wire the bandit's learned policy back into engine/router.rs's routing decision -- currently write-only"
+      ]
     }
   ],
   "blockers": [
@@ -96,9 +104,9 @@
     }
   ],
   "verification": {
-    "unit_tests": 678,
+    "unit_tests": 682,
     "unit_tests_passing": true,
-    "full_test_suite_total": 698,
+    "full_test_suite_total": 702,
     "integration_tests_written": 14,
     "integration_tests_run_locally": false,
     "route_surface_test_passing": true,

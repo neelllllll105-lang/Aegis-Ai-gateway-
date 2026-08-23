@@ -103,7 +103,15 @@ rate limiting, and metering. A working product in passthrough mode.
 - [x] P3.2 Routing engine + policy loader + `routing_reason`
 - [x] P3.3 Capability map (tool use, vision, context window minimums)
 - [x] P3.4 Exact cache: fingerprint + Redis SETEX, skip rules
-- [x] P3.5 Semantic cache: Qdrant, org-namespaced, similarity >= 0.95
+- [ ] P3.5 Semantic cache: Qdrant, org-namespaced, similarity >= 0.95 — *`cache/semantic.rs`
+      fully implements this (624 lines, 15 tests, org-namespaced Qdrant collections, the
+      0.95 threshold) and was checked off as done. A session 3 audit found it is **never
+      called from the live pipeline** — no embedding is generated on a cache miss, so a
+      semantic hit can never actually occur in production. Unchecked to reflect that. The
+      routing simulator on the landing page shows a semantic-hit scenario; it is scripted
+      demo data, not a real gateway response. Wiring this in is a product decision (it adds
+      an embedding-API call and its latency to every cache-miss request) as much as a code
+      change — see `MEMORY.md` Known Limitations item 0.*
 - [x] P3.6 Context compression v1
 - [x] P3.7 Fallback + circuit breakers + provider health
 - [x] P3.8 Savings calculation (micro-cents, no early rounding)
@@ -129,7 +137,17 @@ rate limiting, and metering. A working product in passthrough mode.
 ### Tasks
 - [x] P4.1 Remaining dashboard pages (usage, requests, models, org, teams, policies,
       providers) — all 12 pages built and verified in a browser against a fixture API
-- [x] P4.2 Budgets UI + alert delivery (email, Slack webhook)
+- [x] P4.2 Budgets UI + alert delivery (email, Slack webhook) — *the budgets UI and budget
+      **enforcement** (hard/soft limits genuinely block requests) are real and tested. A
+      session 3 audit found the alert **delivery** machinery
+      (`workers/budget_alerts.rs::crossed_threshold/render/deliver`) is implemented and
+      tested but never called from any live path — a customer crossing 50/80/100% of
+      budget receives no notification today, only the eventual hard block if the budget is
+      a hard limit. Left checked because the UI and enforcement halves this line names are
+      genuinely done; the notification half is tracked in `MEMORY.md` Known Limitations
+      item 0 rather than re-splitting this line. (Do not confuse this with the weekly
+      digest, a separate feature in the same file that *is* correctly wired via
+      `workers/scheduler.rs`.)*
 - [x] P4.3 Stripe: checkout, webhooks, invoice generation with savings-fee line items
 - [x] P4.4 Savings-share billing job (monthly rollup → draft invoice, manual finalize)
 - [x] P4.5 Docs site: quickstart per client, API reference, error codes, FAQ
@@ -196,7 +214,12 @@ rate limiting, and metering. A working product in passthrough mode.
 - [x] P6.8 Read replica routing for analytics queries — `DATABASE_REPLICA_URL`,
       `AppState::analytics_db()`, with a source-reading test that keeps handlers on the
       right pool
-- [x] P6.9 Admin TOTP 2FA
+- [ ] P6.9 Admin TOTP 2FA — *the RFC 6238 algorithm (`enterprise/totp.rs`) is correct and
+      tested. A session 3 audit found no repo function reads or writes
+      `users.totp_secret_encrypted`, no enrollment endpoint exists (generate secret, show
+      provisioning URI, confirm a code), and login never verifies a TOTP code. 2FA cannot
+      actually be turned on today. Unchecked to reflect that — this is the largest of the
+      four gaps found this session; see `MEMORY.md` Known Limitations item 0.*
 
 ### Acceptance
 | Criterion | Met | Evidence |
@@ -212,7 +235,14 @@ rate limiting, and metering. A working product in passthrough mode.
 **Goal:** Category leadership; compounding routing intelligence.
 
 ### Tasks
-- [x] P7.1 Classifier v3: outcome-trained bandit over our own routing results
+- [ ] P7.1 Classifier v3: outcome-trained bandit over our own routing results — *the UCB1
+      bandit (`engine/bandit.rs`) is correct and beats static routing in a standalone
+      3,000-step replay. The live pipeline calls `bandit.record(...)` after every request,
+      so it genuinely observes production traffic. A session 3 audit found the router
+      never reads the bandit back to *make* a routing decision — right now it is a
+      write-only data collector with zero effect on what model actually serves a request.
+      Unchecked to reflect that "outcome-trained routing" is not yet true in production.
+      See `MEMORY.md` Known Limitations item 0.*
 - [x] P7.2 Multi-region: regional budgets + region-aware routing — fourth budget scope
       between team and org; counters keyed by org AND region
 - [x] P7.3 API/platform tier: usage-based metering path
