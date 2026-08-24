@@ -4,7 +4,7 @@
 > This file is the handoff protocol. It tells you where the project is, what genuinely
 > works, what does not, what was decided and why, and exactly what to do next.
 >
-> **Last updated:** 2026-08-21
+> **Last updated:** 2026-08-24
 > **Updated by:** Claude Opus 5 (Claude Code)
 > **Update this file before ending any session.** See `CLAUDE.md`.
 

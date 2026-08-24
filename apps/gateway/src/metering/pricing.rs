@@ -531,6 +531,30 @@ impl PricingTable {
             // ---------------- Google ----------------
             // ai.google.dev/gemini-api/docs/pricing — base context tier.
             m(
+                "google/gemini-3.6-flash",
+                "google",
+                "Gemini 3.6 Flash",
+                ModelTier::Mid,
+                0.30,
+                2.50,
+                1_048_576,
+                true,
+                true,
+                s("Google", "2026-08-24"),
+            ),
+            m(
+                "google/gemini-3.1-pro-preview",
+                "google",
+                "Gemini 3.1 Pro Preview",
+                ModelTier::Premium,
+                1.25,
+                10.00,
+                1_048_576,
+                true,
+                true,
+                s("Google", "2026-08-24"),
+            ),
+            m(
                 "google/gemini-2.5-pro",
                 "google",
                 "Gemini 2.5 Pro",
