@@ -183,8 +183,10 @@ Executed in earlier sessions and still true:
   `UNVERIFIED` in the `source` field rather than silently presented as checked. Check
   count:
   ```bash
-  grep -c 'UNVERIFIED.to_string()' apps/gateway/src/metering/pricing.rs   # → 5
+  grep -c 'UNVERIFIED.to_string()' apps/gateway/src/metering/pricing.rs   # → 7
   ```
+  (Was 5; a session 4 merge added two more Google models to the retired-but-priced set —
+  see the session log entry below.)
 
 Covered by tests (not hand-executed against live infra):
 
@@ -240,11 +242,13 @@ Covered by tests (not hand-executed against live infra):
 
 **Do not bill a customer until these are closed.**
 
-1. **5 pricing rows still unverified.** `mistral/mistral-large-latest`,
+1. **7 pricing rows still unverified.** `mistral/mistral-large-latest`,
    `mistral/mistral-small-latest`, `groq/llama-3.3-70b-versatile`,
-   `groq/llama-3.1-8b-instant`, `moonshot/kimi-k2` — all other 33 priced models were
-   checked against live provider pages in an earlier session. Follow
-   `docs/runbooks/pricing-update.md` for these five, then confirm:
+   `groq/llama-3.1-8b-instant`, `moonshot/kimi-k2` (from earlier sessions), plus
+   `google/gemini-1.5-flash` and `google/gemini-1.5-pro` (added session 4 — see Session
+   Log — as *retired* entries so a real request against either one is priced rather than
+   silently metered at $0, but their exact numbers were not checked against a live page).
+   Follow `docs/runbooks/pricing-update.md` for all seven, then confirm:
    ```bash
    grep -c 'UNVERIFIED.to_string()' apps/gateway/src/metering/pricing.rs   # must read 0
    ```
@@ -419,6 +423,50 @@ Each of these cost real time during the build.
 ## Session Log
 
 Newest first.
+
+### 2026-08-24 — Session 4 — Claude Opus 5
+
+User pushed the repo to GitHub (`kunalshinde1214/Aegis`, private) and asked me to pull
+a collaborator's changes. One commit from Neel Shah (`bc3bacd`): added
+`google/gemini-3.6-flash` and `google/gemini-3.1-pro-preview` to the pricing table
+(sourced, dated 2026-08-24) and to the Google provider adapter's accepted-model list,
+plus regenerated `package-lock.json`. Fast-forward pull, no conflicts.
+
+**Found two real bugs while verifying the merge, neither the collaborator's fault:**
+
+1. **A latent, order-dependent test bug in my own code from session 3.**
+   `workers/scheduler.rs`'s pricing-drift tests picked "the first model" from
+   `PricingTable::all()` (HashMap iteration — order is randomised per process in Rust)
+   and matched drift-report lines against it with `line.starts_with(&model.model_id)`.
+   That breaks whenever the picked model has a prefix-colliding sibling in the table
+   (`openai/gpt-4o` vs `openai/gpt-4o-mini`, `gemini-2.5-flash` vs
+   `gemini-2.5-flash-lite`, etc.) — `starts_with` doesn't stop at a word boundary. Adding
+   two more models shifted which entry landed first often enough to finally hit an
+   unlucky pairing and fail. Fixed by anchoring the match on `"{model_id}:"` (the colon
+   the report format always appends) instead of the bare id. Verified stable across 13
+   separate process runs (8 isolated + 5 full-suite), since each gets a fresh random
+   hash seed.
+2. **The collaborator's new adapter entries had no pricing.** `providers/google.rs`
+   already listed `gemini-1.5-flash`/`gemini-1.5-pro` as accepted models with zero
+   corresponding pricing rows. Every cost lookup in the pipeline falls back to
+   `MicroCents::ZERO` on a pricing miss — so a real request served by either model would
+   have been metered at exactly $0, understating a customer's baseline if requested and
+   silently under-counting real spend against their budget if ever served. Added both as
+   *retired* entries (Google has moved traffic to 2.x/3.x; these exist so a request can
+   still be priced, not so the router selects them), marked `UNVERIFIED` rather than a
+   remembered number.
+
+Also noticed, flagged, not fixed: a fresh `npm ci` on the merged lockfile surfaces 3
+pre-existing high-severity transitive vulnerabilities (`postcss`, `sharp`, both pulled in
+by Next.js 15's own dependency tree) — `npm audit fix --force` would resolve them but
+requires upgrading to Next 16, a major-version bump outside `package.json`'s current
+`^15.1.0` range and a real breaking-change risk, not something to apply blind. Unrelated
+to the collaborator's commit; CI's `npm audit --audit-level=critical` gate is set to
+`critical` and would not have caught `high`-severity findings, which is why this went
+unnoticed until now.
+
+682 tests passing, clippy clean, web typecheck/lint/build clean. Pushed the fixes back to
+`origin/main` on top of the merge.
 
 ### 2026-08-21 — Session 3 — Claude Opus 5
 

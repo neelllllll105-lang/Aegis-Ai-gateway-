@@ -364,10 +364,17 @@ mod tests {
         )];
 
         // Only the row we constructed is compared for equality; the table has many more
-        // models, so filter the report down to that one.
+        // models, so filter the report down to that one. The colon anchors the match to
+        // the whole model id: `starts_with(&model.model_id)` alone would also match a
+        // sibling like "openai/gpt-4o-mini" against the prefix "openai/gpt-4o", and this
+        // pricing table genuinely contains such prefix-colliding pairs (gpt-4o /
+        // gpt-4o-mini, gpt-4.1 / gpt-4.1-mini / gpt-4.1-nano, gemini-2.5-flash /
+        // gemini-2.5-flash-lite). Caught when a real second contributor's commit added
+        // two more models and happened to shift which entry `table.all().next()` yields.
+        let needle = format!("{}:", model.model_id);
         let drift = diff_pricing(&table, &stored);
         assert!(
-            !drift.iter().any(|line| line.starts_with(&model.model_id)),
+            !drift.iter().any(|line| line.starts_with(&needle)),
             "a matching price must not be reported as drift: {drift:?}"
         );
     }
@@ -382,9 +389,14 @@ mod tests {
         let stored = vec![row(&model_id, real_input + 50_000, 999_999)];
         let drift = diff_pricing(&table, &stored);
 
+        // Same colon-anchored match as above, for the same reason: an unanchored prefix
+        // check can grab a sibling model's "missing from database" line instead of this
+        // one's "stored X, table has Y" line, and the two are indistinguishable to
+        // `starts_with` alone.
+        let needle = format!("{model_id}:");
         let line = drift
             .iter()
-            .find(|line| line.starts_with(&model_id))
+            .find(|line| line.starts_with(&needle))
             .expect("the changed model must be reported");
 
         // Both numbers must appear, because a drift alert that says only "changed" sends

@@ -723,6 +723,41 @@ impl PricingTable {
                 true,
                 s("Google", "2026-08-21"),
             ),
+            // A later commit added these to the provider adapter's accepted-model list
+            // (providers/google.rs) without a matching pricing entry. Every cost lookup
+            // in the pipeline does `.unwrap_or(MicroCents::ZERO)` on a miss, so leaving
+            // these unpriced meant a real request served by either one would be metered
+            // at exactly $0 — understating a customer's baseline cost if requested, and
+            // silently under-counting spend against their budget if ever served. Retired
+            // rather than active: Google has moved traffic to the 2.x/3.x lineup, and
+            // these exist so a historical or backward-compatible request can still be
+            // priced, not so the router selects them. UNVERIFIED rather than a
+            // remembered number, per this table's own rule that a price is only marked
+            // sourced once checked against the provider's current page.
+            m(
+                "google/gemini-1.5-flash",
+                "google",
+                "Gemini 1.5 Flash (retired)",
+                ModelTier::Cheap,
+                0.075,
+                0.30,
+                1_048_576,
+                true,
+                true,
+                UNVERIFIED.to_string(),
+            ),
+            m(
+                "google/gemini-1.5-pro",
+                "google",
+                "Gemini 1.5 Pro (retired)",
+                ModelTier::Mid,
+                1.25,
+                5.00,
+                2_097_152,
+                true,
+                true,
+                UNVERIFIED.to_string(),
+            ),
         ] {
             table.insert(ModelPricing {
                 is_active: false,
