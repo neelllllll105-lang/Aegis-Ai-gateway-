@@ -1,0 +1,28 @@
+# Configuration for `cargo audit`, run in CI with `--deny warnings` (Part 9 item 11).
+#
+# Every ignored advisory below is a deliberate, investigated, and time-stamped decision —
+# never a way to make a red CI job green without understanding why. Re-run `cargo audit`
+# with this file absent whenever reviewing the list, and remove an entry the moment its
+# condition no longer holds.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack" timing side-channel in the `rsa` crate.
+    #
+    # `rsa` resolves into Cargo.lock, but is NOT compiled into the aegis-gateway binary.
+    # It is a dependency of `sqlx-mysql`, which is itself only reachable through sqlx's
+    # `mysql` Cargo feature — a feature this workspace never enables (`sqlx` is declared
+    # with `default-features = false` and only `postgres, runtime-tokio, tls-rustls,
+    # uuid`). Confirmed directly, not assumed: `cargo tree -e normal -p sqlx-mysql`
+    # prints nothing, meaning sqlx-mysql has zero edges into the actual build graph for
+    # any target in this workspace. Cargo's lockfile format still resolves and lists
+    # optional-feature dependencies that are inactive for the current feature set, which
+    # is why this appears here at all — it is a lockfile artifact, not a supply-chain
+    # exposure. No RSA decryption of attacker-controlled ciphertext happens anywhere in
+    # this codebase's actual dependency graph regardless.
+    #
+    # Investigated 2026-08-26 (enterprise readiness audit, session 6). Re-check if sqlx
+    # is ever reconfigured to enable the mysql feature, or if `cargo tree -e normal -p
+    # sqlx-mysql` ever starts printing something.
+    "RUSTSEC-2023-0071",
+]

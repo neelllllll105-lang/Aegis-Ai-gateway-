@@ -1703,6 +1703,48 @@ pub async fn create_scim_token(pool: &PgPool, org_id: Uuid, token_hash: &str) ->
     Ok(row.0)
 }
 
+/// A SCIM token's metadata, without the hash. Never enough to authenticate as it.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct ScimTokenSummary {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// List an organisation's SCIM tokens, most recent first.
+///
+/// Metadata only — creation and revocation time, never the hash, exactly like an API key
+/// listing never returns the key material. An organisation cannot know from this response
+/// which token is "the right one" beyond its creation date; that is by design, the same
+/// reason a bank statement shows a card's last four digits and nothing more.
+pub async fn list_scim_tokens(pool: &PgPool, org_id: Uuid) -> Result<Vec<ScimTokenSummary>> {
+    sqlx::query_as::<_, ScimTokenSummary>(
+        "SELECT id, created_at, revoked_at FROM scim_tokens \
+         WHERE org_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Revoke a SCIM token. Returns true when a matching, not-already-revoked row existed.
+///
+/// Scoped by `org_id` like every tenant-scoped query — an organisation must not be able to
+/// revoke another organisation's provisioning token even by guessing its id.
+pub async fn revoke_scim_token(pool: &PgPool, org_id: Uuid, token_id: Uuid) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE scim_tokens SET revoked_at = NOW() \
+         WHERE id = $1 AND org_id = $2 AND revoked_at IS NULL",
+    )
+    .bind(token_id)
+    .bind(org_id)
+    .execute(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Revoke every API key a user created within an organisation.
 ///
 /// Called on deprovisioning. Removing the membership alone would leave any key that user

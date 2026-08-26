@@ -23,6 +23,13 @@ use subtle::ConstantTimeEq;
 pub const API_KEY_PREFIX: &str = "aegis_sk_";
 /// Prefix identifying an Aegis session token.
 pub const SESSION_TOKEN_PREFIX: &str = "aegis_st_";
+/// Prefix identifying an Aegis SCIM provisioning token.
+///
+/// Deliberately distinct from [`API_KEY_PREFIX`] even though the two are generated
+/// identically — a SCIM token can deprovision every member of an organisation, so it
+/// should be visually distinguishable at a glance (in a log line, a secrets manager, a
+/// screen-share) from an ordinary key that only calls a chat endpoint.
+pub const SCIM_TOKEN_PREFIX: &str = "aegis_scim_";
 /// Number of random characters after the prefix. 43 base62 characters carry ~256 bits.
 pub const API_KEY_RANDOM_LEN: usize = 43;
 /// Characters shown in the dashboard so a user can tell two keys apart.
@@ -65,6 +72,24 @@ pub fn generate_api_key() -> GeneratedKey {
 pub fn generate_session_token() -> GeneratedKey {
     let random = random_base62(API_KEY_RANDOM_LEN);
     let plaintext = format!("{SESSION_TOKEN_PREFIX}{random}");
+    let prefix = plaintext.chars().take(KEY_PREFIX_DISPLAY_LEN).collect();
+    let hash = hash_token(&plaintext);
+    GeneratedKey {
+        plaintext,
+        prefix,
+        hash,
+    }
+}
+
+/// Generate a new SCIM provisioning token.
+///
+/// The token, hashed and stored in `scim_tokens`, was always mintable this way in the
+/// repository layer — `repo::create_scim_token` existed and was tested. Nothing in the
+/// management API ever called it, so a customer wanting SCIM had no way to get a token
+/// without a direct database write on our side. Found in the enterprise readiness audit.
+pub fn generate_scim_token() -> GeneratedKey {
+    let random = random_base62(API_KEY_RANDOM_LEN);
+    let plaintext = format!("{SCIM_TOKEN_PREFIX}{random}");
     let prefix = plaintext.chars().take(KEY_PREFIX_DISPLAY_LEN).collect();
     let hash = hash_token(&plaintext);
     GeneratedKey {

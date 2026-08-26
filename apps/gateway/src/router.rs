@@ -78,6 +78,18 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/providers/{id}", delete(management::delete_provider))
         .route("/api/providers/{id}/test", post(management::test_provider))
+        // Self-service SCIM token issuance. repo::create_scim_token existed and was
+        // tested; nothing in the API ever called it, so a customer could not turn on SCIM
+        // without a direct database write on our side. Found in the enterprise readiness
+        // audit.
+        .route(
+            "/api/scim-tokens",
+            get(management::list_scim_tokens).post(management::create_scim_token),
+        )
+        .route(
+            "/api/scim-tokens/{id}",
+            delete(management::revoke_scim_token),
+        )
         .route(
             "/api/policies",
             get(management::list_policies).post(management::create_policy),

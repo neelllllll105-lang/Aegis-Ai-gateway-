@@ -739,3 +739,139 @@ async fn body_json(response: axum::response::Response) -> serde_json::Value {
         .expect("read body");
     serde_json::from_slice(&bytes).expect("valid JSON body")
 }
+
+// -----------------------------------------------------------------------------
+// SCIM token self-service, end to end against real handlers and a real database.
+//
+// repo::create_scim_token existed and was tested in isolation; nothing in the management
+// API ever called it, so a customer wanting SCIM provisioning had no way to get a token
+// without a direct database write on our side. Found in the enterprise readiness audit.
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn scim_tokens_can_be_issued_listed_and_revoked() {
+    use aegis_gateway::routes::management;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+
+    let Some((state, pool)) = setup().await else {
+        return skip("scim_tokens_can_be_issued_listed_and_revoked");
+    };
+
+    let fixture = create_org(&pool, "scim-self-service").await;
+    let headers = owner_session_headers(&pool, &fixture).await;
+
+    // Issue one. The plaintext is only ever in this one response.
+    let response = management::create_scim_token(State(state.clone()), headers.clone()).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = body_json(response).await;
+    let token = body["token"].as_str().expect("plaintext token in response");
+    assert!(
+        token.starts_with("aegis_scim_"),
+        "a SCIM token must be visually distinguishable from an ordinary API key: {token}"
+    );
+    let token_id: uuid::Uuid = body["id"].as_str().unwrap().parse().unwrap();
+
+    // It actually authenticates a SCIM call.
+    let scim_headers = {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        h
+    };
+    let response = aegis_gateway::routes::enterprise::scim_list_users(
+        State(state.clone()),
+        scim_headers.clone(),
+        axum::extract::Query(aegis_gateway::routes::enterprise::ScimQuery {
+            filter: None,
+            start_index: None,
+            count: None,
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a freshly issued token must authenticate a real SCIM call"
+    );
+
+    // It shows up in the listing, without the hash.
+    let response = management::list_scim_tokens(State(state.clone()), headers.clone()).await;
+    let listed = body_json(response).await;
+    let tokens = listed.as_array().expect("array response");
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0]["id"], token_id.to_string());
+    assert!(tokens[0]["revoked_at"].is_null());
+    assert!(
+        serde_json::to_string(&tokens[0]).unwrap().len() < 200,
+        "the listing must not carry the token hash or plaintext"
+    );
+
+    // Revoke it.
+    let response =
+        management::revoke_scim_token(State(state.clone()), headers.clone(), Path(token_id)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // It no longer authenticates.
+    let response = aegis_gateway::routes::enterprise::scim_list_users(
+        State(state.clone()),
+        scim_headers,
+        axum::extract::Query(aegis_gateway::routes::enterprise::ScimQuery {
+            filter: None,
+            start_index: None,
+            count: None,
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a revoked SCIM token must stop authenticating immediately"
+    );
+
+    // Revoking it again is a clean 404, not a silent no-op or a 500.
+    let response = management::revoke_scim_token(State(state), headers, Path(token_id)).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn a_scim_token_is_scoped_to_the_organisation_that_issued_it() {
+    use aegis_gateway::routes::management;
+    use axum::extract::{Path, State};
+
+    let Some((state, pool)) = setup().await else {
+        return skip("a_scim_token_is_scoped_to_the_organisation_that_issued_it");
+    };
+
+    let owner = create_org(&pool, "scim-scope-owner").await;
+    let other = create_org(&pool, "scim-scope-other").await;
+
+    let response = management::create_scim_token(
+        State(state.clone()),
+        owner_session_headers(&pool, &owner).await,
+    )
+    .await;
+    let body = body_json(response).await;
+    let token_id: uuid::Uuid = body["id"].as_str().unwrap().parse().unwrap();
+
+    // The *other* organisation cannot revoke a token it does not own, even knowing its id.
+    let response = management::revoke_scim_token(
+        State(state),
+        owner_session_headers(&pool, &other).await,
+        Path(token_id),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::NOT_FOUND,
+        "cross-tenant revocation must fail exactly like a nonexistent token, not leak that \
+         a token with this id exists elsewhere"
+    );
+
+    cleanup(&pool, &owner).await;
+    cleanup(&pool, &other).await;
+}

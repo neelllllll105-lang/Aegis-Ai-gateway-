@@ -1072,6 +1072,106 @@ pub async fn list_providers(State(state): State<AppState>, headers: HeaderMap) -
     }
 }
 
+// ---------------------------------------------------------------------------
+// SCIM token self-service
+//
+// `repo::create_scim_token` existed and was tested; nothing in the management API ever
+// called it, so an organisation wanting SCIM provisioning had no way to get a token
+// without us running a direct database write on their behalf. Found in the enterprise
+// readiness audit.
+// ---------------------------------------------------------------------------
+
+/// `POST /api/scim-tokens`
+///
+/// Requires owner or admin, the same bar as every other action that changes how the
+/// organisation can be administered — a SCIM token can deprovision every member, which is
+/// a strictly more powerful action than most things `require_writer` already gates.
+pub async fn create_scim_token(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match async {
+        let context = require_writer(&state, &headers).await?;
+        let pool = state.db()?;
+
+        let generated = crypto::generate_scim_token();
+        let token_id = repo::create_scim_token(pool, context.org_id, &generated.hash).await?;
+        audit(
+            &state,
+            &context,
+            "scim_token.created",
+            "scim_token",
+            Some(token_id),
+            None,
+        )
+        .await;
+
+        Ok::<_, AegisError>(respond(
+            StatusCode::CREATED,
+            serde_json::json!({
+                "id": token_id,
+                "token": generated.plaintext,
+                "note": "shown once — store it now. Configure it as the bearer token in \
+                         your identity provider's SCIM connector.",
+            }),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `GET /api/scim-tokens`
+pub async fn list_scim_tokens(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match async {
+        let context = require_reader(&state, &headers).await?;
+        let pool = state.db()?;
+        let tokens = repo::list_scim_tokens(pool, context.org_id).await?;
+        Ok::<_, AegisError>(respond(StatusCode::OK, tokens))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `DELETE /api/scim-tokens/:id`
+pub async fn revoke_scim_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(token_id): Path<Uuid>,
+) -> Response {
+    match async {
+        let context = require_writer(&state, &headers).await?;
+        let pool = state.db()?;
+
+        let revoked = repo::revoke_scim_token(pool, context.org_id, token_id).await?;
+        if !revoked {
+            return Err(AegisError::NotFound(
+                "SCIM token not found or already revoked".into(),
+            ));
+        }
+        audit(
+            &state,
+            &context,
+            "scim_token.revoked",
+            "scim_token",
+            Some(token_id),
+            None,
+        )
+        .await;
+        Ok::<_, AegisError>(respond(
+            StatusCode::OK,
+            serde_json::json!({"revoked": true}),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
 /// `POST /api/providers`
 pub async fn create_provider(
     State(state): State<AppState>,

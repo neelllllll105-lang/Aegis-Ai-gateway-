@@ -65,7 +65,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 thiserror = "2"
 anyhow = "1"
-lru = "0.12"
+lru = "0.18"
 dashmap = "6"
 once_cell = "1"
 regex = "1"
@@ -76,11 +76,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
-# Generates throwaway RSA keypairs for the SSO id-token verification tests. Already
-# present transitively via sqlx-mysql (a feature we do not enable); pinned as a direct
-# dev-only dependency here so a change to sqlx's own dependency tree cannot silently
-# remove it and break these tests.
-rsa = "0.9"
+# Deliberately NOT depending on the `rsa` crate for the SSO id-token verification tests.
+# It was tried first and removed: `cargo audit` (which CI runs with `--deny warnings`)
+# flags it under RUSTSEC-2023-0071, a timing side-channel with no fixed release available.
+# jsonwebtoken signs and verifies through `ring`, not `rsa`, so the tests instead load two
+# static throwaway keypairs from testdata/ (see enterprise::sso's test module) — identical
+# real-RS256 coverage, no vulnerable dependency.
 
 [lib]
 name = "aegis_gateway"

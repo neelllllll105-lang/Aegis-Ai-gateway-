@@ -473,13 +473,12 @@ mod tests {
     #[test]
     fn verification_rejects_a_token_missing_required_claims() {
         // required_spec_claims enforces exp/iss/sub even before signature-adjacent checks
-        // run. Built with a syntactically valid but arbitrary RSA key: this test proves
-        // the claim requirement fires, not that the signature check does (that is
-        // jsonwebtoken's own, separately tested, responsibility).
-        let (_encoding, decoding) = throwaway_rsa_keypair();
+        // run. This proves the claim requirement fires, not that the signature check does
+        // (that is jsonwebtoken's own, separately tested, responsibility).
+        let (encoding, decoding) = test_keypair_a();
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
         let claims = serde_json::json!({"sub": "user-1"}); // no exp, no iss
-        let token = jsonwebtoken::encode(&header, &claims, &_encoding).unwrap();
+        let token = jsonwebtoken::encode(&header, &claims, &encoding).unwrap();
 
         let result = verify_id_token(&token, &decoding);
         assert!(
@@ -490,7 +489,7 @@ mod tests {
 
     #[test]
     fn verification_accepts_a_well_formed_token_from_the_matching_key() {
-        let (encoding, decoding) = throwaway_rsa_keypair();
+        let (encoding, decoding) = test_keypair_a();
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
         let claims = serde_json::json!({
             "sub": "user-1",
@@ -513,8 +512,8 @@ mod tests {
     fn verification_rejects_a_token_from_a_different_key() {
         // The actual signature check, not just claim shape: a token signed by a key other
         // than the one being verified against must be rejected.
-        let (encoding_a, _) = throwaway_rsa_keypair();
-        let (_, decoding_b) = throwaway_rsa_keypair();
+        let (encoding_a, _) = test_keypair_a();
+        let (_, decoding_b) = test_keypair_b();
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
         let claims = serde_json::json!({
             "sub": "user-1", "iss": "https://acme.okta.com", "exp": NOW + 3_600,
@@ -523,32 +522,41 @@ mod tests {
         assert!(verify_id_token(&token, &decoding_b).is_err());
     }
 
-    /// A throwaway RSA keypair generated fresh for one test, matching encoding and
-    /// decoding keys. Not the Vertex test fixture: that key is committed and shared across
-    /// runs, which is right for a stable JWT-shape test but wrong here, where two *distinct*
-    /// keys are needed to prove cross-key rejection.
-    fn throwaway_rsa_keypair() -> (jsonwebtoken::EncodingKey, jsonwebtoken::DecodingKey) {
-        use rsa::pkcs1::EncodeRsaPrivateKey;
-        use rsa::traits::PublicKeyParts;
-
-        let mut rng = rand::thread_rng();
-        let private = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("key generation");
-        let pem = private
-            .to_pkcs1_pem(rsa::pkcs8::LineEnding::LF)
-            .expect("pem encode");
-        let encoding = jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes()).unwrap();
-
-        let public = private.to_public_key();
-        let n = base64_url(&public.n().to_bytes_be());
-        let e = base64_url(&public.e().to_bytes_be());
-        let decoding = jsonwebtoken::DecodingKey::from_rsa_components(&n, &e).unwrap();
-
-        (encoding, decoding)
+    /// Two static, throwaway 2048-bit RSA keypairs, checked in as PEM fixtures
+    /// (`testdata/sso_test_key_{a,b}_{private,public}.pem`) rather than generated at test
+    /// time.
+    ///
+    /// The first draft of these tests generated fresh keys per run using the `rsa` crate
+    /// as a dev-dependency. `cargo audit` flags that crate under RUSTSEC-2023-0071 (a
+    /// timing side-channel with, per the advisory, no fixed release available) — real
+    /// enough that it would have failed this project's own CI, which runs `cargo audit
+    /// --deny warnings`. `jsonwebtoken` itself signs and verifies through `ring`, not the
+    /// `rsa` crate, so loading static PEM fixtures gets the identical real-RS256 coverage
+    /// with no vulnerable dependency at all — the same pattern `testdata/vertex_test_key.pem`
+    /// already established for exactly this reason.
+    fn test_keypair_a() -> (jsonwebtoken::EncodingKey, jsonwebtoken::DecodingKey) {
+        keypair_from(
+            include_bytes!("../../testdata/sso_test_key_a_private.pem"),
+            include_bytes!("../../testdata/sso_test_key_a_public.pem"),
+        )
     }
 
-    fn base64_url(bytes: &[u8]) -> String {
-        use base64::Engine;
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    fn test_keypair_b() -> (jsonwebtoken::EncodingKey, jsonwebtoken::DecodingKey) {
+        keypair_from(
+            include_bytes!("../../testdata/sso_test_key_b_private.pem"),
+            include_bytes!("../../testdata/sso_test_key_b_public.pem"),
+        )
+    }
+
+    fn keypair_from(
+        private_pem: &[u8],
+        public_pem: &[u8],
+    ) -> (jsonwebtoken::EncodingKey, jsonwebtoken::DecodingKey) {
+        let encoding = jsonwebtoken::EncodingKey::from_rsa_pem(private_pem)
+            .expect("test fixture is a valid RSA private key PEM");
+        let decoding = jsonwebtoken::DecodingKey::from_rsa_pem(public_pem)
+            .expect("test fixture is a valid RSA public key PEM");
+        (encoding, decoding)
     }
 
     fn connection() -> SsoConnection {

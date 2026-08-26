@@ -90,6 +90,12 @@ fn advertised_routes() -> Vec<(&'static str, &'static str)> {
             "POST",
             "/api/providers/00000000-0000-0000-0000-000000000000/test",
         ),
+        ("GET", "/api/scim-tokens"),
+        ("POST", "/api/scim-tokens"),
+        (
+            "DELETE",
+            "/api/scim-tokens/00000000-0000-0000-0000-000000000000",
+        ),
         ("GET", "/api/policies"),
         ("POST", "/api/policies"),
         (
