@@ -39,11 +39,36 @@ static SECRET_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         r"(?i)bearer\s+[A-Za-z0-9\-._~+/]+=*",
         // Anything that looks like a URL with inline credentials
         r"[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s@]+@",
+        // A PEM private key block, whole. This is the credential shape Vertex AI
+        // introduced (session 5): a GCP service-account key is an entire JSON document
+        // whose `private_key` field is a multi-line RSA PEM, and none of the patterns
+        // above match PEM content at all. `[\s\S]` rather than `(?s).` because the PEM's
+        // newlines may be literal `\n` characters (a parsed string) or the two-character
+        // escape sequence `\n` (still inside a raw JSON blob) — both are just "any
+        // character" to this class, so one pattern catches either representation.
+        // Non-greedy so two keys in the same line do not merge into one match spanning
+        // both.
+        r"-----BEGIN (?:RSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA )?PRIVATE KEY-----",
+        // The same key, as a still-JSON-encoded field, for the case where only a
+        // fragment of a malformed credential reaches a log line and the PEM markers
+        // themselves get truncated out of it.
+        r#""private_key"\s*:\s*"[^"]*""#,
     ]
     .iter()
     .filter_map(|p| Regex::new(p).ok())
     .collect()
 });
+
+// DeepSeek, Moonshot, and OpenRouter keys are all `sk-`-prefixed (OpenRouter's
+// `sk-or-v1-...` included — the hyphen is inside the generic OpenAI rule's character
+// class, so it matches the whole token) and need no pattern of their own; a dedicated
+// test below pins that down rather than leaving it as an unverified assumption.
+//
+// Mistral's keys have no distinguishing prefix at all — a bare alphanumeric string,
+// indistinguishable by shape from countless non-secret values. A pattern permissive
+// enough to catch it would false-positive on ordinary text constantly, which is worse
+// than the gap: the log line becomes untrustworthy in the other direction. Documented
+// here as a known, deliberate limitation rather than silently absent.
 
 /// Replace every recognised secret in `input` with [`REDACTED`].
 ///
@@ -158,6 +183,78 @@ mod tests {
     fn redacts_credentials_embedded_in_connection_strings() {
         let out = redact("connecting to postgres://aegis:hunter2@db.internal:5432/aegis");
         assert!(!out.contains("hunter2"), "{out}");
+    }
+
+    #[test]
+    fn redacts_a_vertex_service_account_pem_block() {
+        // The credential shape Vertex AI introduced: a GCP service-account key is a whole
+        // JSON document whose private_key field is a multi-line RSA PEM. None of the
+        // bearer-token-shaped patterns above match this at all. A single leaked service
+        // account is a materially worse incident than a leaked API key — it can mint its
+        // own OAuth2 tokens indefinitely until rotated, not just until one key is revoked.
+        let pem = "-----BEGIN PRIVATE KEY-----\n\
+                    MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDQqfakekeyDATA\n\
+                    AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz01\n\
+                    -----END PRIVATE KEY-----";
+        let out = redact(&format!(
+            r#"credential test failed for vertex: {{"private_key": "{pem}", "client_email": "svc@my-project.iam.gserviceaccount.com"}}"#
+        ));
+        assert!(
+            !out.contains("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"),
+            "{out}"
+        );
+        assert!(out.contains(REDACTED));
+    }
+
+    #[test]
+    fn redacts_a_pem_block_with_literal_backslash_n_newlines() {
+        // The far more common on-the-wire shape: a JSON string's newlines are the
+        // two-character escape sequence \n, not an actual line break, right up until
+        // something deserializes it. A pattern that only matched real newlines would miss
+        // this entirely, which is closer to what a raw request body in an error log
+        // actually looks like than the multi-line version above.
+        let out = redact(
+            "raw body: {\"private_key\":\"-----BEGIN PRIVATE KEY-----\\n\
+             SGVsbG9UaGlzSXNOb3RBUmVhbEtleUJ1dExvb2tzTGlrZU9uZQ==\\n\
+             -----END PRIVATE KEY-----\\n\"}",
+        );
+        assert!(
+            !out.contains("SGVsbG9UaGlzSXNOb3RBUmVhbEtleUJ1dExvb2tzTGlrZU9uZQ"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_lone_private_key_json_field_is_redacted_even_without_pem_markers() {
+        // Defence for a truncated log line — the BEGIN/END markers themselves cut off by
+        // a length limit upstream — where only the JSON field survives.
+        let out = redact(r#"{"private_key": "some-truncated-key-fragment-should-not-appear"}"#);
+        assert!(!out.contains("some-truncated-key-fragment"), "{out}");
+    }
+
+    #[test]
+    fn the_generic_openai_pattern_already_covers_deepseek_moonshot_and_openrouter() {
+        // These three providers were added in earlier sessions with no redaction pattern
+        // of their own. Verified here rather than assumed: all three issue sk-prefixed
+        // keys, and the existing OpenAI rule's tail character class includes '-', so
+        // OpenRouter's sk-or-v1-... shape is consumed whole rather than truncated at the
+        // first hyphen.
+        for key in [
+            "sk-deepseek1234567890abcdef",
+            "sk-moonshot1234567890abcdef",
+            "sk-or-v1-1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab",
+        ] {
+            let out = redact(&format!("provider call failed, key was {key}"));
+            assert!(out.contains(REDACTED), "{key} was not redacted: {out}");
+            assert!(
+                !out.contains("1234567890abcdef"),
+                "{key} leaked a fragment: {out}"
+            );
+        }
     }
 
     #[test]

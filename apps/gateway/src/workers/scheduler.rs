@@ -85,6 +85,12 @@ fn is_pricing_window(now: chrono::DateTime<Utc>) -> bool {
     now.hour() >= 3
 }
 
+/// Whether it is time to purge expired sessions. 04:00 UTC, an hour clear of the pricing
+/// window, so the two never compete for the same slow moment.
+fn is_session_purge_window(now: chrono::DateTime<Utc>) -> bool {
+    now.hour() >= 4
+}
+
 /// Run the scheduler until the process stops.
 pub async fn run(state: AppState) {
     let mut ticker = tokio::time::interval(TICK);
@@ -114,7 +120,31 @@ pub async fn run(state: AppState) {
                 tracing::error!(error = %e, "pricing drift check failed");
             }
         }
+
+        // `purge_expired_sessions` existed with zero call sites anywhere in the codebase
+        // — the `sessions` table has grown, unbounded, by one row per login since launch.
+        // Not a security issue (an expired session is already rejected by
+        // `find_user_by_session`'s own expiry check) but a real, silent operational one:
+        // every row stays indexed and scanned forever. Found in the enterprise readiness
+        // audit.
+        if is_session_purge_window(now)
+            && claim(state.store.as_ref(), "session-purge", &day_key(now)).await
+        {
+            if let Err(e) = purge_expired_sessions(&state).await {
+                tracing::error!(error = %e, "expired session purge failed");
+            }
+        }
     }
+}
+
+/// Delete session rows past their expiry.
+async fn purge_expired_sessions(state: &AppState) -> Result<()> {
+    let pool = state.db()?;
+    let purged = crate::db::repo::purge_expired_sessions(pool).await?;
+    if purged > 0 {
+        tracing::info!(purged, "purged expired sessions");
+    }
+    Ok(())
 }
 
 /// Send one digest per organisation that actually used the gateway last week.
@@ -328,6 +358,17 @@ mod tests {
     fn the_pricing_window_opens_at_three() {
         assert!(!is_pricing_window(at(2026, 8, 17, 2)));
         assert!(is_pricing_window(at(2026, 8, 17, 3)));
+    }
+
+    #[test]
+    fn the_session_purge_window_opens_at_four_clear_of_pricing() {
+        assert!(!is_session_purge_window(at(2026, 8, 17, 3)));
+        assert!(is_session_purge_window(at(2026, 8, 17, 4)));
+        // Both windows can be open at once later in the night — they claim independent
+        // job names, so that is fine, not a collision.
+        assert!(
+            is_pricing_window(at(2026, 8, 17, 4)) && is_session_purge_window(at(2026, 8, 17, 4))
+        );
     }
 
     #[test]
