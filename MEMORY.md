@@ -383,10 +383,13 @@ Covered by tests (not hand-executed against live infra):
    models) of hang with no fallback, since there is also no outer request timeout anywhere
    in the stack. See the audit artifact §7 (P0-04).
 4. **Load test not executed against a deployed instance.** In-process concurrency evidence
-   exists (`tests/overhead_under_load.rs`: P99 1.27ms on a debug build, no network, no real
-   DB/Redis) — real, but not the same claim as `infra/loadtest/k6-gateway.js` against
-   staging at 1k RPS. Run the k6 script once a staging deployment exists, before repeating
-   the sub-1ms claim to a customer under real network + database conditions.
+   exists (`tests/overhead_under_load.rs`, debug build, no network, no real DB/Redis) —
+   real, but not the same claim as `infra/loadtest/k6-gateway.js` against staging at 1k
+   RPS. Re-run three times total now (session 2 once, session 5 twice): P99 has ranged
+   0.58-1.27ms across runs on shared build-machine hardware, mean 0.16-0.27ms — a real,
+   disclosed range, not one precise constant. Run the k6 script once a staging deployment
+   exists, before repeating any sub-2ms claim to a customer under real network + database
+   conditions.
 5. **Restore drill never executed.** No backup has ever been taken, so none has been
    restored. `scripts/backup-restore-drill.sh` is written; it has not been run once.
 
