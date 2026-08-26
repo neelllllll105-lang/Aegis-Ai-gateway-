@@ -24,6 +24,7 @@ pub mod openai;
 pub mod openrouter;
 pub mod pool;
 pub mod sse;
+pub mod vertex;
 
 use crate::error::{AegisError, Result};
 use crate::types::{NormalizedRequest, NormalizedResponse, StreamChunk};
@@ -274,6 +275,7 @@ impl ProviderRegistry {
         registry.register(Arc::new(deepseek::DeepSeekProvider));
         registry.register(Arc::new(mistral::MistralProvider));
         registry.register(Arc::new(groq::GroqProvider));
+        registry.register(Arc::new(vertex::VertexProvider::new()));
         registry
     }
 }
@@ -295,13 +297,14 @@ mod tests {
             "deepseek",
             "mistral",
             "groq",
+            "vertex",
         ] {
             assert!(
                 registry.get(expected).is_some(),
                 "missing provider: {expected}"
             );
         }
-        assert_eq!(registry.len(), 9);
+        assert_eq!(registry.len(), 10);
     }
 
     #[test]

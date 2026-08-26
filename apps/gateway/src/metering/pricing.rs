@@ -588,7 +588,96 @@ impl PricingTable {
                 1_048_576,
                 true,
                 true,
-                s("Google", "2026-08-21"),
+                // Confirmed 2026-08-24 via live search (Google's own pricing page did not
+                // render through the fetch tool used — see the audit report). Same call
+                // found this model's retirement is announced for 2026-10-16, about seven
+                // weeks out at time of writing. Nothing in this pricing table currently
+                // tracks upcoming provider deprecations; see the audit's pricing section.
+                s("Google", "2026-08-24"),
+            ),
+            // ---------------- Vertex AI ----------------
+            // Google's stated policy is that Vertex charges the identical per-token rate
+            // as AI Studio for the same Gemini model — Vertex's price is not for the
+            // tokens, it is for the enterprise surface around them (VPC-SC, IAM, no
+            // training on your data by default, regional processing guarantees).
+            // Confirmed 2026-08-24 via live search against third-party pricing trackers,
+            // cross-checked against Google's own numbers already in this file for the
+            // `google/` rows above, since the primary pricing page did not render through
+            // the fetch tool used.
+            //
+            // NOT MODELLED, and a real gap: Gemini 2.5 Pro bills prompts over 200K tokens
+            // at $2.50 / $15.00 per Mtok instead of the base $1.25 / $10.00 used below.
+            // `ModelPricing::cost()` has no concept of a context-length-dependent tier —
+            // every request is priced at the flat per-model rate regardless of prompt
+            // size. A request to gemini-2.5-pro (context window 1,048,576 tokens) with a
+            // prompt anywhere past 200K is under-billed by this gateway relative to what
+            // Google actually charges the organisation's own provider account under BYOK.
+            // See the pricing/metering section of the enterprise audit for the fix this
+            // needs; not attempted here because it changes `ModelPricing`'s shape for
+            // every provider, not just Google's.
+            m(
+                "vertex/gemini-2.5-pro",
+                "vertex",
+                "Gemini 2.5 Pro (Vertex AI)",
+                ModelTier::Premium,
+                1.25,
+                10.00,
+                1_048_576,
+                true,
+                true,
+                s("Google", "2026-08-24"),
+            ),
+            m(
+                "vertex/gemini-2.5-flash",
+                "vertex",
+                "Gemini 2.5 Flash (Vertex AI)",
+                ModelTier::Mid,
+                0.30,
+                2.50,
+                1_048_576,
+                true,
+                true,
+                s("Google", "2026-08-24"),
+            ),
+            m(
+                "vertex/gemini-2.5-flash-lite",
+                "vertex",
+                "Gemini 2.5 Flash Lite (Vertex AI)",
+                ModelTier::Cheap,
+                0.10,
+                0.40,
+                1_048_576,
+                true,
+                true,
+                s("Google", "2026-08-24"),
+            ),
+            m(
+                "vertex/gemini-3.6-flash",
+                "vertex",
+                "Gemini 3.6 Flash (Vertex AI)",
+                ModelTier::Mid,
+                0.30,
+                2.50,
+                1_048_576,
+                true,
+                true,
+                // Mirrors google/gemini-3.6-flash's price on the same stated-parity
+                // policy; this specific model was not independently confirmed by the
+                // 2026-08-24 search (it returned 2.5-series and 2.0 Flash numbers, not
+                // 3.6). Flagged UNVERIFIED rather than silently presented as checked.
+                UNVERIFIED.to_string(),
+            ),
+            m(
+                "vertex/gemini-3.1-pro-preview",
+                "vertex",
+                "Gemini 3.1 Pro Preview (Vertex AI)",
+                ModelTier::Premium,
+                1.25,
+                10.00,
+                1_048_576,
+                true,
+                true,
+                UNVERIFIED.to_string(),
             ),
             // ---------------- DeepSeek ----------------
             // api-docs.deepseek.com — PEAK rates, see the note above.
@@ -888,14 +977,25 @@ mod tests {
             .map(|m| m.model_id.as_str())
             .collect();
 
-        // Mistral, Groq, and Moonshot were not re-verified on 2026-08-21.
+        // Mistral, Groq, and Moonshot were not re-verified on 2026-08-21. Two Vertex
+        // preview models (3.6-flash, 3.1-pro-preview) could not be independently
+        // confirmed on 2026-08-24 — see the comment above their pricing entries. Note
+        // this count does NOT include the two retired google/gemini-1.5-* rows, which
+        // are also marked UNVERIFIED: `all()` excludes inactive models by design (a
+        // retired model is still priceable via `get()`/`cost()` for historical usage
+        // records, but the router must never see it as a live candidate), so this
+        // assertion is scoped to what a customer or the admin console would actually see
+        // listed, not every UNVERIFIED row in the underlying table.
         assert_eq!(
             unverified.len(),
-            5,
-            "expected 5 unverified rows, found: {unverified:?}"
+            7,
+            "expected 7 unverified rows, found: {unverified:?}"
         );
         assert!(unverified.iter().all(|id| {
-            id.starts_with("mistral/") || id.starts_with("groq/") || id.starts_with("moonshot/")
+            id.starts_with("mistral/")
+                || id.starts_with("groq/")
+                || id.starts_with("moonshot/")
+                || id.starts_with("vertex/")
         }));
     }
 

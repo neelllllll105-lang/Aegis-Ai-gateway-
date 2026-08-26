@@ -21,6 +21,7 @@ async-stream = "0.3"
 async-trait = "0.1"
 
 # HTTP client
+url = "2"
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "stream",
@@ -49,6 +50,9 @@ argon2 = "0.5"
 sha1 = "0.10"
 sha2 = "0.10"
 hmac = "0.12"
+# RS256 JWT signing for Vertex AI service-account auth. See docs/adr/0007. Used only by
+# providers/vertex.rs — no other provider needs asymmetric signing.
+jsonwebtoken = "9"
 hkdf = "0.12"
 aes-gcm = "0.10"
 rand = "0.8"

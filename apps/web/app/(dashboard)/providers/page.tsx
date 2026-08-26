@@ -17,6 +17,7 @@ const PROVIDERS = [
   "openai",
   "anthropic",
   "google",
+  "vertex",
   "openrouter",
   "deepseek",
   "mistral",
@@ -169,15 +170,42 @@ export default function ProvidersPage() {
             />
           </div>
 
-          <Field
-            label="API key"
-            id="api-key"
-            type="password"
-            value={apiKey}
-            onChange={setApiKey}
-            required
-            hint="Encrypted at rest. Only the last four characters are ever displayed again."
-          />
+          {provider === "vertex" ? (
+            <div>
+              <label
+                htmlFor="api-key"
+                className="block text-sm font-medium text-[var(--color-muted)]"
+              >
+                Service account JSON key
+              </label>
+              <textarea
+                id="api-key"
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+                required
+                rows={8}
+                spellCheck={false}
+                placeholder={'{\n  "type": "service_account",\n  "project_id": "...",\n  "private_key": "-----BEGIN PRIVATE KEY-----...",\n  "client_email": "...@....iam.gserviceaccount.com"\n}'}
+                className="mt-1.5 w-full rounded-[var(--radius)] border border-[var(--color-line-dark)] bg-[var(--color-bg)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
+              />
+              <p className="mt-1.5 text-xs text-[var(--color-muted)]">
+                Paste the full contents of the key file downloaded from your GCP service
+                account — not an API key. Region defaults to <code>us-central1</code>; add
+                an <code>&quot;aegis_region&quot;</code> field to the JSON to use a
+                different one. Encrypted at rest, never returned to the browser.
+              </p>
+            </div>
+          ) : (
+            <Field
+              label="API key"
+              id="api-key"
+              type="password"
+              value={apiKey}
+              onChange={setApiKey}
+              required
+              hint="Encrypted at rest. Only the last four characters are ever displayed again."
+            />
+          )}
 
           {provider === "custom" && (
             <Field

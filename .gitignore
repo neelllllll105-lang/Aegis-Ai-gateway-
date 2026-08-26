@@ -18,6 +18,12 @@ next-env.d.ts
 .env.*.local
 *.key
 *.pem
+# Deliberate, narrow exception: a throwaway RSA key generated locally with `openssl
+# genpkey` solely to unit-test JWT assertion construction in providers/vertex.rs. Not
+# connected to any real Google Cloud project or credential — see
+# apps/gateway/testdata/README.md. Committing it is the point: CI can sign a test
+# assertion with no real secret involved. Every other *.pem stays blocked.
+!apps/gateway/testdata/vertex_test_key.pem
 secrets/
 
 # Build output

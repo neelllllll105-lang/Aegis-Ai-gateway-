@@ -18,6 +18,7 @@ them and re-introducing the bug it was written to avoid is a record of why.
 | [004](0004-runtime-checked-sql.md) | Runtime-checked SQL instead of `query!` macros | Accepted | **Yes** — Part 2 and Part 12 |
 | [005](0005-store-abstraction.md) | Key-value store behind a trait | Accepted | **Yes** — extends Part 2 |
 | [006](0006-classifier-versioning.md) | Classifier versions and sign-constrained training | Accepted | Partial — reframes P5.3 |
+| [007](0007-vertex-ai-jwt-signing.md) | `jsonwebtoken` for Vertex AI service-account auth | Accepted | **Yes** — new dependency outside Part 2 |
 
 ## Writing a new one
 
