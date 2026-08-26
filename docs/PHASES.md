@@ -72,7 +72,18 @@ rate limiting, and metering. A working product in passthrough mode.
 - [x] P2.1 Provider trait + adapters: openai, anthropic, google, custom; request/response
       translation; streaming SSE passthrough
 - [x] P2.2 Pipeline stages 1,2,3,4,8,10,11: auth, rate limit (Redis Lua sliding window),
-      budget check, parse/normalize, `X-Aegis-*` headers, usage event emission
+      budget check, parse/normalize, `X-Aegis-*` headers, usage event emission — *rate
+      limiting is atomic (single Redis Lua script, proven by a 50-concurrent-caller test
+      admitting exactly the configured limit). A session 5 audit found budget checking is
+      not: `budget::check()` reads the spend counter and compares it to the limit, and the
+      counter is only incremented later, after the request completes — a textbook
+      check-then-act gap with no atomic reservation. Reproduced 8/8 runs under genuine
+      multi-thread concurrency (20 simultaneous requests against a $1.00 hard limit with
+      $0.05 headroom admitted 2-5 requests, 15-45% over the limit, every run). The proof
+      is committed as an `#[ignore]`d test with the exact numbers in its own comment.
+      Applies identically to all four budget scopes (key/team/region/org). Left checked
+      because single-request budget enforcement is real and tested — the gap is
+      concurrency-specific, not "does not work." See the audit artifact, finding P0-01.*
 - [x] P2.3 Usage worker: stream → batch insert → counters → budget alerts
 - [x] P2.4 BYOK: credential CRUD, AES-256-GCM, cached decrypted form, test endpoint
 - [x] P2.5 Shared-model pool for the free tier (round-robin, per-org caps)
@@ -113,7 +124,21 @@ rate limiting, and metering. A working product in passthrough mode.
       an embedding-API call and its latency to every cache-miss request) as much as a code
       change — see `MEMORY.md` Known Limitations item 0.*
 - [x] P3.6 Context compression v1
-- [x] P3.7 Fallback + circuit breakers + provider health
+- [ ] P3.7 Fallback + circuit breakers + provider health — *circuit breakers and
+      provider-health tracking genuinely work and are exercised in production, for
+      non-streaming requests. A session 5 enterprise audit found the fallback **chain**
+      does not: `FallbackChain::build`'s `alternates` parameter — the same model on a
+      different provider, then one tier down — is fully implemented and tested, but its
+      one production call site (`routes/openai_compat.rs`) hardcodes it to `&[]`. Combined
+      with the router's own never-downgrade guarantee, any request classified complex or
+      sent with an explicit passthrough hint — exactly the highest-value traffic — gets
+      zero cross-provider redundancy; the chain collapses to length 1, proven by the
+      codebase's own existing test. Separately, streaming (`stream_chat`/
+      `stream_messages`) has no retry, no fallback, and never calls
+      `state.health.record_success`/`record_failure` at all, so the circuit breaker never
+      learns from streaming traffic. Unchecked to reflect that "fallback" as shipped is
+      materially narrower than the task title claims. See the audit artifact, finding
+      P0-04 / P1-01.*
 - [x] P3.8 Savings calculation (micro-cents, no early rounding)
 - [x] P3.9 Savings dashboard + CSV export
 - [x] P3.10 Tests: classifier accuracy >= 85%, routing rules, cache boundaries, fallback
@@ -203,7 +228,15 @@ rate limiting, and metering. A working product in passthrough mode.
 **Goal:** Land enterprise pilots.
 
 ### Tasks
-- [x] P6.1 SSO: OIDC + SAML assertion validation
+- [ ] P6.1 SSO: OIDC + SAML assertion validation — *the assertion-validation logic itself
+      (`enterprise/sso.rs`: audience, issuer, expiry, replay) is correct and tested, which
+      is what this task line names. A session 5 audit found the login flow built on top of
+      it cannot complete: `sso_start` constructs a callback URL pointing at
+      `/api/auth/sso/callback`, and no such route is ever registered in the router. A real
+      SSO login has nowhere to land. Unchecked because the end-to-end capability the task
+      exists to deliver does not work today, even though the cryptographic core of it does.
+      Fix is small (register the missing route) once the callback handler's own completeness
+      is confirmed. See the audit artifact, finding P1-03.*
 - [x] P6.2 SCIM v2 user/group provisioning endpoints
 - [x] P6.3 Self-hosted distribution + signed license validation with offline grace
 - [x] P6.4 Per-tenant encryption keys (HKDF from master + org_id)

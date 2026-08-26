@@ -4,7 +4,7 @@
 > This file is the handoff protocol. It tells you where the project is, what genuinely
 > works, what does not, what was decided and why, and exactly what to do next.
 >
-> **Last updated:** 2026-08-24
+> **Last updated:** 2026-08-26
 > **Updated by:** Claude Opus 5 (Claude Code)
 > **Update this file before ending any session.** See `CLAUDE.md`.
 
@@ -27,9 +27,17 @@ First commands:
 
 ```bash
 bash scripts/status.sh          # what the repo actually contains right now
-cargo test --lib                # 682 tests, ~3s, no database needed
+cargo test --lib                # 708 passing + 1 intentionally ignored, ~3s, no database needed
 bash scripts/verify-phase.sh 3  # automated acceptance checks for a phase
 ```
+
+**Read this next, before anything else:** [Aegis Enterprise Readiness Audit](https://claude.ai/code/artifact/aa6e48d0-50e5-445f-a8c0-70417960003e)
+— a full 16-section audit (pricing, security, reliability, scale, routing, testing,
+enterprise-deployment fitness, a 0-10 scorecard, and a P0-P3 findings list) done session 5
+by tracing real execution paths and running adversarial tests, not by reading
+documentation. Three P0s were fixed during the audit itself; the rest are open findings
+with complexity estimates. This file's Known Limitations section below summarizes the
+findings that change project state; the artifact has the full evidence for each.
 
 ---
 
@@ -39,33 +47,41 @@ bash scripts/verify-phase.sh 3  # automated acceptance checks for a phase
 |-------|------|--------|
 | 0 | Foundation: repo, CI, dev stack, schema, config | 🟢 complete |
 | 1 | Auth, keys, orgs | 🟢 complete |
-| 2 | Core gateway (proxy + metering) | 🟢 complete |
-| 3 | Optimization engine | 🟡 exact cache/router/classifier/compressor complete; semantic cache never wired (found session 3) |
+| 2 | Core gateway (proxy + metering) | 🟡 budget check is real but not atomic under concurrency — proven, not theorised (found session 5) |
+| 3 | Optimization engine | 🟡 exact cache/router/classifier/compressor complete; semantic cache never wired (session 3); fallback chain hardcoded to zero alternates in production, streaming never updates circuit-breaker health (session 5) |
 | 4 | Dashboards, billing, launch prep | 🟡 built; load test only partially executed (see below) |
-| 5 | Launch + provider expansion | 🟢 complete |
-| 6 | Enterprise readiness | 🟡 SSO/SCIM/residency wired; TOTP has no repo layer or login check (found session 3) |
+| 5 | Launch + provider expansion | 🟢 complete; Vertex AI added session 5 as a tenth provider (`docs/adr/0007-vertex-ai-jwt-signing.md`), not yet verified against a real GCP project |
+| 6 | Enterprise readiness | 🟡 SCIM/residency wired; TOTP has no repo layer or login check (session 3); SSO's assertion validation is correct but its callback route is never registered, so login cannot complete (found session 5) |
 | 7 | Scale + moat | 🟡 bandit records outcomes live but is never read from for routing (found session 3) |
 
 Legend: ⚪ not started · 🟡 in progress · 🟢 complete · 🔴 blocked
 
-> `scripts/check-memory-freshness.sh` will warn that phase 5 shows complete while phase 3
-> does not, since phases are meant to be strictly ordered. **This is known and
-> intentional, not an oversight:** phase 3 was genuinely complete when phase 5 was built —
-> it was only downgraded in session 3, retroactively, after an audit found the semantic
-> cache had been marked done without ever being wired into the pipeline. Nothing in phase
-> 5 depends on semantic caching. Phase 4's remaining item (P4.8, the k6 load test) is
-> similarly pure infrastructure execution with no dependency on anything after it. The
-> warning is correct to flag both; this note is the confirmation it asks for.
+> `scripts/check-memory-freshness.sh` will warn that phase 5 shows complete while phases 2
+> and 3 do not, since phases are meant to be strictly ordered. **This is known and
+> intentional, not an oversight:** phases 2 and 3 were genuinely complete when phase 5 was
+> built — they were only downgraded retroactively, after audits found gaps that existed
+> all along but had gone unnoticed (semantic cache never wired, session 3; the budget-check
+> race and the fallback chain's hardcoded-empty alternates, session 5). Nothing in phase 5
+> depends on any of these — Vertex AI (added session 5, also phase 5) uses the same
+> pipeline stages as every other provider and inherits both gaps equally, it didn't
+> introduce either. Phase 4's remaining item (P4.8, the k6 load test) is similarly pure
+> infrastructure execution with no dependency on anything after it. The warning is correct
+> to flag all of this; this note is the confirmation it asks for.
 
-**65 of 69 tasks across all eight phases are checked off in `docs/PHASES.md`.** (Was 68/69
+**63 of 69 tasks across all eight phases are checked off in `docs/PHASES.md`.** (Was 68/69
 after session 2; a session 3 audit unchecked three that had been marked done in error —
-semantic cache, TOTP, and bandit-informed routing — because each is implemented and
-tested but never actually invoked from live code. See Known Limitations item 0 for the
-full list, which also includes budget threshold alerts, a task line ledger still counts
-as done because its UI and enforcement halves are genuinely complete.) One remaining item
-(P4.8, the load test) is pure infrastructure execution. The other three are real
-feature-completion work, not documentation corrections — "built" no longer means
-"finished" for those three until they are actually wired in.
+semantic cache, TOTP, and bandit-informed routing. A session 5 enterprise-readiness audit
+unchecked two more — the fallback chain, whose only production call site hardcodes zero
+alternates, and SSO, whose callback route is never registered so login cannot complete —
+because each is implemented and tested in isolation but does not deliver the capability
+its task line names once you trace where it's actually called from. See Known Limitations
+item 0 for the full list, which also includes budget threshold alerts.) One remaining item
+(P4.8, the load test) is pure infrastructure execution. The other five are real
+feature-completion or feature-repair work, not documentation corrections — "built" no
+longer means "finished" for those five until they are actually wired in or fixed. (Budget
+checking, `P2.2`, stayed checked despite a real session-5 finding — see Known Limitations —
+because single-request enforcement genuinely works; only concurrent-request atomicity does
+not, which is a narrower and more precise claim than "does not work.")
 
 Detail with per-criterion evidence: `docs/PHASES.md`. Machine-readable: `.aegis/state.json`.
 
@@ -75,46 +91,116 @@ Detail with per-criterion evidence: `docs/PHASES.md`. Machine-readable: `.aegis/
 
 All eight phases are code-complete: every handler, every route, every worker described in
 `MASTER_BUILD.md` exists, compiles, and is tested. Session 2 closed the last eleven open
-phase-task lines (dashboard pages, Anthropic streaming, SCIM/SSO route wiring, the
-scheduler, read replica, regional budgets, referral program, compliance pack, investor
-pack, self-hosted deployment, changelog) and added a route-surface test plus an in-process
-concurrency measurement of gateway overhead.
+phase-task lines. Session 3 found and partly fixed a "built but never wired" pattern.
+Session 4 safely merged a collaborator's provider addition and caught two real bugs in the
+process. **Session 5 was a full brutally-honest enterprise-readiness audit** — the user's
+own framing: "audit this project as if we are preparing to sell it to large enterprise
+customers... do not assume something works because it exists in the codebase... trace the
+actual execution paths, run tests where possible... attempt to bypass these controls."
 
-**Session 3 ran a "is everything we built actually connected" audit**, prompted by the
-user's concern that features assembled from different sources might not genuinely work
-together. Found a real, consistent pattern: several sophisticated features were built and
-thoroughly tested *in isolation* but never wired into the live request path. See "Built
-but not wired" under Known Limitations below — this is now the most important thing for
-the next session to read, because it changes what several existing documents (this file
-included, in earlier revisions) claimed was working. One item (data residency enforcement)
-was small and safety-critical enough to fix immediately; it is now genuinely live and
-covered by wiring-proof tests. The rest are real feature-completion work, not quick
-fixes, and are listed with honest effort estimates rather than attempted under time
-pressure.
+**What session 5 actually did**, in order:
 
-**What remains is entirely "run it against something real," not "build it":**
+1. **Built Vertex AI as a tenth provider** (`apps/gateway/src/providers/vertex.rs`) —
+   service-account JSON → self-signed RS256 JWT → OAuth2 token exchange, cached per
+   replica, delegating request/response handling to the existing `google::` functions.
+   14 new tests. See `docs/adr/0007-vertex-ai-jwt-signing.md`. **Not verified against a
+   real GCP project** — same category of gap as every other provider's "compiles, passes
+   against a mock, never run for real" status.
+2. **Ran the 16-section audit** — pricing/metering, Vertex integration, Redis retention,
+   RBAC, observability, scalability, fallback/reliability, smart routing, budgets/rate
+   limits, performance, enterprise deployment fitness, testing, security, a 0-10
+   scorecard, and a full P0-P3 findings list — combining direct code tracing with four
+   parallel focused investigations and adversarial tests actually executed against this
+   codebase. Full report, with evidence for every claim:
+   **[Aegis Enterprise Readiness Audit](https://claude.ai/code/artifact/aa6e48d0-50e5-445f-a8c0-70417960003e)**.
+3. **Fixed three P0s discovered mid-audit, live, rather than only reporting them**:
+   - An **SSRF vulnerability**: a free-tier signup could register a BYOK provider whose
+     `base_url` pointed at `169.254.169.254` (cloud metadata), and the gateway's own
+     credential-test endpoint would issue the request server-side. Fixed with
+     `middleware/ssrf_guard.rs` (resolve-then-classify against loopback/private/
+     link-local/CGN ranges), wired into `create_provider`, proven closed by a new
+     integration test that drives the real handler against a real database.
+   - **Silent metering-completeness failure**: the one Prometheus metric built to detect
+     "a request was served but never billed" incremented regardless of whether the
+     underlying write actually succeeded, because `usage::emit`'s `Result` was discarded
+     at all three call sites. Fixed to gate the metric on genuine success and log failures
+     with org/request context; stream failures now carry a real `error_type` instead of
+     looking like a clean 200.
+   - **A compliance-whitepaper claim that didn't match the code**: the security whitepaper
+     described `content_capture` as an opt-in, encrypted content-storage control. The flag
+     is dead code; the real behavior is an unencrypted, on-by-default 24h plaintext cache
+     in Redis, gated only by `zero_retention`. Corrected in the document itself, with the
+     correction left visible.
+4. **Proved, with real reproducible numbers, that budget enforcement is not atomic under
+   concurrency** — 20 simultaneous requests against a $1.00 hard limit with $0.05 headroom
+   admitted 2-5 requests (15-45% overshoot) in 8 of 8 runs under genuine multi-thread
+   parallelism. Committed as an `#[ignore]`d test so `cargo test` stays green while the
+   proof stays runnable on demand. **Not fixed** — the honest fix is a reserve-then-true-up
+   redesign, not a bounded patch.
+5. **Found, but did not fix**, a long list of real gaps — the fallback chain's only
+   production call site hardcodes zero alternates, streaming has no retry/fallback/health-
+   tracking, cached-token pricing doesn't exist for either Anthropic or OpenAI, the SSO
+   callback route is never registered, `workers::reconciliation::run` and the budget-alert
+   worker are never spawned, Redis's atomic guarantees have never been tested against real
+   Redis, and more. Full list with severity, evidence, and complexity: the audit artifact
+   above, and the updated Known Limitations section below.
 
-1. Docker Desktop — the user reported installing it; this session found only installer
-   fragments in `C:\Program Files\Docker\Docker\tmp-delete\`, no `docker.exe`, no running
-   daemon. The install did not complete or was rolled back. **This needs to be redone.**
-2. A real provider API key (the user selected Google Gemini) has not yet been supplied.
-3. Once both land: run the 14+ integration tests against live Postgres, seed data, send
-   one real completion, run the k6 load test against a deployed instance, and run the
-   backup/restore drill.
+**What remains is still, as of session 3, entirely "run it against something real," plus
+now a real list of "actually fix these" work items the audit produced:**
 
-Nothing in this list requires further code. It requires infrastructure the build machine
-does not have.
+1. Docker Desktop — status unconfirmed since session 3; last checked it was not installed.
+2. A real provider API key (the user selected Google Gemini) has not yet been supplied,
+   and Vertex AI now needs a real GCP service account key too.
+3. Once infrastructure exists: run the integration tests against live Postgres, run the k6
+   load test, run the backup/restore drill, and — new — actually exercise the atomic Redis
+   Lua-script paths under `AEGIS_TEST_REDIS_URL`, which CI provisions but no test reads.
+4. Work through the audit's "top 10 things to fix next" (in the artifact's final section),
+   starting with the budget race and the empty fallback chain.
 
 ---
 
 ## What Actually Works — Verified
 
-`cargo test --lib` → **682 passing, 0 failing**. Full `cargo test` (lib + 4 integration
-binaries, one of which drives real concurrency) → **702 passing, 0 failing**. `clippy -D
-warnings` clean. `cargo fmt --check` clean. Dashboard: `tsc --noEmit` and `eslint .` clean,
-all 21 routes build, `next build` produces standalone output.
+`cargo test --lib` → **708 passing, 0 failing, 1 intentionally ignored** (the committed
+budget-race proof — see session 5 below). Full `cargo test` (lib + integration binaries) →
+**730 passing, 0 failing, 1 ignored**. `clippy --all-targets -D warnings` clean. `cargo fmt
+--check` clean. Dashboard: `eslint . && check-design-tokens.mjs` clean, `next build`
+produces 23 static routes with no errors.
 
-Executed and confirmed by hand this session (session 3):
+Executed and confirmed by hand this session (session 5):
+
+- **Vertex AI is a registered, tested provider** — `providers::tests::builtin_registry_has_every_shipped_provider`
+  now asserts 10 providers including `"vertex"`. JWT claim construction/expiry, malformed-
+  key rejection, credential-shape validation (rejects an AI-Studio-shaped key with a
+  message naming what's actually expected), region default/override, and byte-identical
+  request bodies vs. the existing `google.rs` adapter are all covered by real, run tests.
+  What is not verified: an actual OAuth2 token exchange or `generateContent` call against
+  a real GCP project — this environment has never had one, for any provider.
+- **The SSRF fix closes the exact exploit chain, proven against real code and a real
+  database, not just unit-level.** `tests/auth_and_billing.rs::a_freshly_signed_up_org_cannot_register_a_provider_pointed_at_cloud_metadata`
+  drives the real `management::create_provider` handler with a real session and a real
+  Postgres-backed org, asserts a 400 and that nothing was persisted (`repo::list_credentials`
+  stays empty). A companion test (`a_legitimate_custom_endpoint_is_still_accepted`) proves
+  the fix didn't also break the legitimate case. Both skip gracefully without
+  `AEGIS_TEST_DATABASE_URL` and were confirmed to at least compile and skip correctly
+  locally — the assertions themselves have not yet run against a live database this
+  session (Docker still unavailable), consistent with every other DB-gated test's status.
+- **The budget-bypass race is real, not theorised** — reproduced 8 of 8 runs, numbers in
+  `apps/gateway/src/middleware/budget.rs`'s `concurrent_requests_can_overshoot_a_hard_budget`
+  test comment. First attempt under the default single-threaded test runtime did *not*
+  reproduce it, which was itself a finding (a race-condition test needs genuine OS-thread
+  parallelism, not cooperative single-thread scheduling, or it gives false confidence) —
+  fixed by adding `flavor = "multi_thread", worker_threads = 8` and a `tokio::sync::Barrier`
+  forcing simultaneous execution.
+- **The metering-completeness fix was independently corroborated**, not just self-reported
+  — a parallel focused investigation into observability found the exact same discarded-
+  `Result` bug at the exact same call sites before either the direct trace or the
+  investigation knew of the other's finding.
+- **`cargo fmt --check`, `clippy --all-targets -- -D warnings`, `cargo test`, `npm run
+  lint`, and `npm run build` all re-run clean after every fix above**, on this machine,
+  this session — not carried forward from an earlier session's report.
+
+Executed and confirmed by hand in session 3:
 
 - **Data residency enforcement is now genuinely live**, not just implemented and
   self-tested. `enterprise::residency::enforce()` existed and was correct in isolation but
@@ -177,16 +263,24 @@ Executed in earlier sessions and still true:
 - **The savings calculator is arithmetically correct**, checked by hand against its inputs.
 - **Both SDKs work.** Python asserted against realistic response headers; TypeScript
   typechecks.
-- **Pricing is verified**, not transcribed. 33 of 38 priced models were checked in this
-  build's earlier session against live provider pricing pages and carry a checked date;
-  the remaining 5 (mistral ×2, groq ×2, moonshot/kimi-k2) are explicitly marked
-  `UNVERIFIED` in the `source` field rather than silently presented as checked. Check
-  count:
+- **Pricing is verified**, not transcribed, for the majority of the table. The remaining
+  9 unverified rows are explicitly marked `UNVERIFIED` in the `source` field rather than
+  silently presented as checked: mistral ×2, groq ×2, moonshot/kimi-k2 (never re-verified),
+  `google/gemini-1.5-flash`/`-pro` (session 4 — added as *retired* entries so a legacy
+  request is still priced rather than metered at $0, not because anyone confirmed the
+  number), and `vertex/gemini-3.6-flash`/`gemini-3.1-pro-preview` (session 5 — preview
+  models whose price could not be independently confirmed at build time). Check count:
   ```bash
-  grep -c 'UNVERIFIED.to_string()' apps/gateway/src/metering/pricing.rs   # → 7
+  grep -c 'UNVERIFIED.to_string()' apps/gateway/src/metering/pricing.rs   # → 9
   ```
-  (Was 5; a session 4 merge added two more Google models to the retired-but-priced set —
-  see the session log entry below.)
+  **Separately — found session 5, not yet fixed:** even the *verified* rows only price
+  input and output tokens. Neither the Anthropic nor the OpenAI adapter extracts a
+  cached-token figure from the provider's response (`providers/anthropic.rs`,
+  `providers/openai.rs`), so Anthropic prompt caching is under-counted (cached tokens
+  ignored entirely) and OpenAI prompt caching is over-counted (the already-discounted
+  cached portion billed at the full rate). And Gemini 2.5 Pro's 200K-token pricing tier
+  ($2.50/$15.00 vs. the modeled flat $1.25/$10.00) isn't modeled at all. Full detail:
+  the audit artifact linked above, §1 and §14 (finding P0-05).
 
 Covered by tests (not hand-executed against live infra):
 
@@ -194,7 +288,11 @@ Covered by tests (not hand-executed against live infra):
   the parts always reconstitute the whole. A million 3-micro-cent charges sum exactly.
 - **Crypto.** AES-256-GCM with per-call nonces, HKDF per-tenant keys, argon2id, uniform
   base62 key generation, constant-time comparison.
-- **Store.** 50 racing callers against a limit of 10 admit exactly 10.
+- **Store.** 50 racing callers against a limit of 10 admit exactly 10 — but this is the
+  **rate limiter** specifically (one atomic Redis Lua script). **Budget checking is a
+  different code path and is not atomic** — see session 5 in the Session Log and Known
+  Limitations: proven to admit 2-5 of 20 concurrent requests past a hard limit with only
+  $0.05 of headroom, 8 of 8 runs. Do not generalize this bullet's guarantee to budgets.
 - **Scheduler.** A 64-way concurrent claim race for the same job/period produces exactly
   one winner — the property the whole distributed-jobs design depends on.
 - **Providers.** Nine adapters, golden-file tested in both directions. The SSE decoder
@@ -222,10 +320,20 @@ Covered by tests (not hand-executed against live infra):
   the 1k-RPS-over-a-network claim does not.
 - **The restore drill** — script and runbook exist (`scripts/backup-restore-drill.sh`,
   `docs/runbooks/restore.md`); never executed, because no backup has ever been taken.
-- **SSO and SCIM against a real identity provider.** Both are now fully wired and
-  reachable at their HTTP routes (they were not, before this session), and their shapes
-  are tested against both Okta's and Entra's deprovisioning payload formats — but neither
-  has exchanged a single real assertion or provisioning call with an actual IdP.
+- **SSO and SCIM against a real identity provider.** SCIM is fully wired and reachable at
+  its HTTP routes and its shapes are tested against both Okta's and Entra's deprovisioning
+  payload formats, but has never exchanged a real provisioning call with an actual IdP.
+  **SSO cannot currently complete even in principle** — found session 5:
+  `enterprise/sso.rs`'s assertion validation is correct and tested, but `sso_start`
+  constructs a callback to `/api/auth/sso/callback`, and that route is never registered
+  anywhere in the router. A real login has nowhere to land.
+- **Any atomic-under-concurrency claim, against real Redis.** Found session 5: CI
+  provisions a Redis service container and sets an env var for it, but no test in the repo
+  reads that variable — every concurrency proof (rate limiter, scheduler claim, and the
+  new budget-race proof) runs only against `store::MemoryStore`. The Lua-script path
+  production actually uses in Redis has never once been exercised by a test. Postgres is
+  different: `tests/tenant_isolation.rs` and `tests/auth_and_billing.rs` do run against a
+  real database service container in CI, confirmed by reading the CI YAML directly.
 
 ---
 
@@ -235,6 +343,7 @@ Covered by tests (not hand-executed against live infra):
 |---|---|---|
 | Docker Desktop not functional on the build machine | No verification against live Postgres/Redis/Qdrant | Gateway compiles and unit-tests with no external service. **Action needed:** the install in `C:\Program Files\Docker\Docker\` only contains leftover installer files (`tmp-delete\Docker Desktop Installer.exe...`), not a working install — reinstall Docker Desktop from scratch, confirm `docker version` succeeds, then run `docker compose -f infra/docker-compose.yml up -d`. |
 | No provider API key supplied | Cannot confirm a real end-to-end completion or check a real invoice | The mock provider exercises the whole pipeline, including a 64-concurrency load pass. Needs one real key (user selected Google Gemini) to close. |
+| No GCP service account for Vertex AI (new, session 5) | Vertex's OAuth2 token exchange and `generateContent` call are untested against real Google infrastructure | 14 tests cover everything that doesn't require a live GCP project (JWT construction, credential parsing, request-body shape). Needs a real service-account JSON key, scoped to a project with the Vertex AI API enabled, to close. |
 
 ---
 
@@ -242,23 +351,50 @@ Covered by tests (not hand-executed against live infra):
 
 **Do not bill a customer until these are closed.**
 
-1. **7 pricing rows still unverified.** `mistral/mistral-large-latest`,
+1. **Budget enforcement can be bypassed by concurrent requests — new, session 5, proven
+   with real numbers.** `budget::check()` reads spend and compares to the limit; nothing
+   reserves it atomically before the request runs. 20 concurrent requests against a $1.00
+   hard limit with $0.05 headroom admitted 2-5 of them (15-45% over) in 8 of 8 runs.
+   Applies to all four budget scopes (key/team/region/org) — same root cause in all four.
+   Proof: `apps/gateway/src/middleware/budget.rs::concurrent_requests_can_overshoot_a_hard_budget`
+   (`#[ignore]`d, run explicitly with `cargo test -- --ignored concurrent_requests_can_overshoot`).
+   Fix needs a reserve-then-true-up (or atomic increment-check-rollback) redesign, matching
+   the rate limiter's already-proven atomic pattern — not a bounded patch. This is the
+   single highest-priority item in the entire audit; see the artifact's §9 and §15 (P0-01).
+2. **9 pricing rows still unverified**, and — separately — **cached-token pricing does not
+   exist for any provider** (Anthropic under-counts, OpenAI over-counts; Gemini 2.5 Pro's
+   200K-token tier isn't modeled). `mistral/mistral-large-latest`,
    `mistral/mistral-small-latest`, `groq/llama-3.3-70b-versatile`,
-   `groq/llama-3.1-8b-instant`, `moonshot/kimi-k2` (from earlier sessions), plus
-   `google/gemini-1.5-flash` and `google/gemini-1.5-pro` (added session 4 — see Session
-   Log — as *retired* entries so a real request against either one is priced rather than
-   silently metered at $0, but their exact numbers were not checked against a live page).
-   Follow `docs/runbooks/pricing-update.md` for all seven, then confirm:
+   `groq/llama-3.1-8b-instant`, `moonshot/kimi-k2`, `google/gemini-1.5-flash`,
+   `google/gemini-1.5-pro` (retired entries, session 4), `vertex/gemini-3.6-flash`,
+   `vertex/gemini-3.1-pro-preview` (session 5). Follow `docs/runbooks/pricing-update.md`
+   for the nine unverified rows, then confirm:
    ```bash
    grep -c 'UNVERIFIED.to_string()' apps/gateway/src/metering/pricing.rs   # must read 0
    ```
-2. **Load test not executed against a deployed instance.** In-process concurrency evidence
-   now exists (`tests/overhead_under_load.rs`: P99 1.27ms on a debug build, no network, no
-   real DB/Redis) — real, but not the same claim as `infra/loadtest/k6-gateway.js` against
+   The cached-token gap is a schema-level fix (a new `TokenUsage` dimension), not a
+   pricing-table update — see the audit artifact §1 (P0-05) before promising a customer
+   using prompt caching that their invoice is checkable against the provider's own bill.
+3. **The fallback chain has zero effective redundancy for the highest-value traffic — new,
+   session 5.** `FallbackChain::build`'s `alternates` parameter is hardcoded to `&[]` at
+   its only production call site. Combined with the router's own never-downgrade
+   guarantee, any request classified complex or sent with an explicit passthrough hint
+   gets exactly one provider attempt before hard failure — up to ~90s (360s for reasoning
+   models) of hang with no fallback, since there is also no outer request timeout anywhere
+   in the stack. See the audit artifact §7 (P0-04).
+4. **Load test not executed against a deployed instance.** In-process concurrency evidence
+   exists (`tests/overhead_under_load.rs`: P99 1.27ms on a debug build, no network, no real
+   DB/Redis) — real, but not the same claim as `infra/loadtest/k6-gateway.js` against
    staging at 1k RPS. Run the k6 script once a staging deployment exists, before repeating
    the sub-1ms claim to a customer under real network + database conditions.
-3. **Restore drill never executed.** No backup has ever been taken, so none has been
+5. **Restore drill never executed.** No backup has ever been taken, so none has been
    restored. `scripts/backup-restore-drill.sh` is written; it has not been run once.
+
+Fixed and verified closed, session 5 (kept here briefly for the record — no longer
+blocking): an SSRF chain from a zero-privilege signup to the gateway's own cloud
+infrastructure, and a silent metering-completeness gap that made the one dashboard panel
+built to detect billing loss structurally incapable of firing. Both have real regression
+tests. Full detail in the Session Log below and the audit artifact.
 
 ---
 
@@ -275,10 +411,14 @@ Covered by tests (not hand-executed against live infra):
    | **Outcome-trained bandit** | `engine/bandit.rs`, UCB1, a 3,000-step replay proving it beats static routing in isolation. `state.bandit.record(...)` **is** called live after every request. | The router never reads the bandit back to *make* a routing decision — it is a write-only data collector right now. The "outcome-trained routing intelligence" claim in `MEMORY.md` and the founder walkthrough artifact describes the intended behaviour, not the current one. |
    | **Budget threshold alerts** (Slack/webhook/email at 50/80/100%) | `workers/budget_alerts.rs`: `crossed_threshold()`, `render()`, `deliver()`, all tested. | None of it is called from the live budget-check path or from any worker. (The **weekly digest** is a different feature in the same file and *is* correctly wired via `workers/scheduler.rs` — do not confuse the two.) Needs a "last threshold alerted" watermark and a decision on whether detection happens inline (adds I/O risk to the 0.1ms-budgeted hot path) or via a periodic job (simpler, small delay). |
    | **TOTP two-factor auth** | `enterprise/totp.rs`, RFC 6238, correct and tested. `users.totp_secret_encrypted` exists in the schema. `users.totp_enabled` is read on every user fetch. | No repo function reads or writes `totp_secret_encrypted` at all. No enrollment endpoint (generate secret, show provisioning URI/QR, confirm a code). No verification step in `POST /api/auth/login`. This is the largest of the four — needs new endpoints, per-user encryption key derivation (existing crypto derives per-*tenant*, not per-*user*), and dashboard UI. |
+   | **Fallback chain (found session 5)** | `engine/fallback.rs::FallbackChain` — a 4-stage design (routed model → alternate provider, same model → tier down → …), fully implemented, tested with a real cross-provider alternate. | Its one production call site (`routes/openai_compat.rs`) hardcodes the `alternates` parameter to `&[]`. Combined with the router's never-downgrade guarantee, complex/passthrough requests — the highest-value traffic — get zero cross-provider redundancy; chain length collapses to 1, proven by the codebase's own existing test. Fix: populate `alternates` from the pricing table's cross-provider equivalents at the call site — small-medium, the hard part already exists. |
+   | **Streaming resilience (found session 5)** | Circuit breakers and `FallbackChain` both exist and work for non-streaming requests. | `stream_chat`/`stream_messages` have no retry loop, never call `FallbackChain`, and never call `state.health.record_success`/`record_failure` — confirmed by reading both functions directly. The circuit breaker never learns from streaming traffic at all, which is the literal reason the Anthropic-compatible endpoint exists (built to serve streaming-heavy clients). |
+   | **`workers::reconciliation::run` and the budget-alert delivery worker (found session 5)** | Both implemented and unit-tested. | Neither is ever spawned in `main.rs`. The reconciliation worker is specifically the second-layer check meant to catch drift between Redis and Postgres usage counters — the exact failure class the now-fixed metering-completeness metric (session 5) exists to catch at the first layer. Fix: spawn both — one line each, once their cadence/config is decided. |
 
    **Action needed:** decide priority and scope with the user before building further —
    these are feature-completion work of real size, not one-line fixes like the residency
-   wiring above was.
+   wiring above was. The fallback-chain and worker-spawning gaps are the two smallest to
+   close relative to their impact — see the audit artifact's "top 10" in §16.
 
 1. **Classifier V2 does not beat V1.** Both sit at 98% on the fixture set — 100
    hand-written cases cannot separate them. The test asserts "does not regress," not
@@ -300,28 +440,71 @@ Covered by tests (not hand-executed against live infra):
    what the system does; the legal framing needs a lawyer before it goes to a customer.
 6. **Pre-revenue, pre-incorporation.** No company entity, no cap table, no customers.
    `docs/investor/data-room-index.md` states this plainly rather than implying otherwise.
+7. **Operational blind spots found session 5 — none individually severe, all real.**
+   - **No distributed tracing anywhere**, and `x-aegis-request-id` is minted mid-handler
+     (after auth/rate-limit already ran) and then essentially never appears in a log line
+     — a support engineer holding a customer's own request ID cannot grep for it.
+   - **No alerting pipeline exists at all.** No Prometheus rule file, no Alertmanager, no
+     PagerDuty/Opsgenie integration. Every failure mode in this file relies on a human
+     reading a dashboard or a log at the right moment.
+   - **No idempotency key is sent to any upstream provider on retry.** Does not risk
+     double-billing a customer (a retried request never produces two billable responses on
+     our side), but can silently double-bill *our own* provider account when a timed-out
+     request actually succeeded upstream — exactly when providers are already degraded.
+   - **API keys can read broad org-wide management/billing data.** Not a cross-tenant leak
+     — `org_id` scoping holds — but any valid gateway API key (the kind meant for
+     inference traffic) can call every `require_reader` management endpoint: full member
+     roster, provider labels, complete spend data. No scoping mechanism narrows this today.
+   - **Postgres connection-pool math caps the fleet at roughly 8-10 replicas** with zero
+     headroom (N replicas × 20 connections ≤ the reference Postgres instance's connection
+     limit) — independent of Redis or CPU. This is the first hard scaling wall, not a soft
+     degradation; see the audit artifact §6 for the full breakdown by user count.
+
+   None of these block a first customer. All of them would surface in a real enterprise
+   security or SRE review. Full evidence for each: the audit artifact linked at the top of
+   this file.
 
 ---
 
 ## Next Steps (in order)
 
-1. **Fix the Docker install, then verify against real infrastructure.**
+Session 5's audit reprioritized this list around what would actually stop an enterprise
+deal — see the artifact's §16 "top 10" for the full reasoning. Merged with the
+infrastructure prerequisites carried over from session 3:
+
+1. **Fix the budget-check race** (launch blocker 1) — reserve-then-true-up or an atomic
+   increment-check-rollback, matching the rate limiter's already-proven pattern. The
+   single highest-priority code fix in the project right now.
+2. **Populate the fallback chain's `alternates`** (launch blocker 3) — small change, closes
+   the biggest reliability gap for the highest-value (complex/passthrough) traffic.
+3. **Spawn `workers::reconciliation::run`** in `main.rs` — one line, closes the second
+   layer of the metering-loss detection story now that the first layer (the completeness
+   metric) is fixed.
+4. **Add an outer request timeout** at the router level — small, bounds the worst case
+   from item 2 immediately even before that fix lands (currently unbounded up to ~90-360s).
+5. **Register the missing SSO callback route** (`/api/auth/sso/callback`) — small, unblocks
+   a feature that's otherwise fully built once the callback handler's completeness is
+   confirmed.
+6. **Fix the Docker install, then verify against real infrastructure** (carried over,
+   status unconfirmed since session 3):
    ```bash
    docker version   # must succeed before anything below is worth attempting
    docker compose -f infra/docker-compose.yml up -d
    export AEGIS_TEST_DATABASE_URL=postgres://aegis:aegis_dev_password@localhost:5432/aegis
+   export AEGIS_TEST_REDIS_URL=redis://localhost:6379   # session 5: confirm a test actually reads this
    cargo test --tests          # integration tests will now actually run, not skip
    ```
-2. **Seed and run the gateway with persistence**, sign up through the dashboard, mint a
-   key end to end, exercise the new pages (`/models`, `/policies`, `/budgets`, `/team`,
-   `/billing`) against the real API instead of the fixture server this session used.
-3. **Add the Gemini provider key** and confirm one live completion, checking the savings
-   figure by hand against Google's own billing.
-4. **Close the 5 remaining unverified pricing rows** (launch blocker 1).
-5. **Deploy to staging, run the k6 load test** (launch blocker 2), then **run the restore
-   drill** (launch blocker 3).
-6. Only after 1–5: consider the compliance items in `docs/compliance/soc2-readiness.md`
-   that require a live deployment (capacity monitoring, recovery testing).
+7. **Add the Gemini provider key** (and, new this session, a Vertex AI service-account key)
+   and confirm one live completion against each, checking the savings figure by hand
+   against the provider's own billing.
+8. **Close the 9 remaining unverified pricing rows** and **add the cached-token pricing
+   dimension** (launch blocker 2 — the second is a schema change, not a table update).
+9. **Deploy to staging, run the k6 load test**, then **run the restore drill** (launch
+   blockers 4-5).
+10. Only after 1–9: work through the rest of the audit's P1/P2 findings (streaming
+    resilience, idempotency keys to providers, a minimum-viable alerting layer, TOTP's full
+    build-out) and the compliance items in `docs/compliance/soc2-readiness.md` that require
+    a live deployment.
 
 ---
 
@@ -417,12 +600,123 @@ Each of these cost real time during the build.
   `C:\Program Files\Docker\Docker\` existed but contained only
   `tmp-delete\Docker Desktop Installer.exe...` — remnants of an interrupted install, no
   `docker.exe`, no daemon. Always confirm with `docker version`, not a directory listing.
+- **A default `#[tokio::test]` runs on one OS thread with cooperative scheduling, which can
+  silently mask a real race condition.** Found session 5: the first attempt at the
+  budget-race adversarial test used the default single-threaded runtime and did *not*
+  reproduce the bug ("admitted: 1", assertion passed) — which looked like proof the race
+  didn't exist, and would have been a false negative reported as a clean result. Tasks
+  scheduled on one thread tend to run each `check()`-then-`spend()` pair to completion
+  before yielding, hiding exactly the interleaving that causes the bug. Fixed by adding
+  `#[tokio::test(flavor = "multi_thread", worker_threads = 8)]` and a
+  `tokio::sync::Barrier` to force genuinely simultaneous execution — reproduced 8/8 runs
+  once real parallelism was forced. Any test whose entire point is proving a concurrency
+  bug needs to justify why single-threaded scheduling can't be hiding the thing it's
+  trying to prove.
+- **A gitignore's blanket `*.pem` rule blocks a legitimate throwaway test fixture just as
+  effectively as a real secret.** The Vertex AI JWT tests needed a committed (fake,
+  locally-generated, never-connected-to-a-real-account) RSA key to sign test assertions
+  against. Fixed with a narrow, explicitly-commented exception line immediately below the
+  blanket rule — not by renaming the file to dodge the pattern, which would have quietly
+  defeated the rule's actual intent for the next real `.pem` that shows up.
 
 ---
 
 ## Session Log
 
 Newest first.
+
+### 2026-08-25/26 — Session 5 — Claude Opus 5 / Sonnet 5
+
+User's request, quoted because the framing matters: *"Act as a brutally honest senior AI
+infrastructure architect, SRE, security engineer, and enterprise SaaS reviewer. Thoroughly
+audit this project as if we are preparing to sell it to large enterprise customers... Do
+not assume that something works just because it exists in the codebase... trace the actual
+execution paths, run tests where possible... Attempt to bypass these controls."* A 16-section
+spec followed (pricing/metering, Vertex AI integration, Redis retention, RBAC, observability,
+scalability, fallback/reliability, smart routing, budgets/rate-limiting, performance,
+enterprise deployment, testing, security, a 0-10 scorecard, categorized findings, final
+verdict).
+
+**Built Vertex AI as a tenth provider first** (`providers/vertex.rs`) — service-account
+JSON → self-signed RS256 JWT → OAuth2 exchange, cached per replica; delegates request/
+response handling to the existing `google::` functions rather than duplicating them.
+Required overriding `chat()`/`chat_stream()` entirely rather than extending the shared
+`Provider` trait, since real auth is async and every other provider's auth is a
+synchronous bearer token — the central design decision, recorded in
+`docs/adr/0007-vertex-ai-jwt-signing.md`. 14 new tests. Added Vertex pricing rows (2
+independently confirmed, 2 marked `UNVERIFIED`). Added a Vertex option to the dashboard's
+provider-connection page (multi-line JSON textarea instead of a single-line key field).
+
+**Then ran the audit** — direct code tracing plus four parallel focused investigations
+(observability/Redis, RBAC/security, fallback/routing, scalability/testing), each required
+to cite file:line evidence rather than assert conclusions, cross-checked against each
+other and against hands-on adversarial testing. Full report:
+**[Aegis Enterprise Readiness Audit](https://claude.ai/code/artifact/aa6e48d0-50e5-445f-a8c0-70417960003e)**
+— scorecard, 16 sections, and a P0-P3 findings list with Problem → Evidence → Business
+impact → Technical impact → Fix → Complexity for each.
+
+**Three P0s were serious enough to fix during the audit itself:**
+
+1. **SSRF, zero-privilege-signup to cloud metadata.** No provider adapter validated a
+   BYOK `base_url` before honoring it as a literal override. Full chain: free signup (no
+   review gate) → `POST /api/providers` with `base_url` pointed at
+   `169.254.169.254` → `POST /api/providers/{id}/test` makes the gateway itself issue the
+   request. Fixed with `middleware/ssrf_guard.rs` (resolve-then-classify against loopback/
+   RFC1918/link-local/CGN/IPv6-unique-local/IPv4-mapped-IPv6), wired into
+   `create_provider`. New integration test drives the real handler against a real database
+   and proves the chain is now rejected and nothing is persisted, plus that a legitimate
+   endpoint still works. Documented residual risk: validation-time, not connect-time, so
+   classic DNS rebinding isn't fully closed — stated in the module's own doc comment.
+2. **The metering-completeness metric couldn't detect metering incompleteness.**
+   `usage::emit`'s `Result` was discarded at all three call sites in
+   `routes/openai_compat.rs`; the Prometheus counter meant to catch "served but never
+   billed" incremented regardless of whether the write actually succeeded. Fixed to gate
+   the metric on genuine success and log failures with org/request context; mid-stream
+   provider failures now carry a real `error_type` instead of looking like a clean 200.
+   Independently corroborated: one of the four parallel investigations found the identical
+   bug at the identical call sites before either knew of the other's finding.
+3. **The compliance whitepaper's content-storage claim didn't match the code.**
+   `docs/compliance/security-whitepaper.md` described `content_capture` as an opt-in,
+   encrypted control. It's dead code — `zero_retention` is the only flag any code path
+   reads, and the exact-match cache stores plaintext prompts/completions in Redis for 24h
+   by default for every org that hasn't set it. Corrected in the document, with the
+   correction left visible rather than silently edited away.
+
+**Proved, did not fix — the budget-check race.** `budget::check()` reads spend and
+compares to the limit; nothing reserves it atomically. First attempt to reproduce under
+the default single-threaded test runtime did not trigger it (a methodologically important
+near-miss — see Gotchas). Rebuilt with genuine multi-thread parallelism and a `Barrier`
+forcing 20 simultaneous requests against a $1.00 hard limit with $0.05 headroom: **8 of 8
+runs bypassed the limit**, admitting 2-5 requests (15-45% overshoot) where at most 1
+should ever get through. Committed as `#[ignore]`d so `cargo test` stays green while the
+proof stays runnable on demand. Not fixed: the honest fix is a reserve-then-true-up
+redesign, not a bounded patch, and rushing it under audit time pressure would have traded
+one unverified claim ("it's atomic") for another ("the redesign is correct").
+
+**Found, not fixed, and now tracked** (full evidence in the artifact and in Known
+Limitations above): the fallback chain's only production call site hardcodes zero
+alternates, collapsing resilience to one attempt for exactly the highest-value traffic;
+streaming has no retry/fallback and never updates circuit-breaker health; cached-token
+pricing doesn't exist for Anthropic or OpenAI and Gemini 2.5 Pro's 200K-token tier isn't
+modeled; the SSO callback route is never registered so login cannot complete;
+`workers::reconciliation::run` and the budget-alert worker are never spawned; Redis's
+atomic guarantees have never been tested against real Redis (only `MemoryStore`); no
+distributed tracing, no alerting pipeline, no idempotency keys sent to providers; API keys
+can read broad org-wide management data; Postgres connection math caps the fleet at
+roughly 8-10 replicas.
+
+Also fixed while merging in two pre-existing bugs surfaced by the two collaborator-added
+Gemini models from session 4 landing in the pricing-drift tests: a substring-prefix
+collision (`openai/gpt-4o` matching `openai/gpt-4o-mini`) in
+`workers/scheduler.rs`'s drift-report matching, and the hardcoded provider/model counts in
+two tests that needed to move from 9→10 providers and 7→9 unverified rows.
+
+Docker still unavailable this session (status unconfirmed since session 3, not re-checked).
+No provider keys supplied (Gemini or Vertex). Verification run this session, on this
+machine: `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings` clean,
+`cargo test` → 708 lib passing + 730 full-suite passing, 0 failing, 1 intentionally
+ignored; `npm run lint` and `npm run build` clean (23 static routes). Pushed both commits
+(`d86cea9` Vertex AI, `453641b` the three fixes + the budget-race proof) to `origin/main`.
 
 ### 2026-08-24 — Session 4 — Claude Opus 5
 

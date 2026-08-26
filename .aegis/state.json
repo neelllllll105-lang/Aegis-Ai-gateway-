@@ -2,116 +2,170 @@
   "$comment": "Machine-readable project state. The human-readable companion is MEMORY.md; keep the two in agreement. Validated by scripts/check-memory-freshness.sh in CI.",
   "schema_version": 1,
   "project": "aegis",
-  "last_updated": "2026-08-21",
-  "current_phase": 4,
-  "next_task": "Reinstall Docker Desktop (the existing install directory has only leftover installer files, no working docker.exe), then run the integration tests against real Postgres/Redis, then verify one live provider completion end to end with a Gemini key.",
+  "last_updated": "2026-08-26",
+  "current_phase": 2,
+  "next_task": "Fix the budget-check race (apps/gateway/src/middleware/budget.rs::check() is not atomic under concurrency -- proven, 8/8 runs, see the session 5 audit and the #[ignore]'d concurrent_requests_can_overshoot_a_hard_budget test). Then populate FallbackChain's alternates at its production call site (routes/openai_compat.rs, currently hardcoded to &[]). Then spawn workers::reconciliation::run and the budget-alert worker in main.rs. Full priority order: MEMORY.md 'Next Steps' / audit artifact section 16.",
+  "audit": {
+    "id": "session-5-enterprise-readiness-audit",
+    "date": "2026-08-25",
+    "artifact_url": "https://claude.ai/code/artifact/aa6e48d0-50e5-445f-a8c0-70417960003e",
+    "method": "direct code tracing + 4 parallel focused investigations + adversarial tests actually executed, not documentation review",
+    "scorecard_overall": "4/10 production readiness",
+    "p0_findings_total": 5,
+    "p0_findings_fixed_during_audit": 3,
+    "p0_findings_open": 2,
+    "p0_open_ids": ["budget-check-race", "cached-token-pricing-gap", "fallback-chain-hardcoded-empty"],
+    "p0_fixed_ids": ["ssrf-via-byok-base-url", "metering-completeness-metric-blind", "compliance-whitepaper-content-storage-claim"]
+  },
   "phases": [
     {
       "id": 0,
       "name": "Foundation",
       "status": "complete",
-      "evidence": "Workspace, full schema migrations with monthly partitioning, typed config, CI, health endpoints verified against a running gateway, ADRs 001-006."
+      "evidence": "Workspace, full schema migrations with monthly partitioning, typed config, CI, health endpoints verified against a running gateway, ADRs 001-007 (007 added session 5, Vertex AI JWT signing)."
     },
     {
       "id": 1,
       "name": "Auth, keys, orgs",
       "status": "complete",
-      "evidence": "argon2id auth, sessions, API key CRUD with LRU+Redis+PG tiers, audit log, org/member management, dashboard signup/login/keys pages. 14 integration tests written (run in CI)."
+      "evidence": "argon2id auth, sessions, API key CRUD with LRU+Redis+PG tiers, audit log, org/member management, dashboard signup/login/keys pages. 14+ integration tests written (run in CI). Session 5 note: API keys meant for inference traffic can read broad org-wide management/billing data via require_reader endpoints -- not a cross-tenant leak, but a wider read boundary than an 'inference key' implies, with no scoping mechanism to narrow it."
     },
     {
       "id": 2,
       "name": "Core gateway",
-      "status": "complete",
-      "evidence": "Nine provider adapters, full twelve-stage pipeline, rate limiting, budgets, BYOK, shared key pool, usage worker, Prometheus metrics, Grafana dashboard."
+      "status": "in_progress",
+      "evidence": "Ten provider adapters (Vertex AI added session 5), full twelve-stage pipeline, rate limiting (proven atomic -- 50 racing callers against a limit of 10 admit exactly 10), budgets, BYOK, shared key pool, usage worker, Prometheus metrics, Grafana dashboard. Session 5: fixed an SSRF vulnerability (BYOK base_url reaching cloud metadata from a zero-privilege signup) and a silent metering-completeness bug (the one metric built to detect billing loss couldn't, because usage::emit's Result was discarded).",
+      "remaining": [
+        "Budget checking is not atomic under concurrency -- proven, not theorised. budget::check() reads spend and compares to the limit; the counter increments later, separately. Reproduced 8/8 runs under genuine multi-thread parallelism: 20 concurrent requests against a $1.00 hard limit with $0.05 headroom admitted 2-5 (15-45% overshoot). Applies identically to all four budget scopes (key/team/region/org). Fix needs a reserve-then-true-up or atomic increment-check-rollback redesign matching the rate limiter's already-proven pattern. This is the single highest-priority open finding from the session 5 audit (P0-01).",
+        "No idempotency key is sent to any upstream provider on retry -- a retried timeout can silently double-bill Aegis's own provider account (not the customer)."
+      ]
     },
     {
       "id": 3,
       "name": "Optimization engine",
       "status": "in_progress",
-      "evidence": "Classifier 98% on 100 labelled fixtures, router with conservative defaults, exact cache, compressor, circuit breakers, savings attribution. verify-phase.sh 3 passes. Semantic cache (cache/semantic.rs, 624 lines, 15 tests, Qdrant-backed) is fully implemented and tested but -- found by a session 3 audit -- was never called from the live pipeline: no embedding is generated for an inbound request, CacheOutcome::Semantic is never produced outside tests. Downgraded from 'complete' to 'in_progress' to reflect this; it was marked complete in error.",
+      "evidence": "Classifier 98% on 100 labelled fixtures, router with conservative defaults, exact cache, compressor. verify-phase.sh 3 passes. Semantic cache (cache/semantic.rs, 624 lines, 15 tests, Qdrant-backed) is fully implemented and tested but -- found by a session 3 audit -- was never called from the live pipeline. Session 5 audit found the fallback chain and streaming resilience have the same 'built but not effectively wired' shape.",
       "remaining": [
-        "Wire cache/semantic.rs into the pipeline: generate an embedding on a cache miss, call SemanticCache::lookup(), produce CacheOutcome::Semantic. This is a product decision as much as a code change -- it adds an embedding-API call and its latency to every cache-miss request, which needs sign-off before implementing."
+        "Wire cache/semantic.rs into the pipeline -- a product decision (adds embedding-API latency to every cache-miss request) as much as a code change.",
+        "Populate FallbackChain's alternates parameter at its one production call site (routes/openai_compat.rs, hardcoded to &[] today). Combined with the router's never-downgrade guarantee, complex/passthrough requests get zero cross-provider redundancy -- chain length collapses to 1, proven by the codebase's own test. Session 5 audit finding P0-04.",
+        "Streaming (stream_chat/stream_messages) has no retry, no fallback, and never calls state.health.record_success/record_failure -- the circuit breaker never learns from streaming traffic. Session 5 audit finding P1-01.",
+        "Add an outer request timeout at the router level -- currently unbounded, up to ~90s (360s for reasoning models) per fallback-chain entry with no outer deadline anywhere in the stack."
       ]
     },
     {
       "id": 4,
       "name": "Dashboards, billing, launch prep",
       "status": "in_progress",
-      "evidence": "Stripe webhook verification, invoice assembly with an independent fee-consistency check, budget enforcement (hard/soft limits actually block requests), admin console, landing page, docs, savings CSV export, runbooks. All 12 dashboard pages built and browser-verified (models/policies/budgets/team/billing added session 2). tests/overhead_under_load.rs measures real pipeline overhead under 64-way concurrency: P99 1.27ms on a debug build.",
+      "evidence": "Stripe webhook verification, invoice assembly with an independent fee-consistency check, budget enforcement (single-request blocking genuinely works; see phase 2 for the concurrency caveat), admin console, landing page, docs, savings CSV export, runbooks. All 12 dashboard pages built and browser-verified. tests/overhead_under_load.rs measures real pipeline overhead under 64-way concurrency: P99 1.27ms on a debug build -- gateway overhead only, explicitly excludes provider time.",
       "remaining": [
-        "P4.8 EXECUTE infra/loadtest/k6-gateway.js against a deployed instance (1k RPS over a real network + database) — the in-process concurrency test is real evidence but is a narrower claim",
-        "P4.2 was marked complete for 'budget alert delivery (email, Slack webhook)' -- session 3 audit found the delivery machinery (workers/budget_alerts.rs: crossed_threshold/render/deliver) is implemented and tested but never called from any live path. Budget *enforcement* (blocking requests) genuinely works; budget *notification* on crossing 50/80/100% does not yet fire. Needs a decision on inline vs periodic-job detection before wiring."
+        "P4.8 EXECUTE infra/loadtest/k6-gateway.js against a deployed instance (1k RPS over a real network + database) -- the in-process concurrency test is real evidence but is a narrower claim. Session 5: TTFT, tokens/sec, and provider-to-provider comparisons also remain unmeasured -- none possible without live provider accounts.",
+        "P4.2 budget alert delivery (email, Slack webhook) -- workers/budget_alerts.rs is implemented and tested but never called from any live path, and (found session 5) never spawned as a worker in main.rs at all."
       ]
     },
     {
       "id": 5,
       "name": "Launch + provider expansion",
       "status": "complete",
-      "evidence": "All five expansion providers tested. Classifier v2 trained via a real dump/fit pipeline. Status page endpoint. Launch playbook written. Weekly digest now sent by workers/scheduler.rs with a distributed claim (64-way concurrency test proves exactly one replica ever wins a period). Referral program: two-sided credit, self-referral and double-claim guards. CHANGELOG.md written."
+      "evidence": "All five original expansion providers tested. Classifier v2 trained via a real dump/fit pipeline. Status page endpoint. Launch playbook written. Weekly digest sent by workers/scheduler.rs with a distributed claim (64-way concurrency test proves exactly one replica ever wins a period). Referral program. CHANGELOG.md written. Session 5: Vertex AI (Google Cloud) added as a tenth provider -- service-account JWT auth, delegates request/response handling to the existing google.rs adapter, 14 tests, docs/adr/0007-vertex-ai-jwt-signing.md. Not yet verified against a real GCP project (no service account key supplied)."
     },
     {
       "id": 6,
       "name": "Enterprise readiness",
       "status": "in_progress",
-      "evidence": "Offline license validation with grace period, SCIM 2.0 shapes handling both Okta and Entra deprovisioning, SSO assertion validation with replay detection, per-tenant HKDF keys, region pinning, admin TOTP algorithm with the RFC 6238 vector. SCIM/SSO HTTP routes now wired and reachable (tests/route_surface.rs). Data residency enforcement now genuinely wired into all three authenticated entry points as of session 3 (previously implemented+tested but never called live) with 4 wiring-proof tests. Compliance pack written (docs/compliance/): security whitepaper, subprocessor list, DPA template, data-flow doc, honest SOC 2 gap analysis. Read replica routing live (AppState::analytics_db()). Self-hosted docker-compose + web Dockerfile added.",
+      "evidence": "Offline license validation with grace period, SCIM 2.0 shapes handling both Okta and Entra deprovisioning, SSO assertion validation logic correct and tested (audience/issuer/expiry/replay), per-tenant HKDF keys, region pinning enforcement genuinely wired (session 3). Compliance pack written and corrected session 5 (security whitepaper's content_capture claim didn't match the code -- fixed). Read replica routing live. Self-hosted docker-compose + web Dockerfile added.",
       "remaining": [
-        "Verify SSO/SCIM against a real Okta or Entra tenant — never done, only shape-tested",
-        "TOTP: algorithm is correct and tested but has no repo layer (totp_secret_encrypted is never read/written), no enrollment endpoint, and no login-time verification — 2FA cannot actually be turned on today"
+        "SSO cannot functionally complete -- found session 5. Assertion validation is correct, but sso_start builds a callback to /api/auth/sso/callback and that route is never registered anywhere in the router. A real login has nowhere to land. Small fix once the callback handler's own completeness is confirmed.",
+        "Verify SSO/SCIM against a real Okta or Entra tenant -- never done, only shape-tested, and SSO can't complete end to end yet regardless (see above).",
+        "TOTP: algorithm is correct and tested but has no repo layer, no enrollment endpoint, and no login-time verification -- 2FA cannot actually be turned on today.",
+        "SCIM tokens have no self-service provisioning route -- correctly built and isolated, but mintable only by a direct database write."
       ]
     },
     {
       "id": 7,
       "name": "Scale + moat",
       "status": "in_progress",
-      "evidence": "UCB1 outcome bandit with a 3000-step replay showing it beats static routing in a standalone simulation -- NOTE (session 3 audit): the live router records outcomes into the bandit but never reads it back to make a routing decision, so it has zero effect on production traffic today; this is a real gap, not a documentation error. TypeScript and Python SDKs, both verified. Regional budgets (fourth scope, isolated per org+region, case-insensitive). Nightly pricing-drift job (reports, never auto-applies). Spend anomaly detection (z-score against org's own 30-day baseline) surfaced at GET /api/usage/anomalies and on the /budgets page. Cost-center chargeback in JSON and CSV. Investor pack (docs/investor/): metrics definitions naming their source code, data-room index.",
+      "evidence": "UCB1 outcome bandit with a 3000-step replay showing it beats static routing in a standalone simulation -- the live router records outcomes into the bandit but never reads it back to make a routing decision, so it has zero effect on production traffic today (session 3 finding, re-confirmed session 5 by reading engine/router.rs directly). TypeScript and Python SDKs, both verified. Regional budgets. Nightly pricing-drift job. Spend anomaly detection. Cost-center chargeback. Investor pack. Session 5: a session-5 audit found Postgres connection-pool math (N replicas x 20 connections against the reference instance's connection cap) hard-limits the fleet to roughly 8-10 replicas with zero headroom, independent of Redis or CPU -- the first real scaling wall.",
       "remaining": [
-        "Wire the bandit's learned policy back into engine/router.rs's routing decision -- currently write-only"
+        "Wire the bandit's learned policy back into engine/router.rs's routing decision -- currently write-only.",
+        "A connection-pooling proxy (PgBouncer or equivalent) or a larger reference instance class is needed before scaling meaningfully past ~10 replicas -- neither exists in this codebase today."
       ]
     }
   ],
   "blockers": [
     {
       "id": "docker-unavailable",
-      "summary": "Docker Desktop is not functional on this build machine. Checked this session: C:\\Program Files\\Docker\\Docker\\ contains only tmp-delete\\Docker Desktop Installer.exe... (leftover installer fragments), no docker.exe, no daemon. The install did not complete.",
-      "impact": "Nothing has been verified against live Postgres, Redis, or Qdrant. The 14+ integration tests compile and skip locally; CI runs them against service containers.",
+      "summary": "Docker Desktop was not functional on the build machine as of session 3 (installer fragments only, no docker.exe, no daemon). Not re-checked session 5.",
+      "impact": "Nothing has been verified against live Postgres, Redis, or Qdrant. Integration tests compile and skip locally; CI runs them against service containers. Session 5 finding: even in CI, no test reads the Redis env var CI provisions -- every concurrency proof (rate limiter, scheduler claim, the new budget-race proof) has only ever run against store::MemoryStore, never real Redis.",
       "workaround": "Reinstall Docker Desktop from scratch and confirm with `docker version` (not a directory listing) before assuming it works. The gateway compiles and unit-tests with no external service in the meantime."
     },
     {
       "id": "no-provider-keys",
-      "summary": "No real provider API key has been supplied. User selected Google Gemini via AskUserQuestion in an earlier session but has not yet provided the key.",
-      "impact": "The pipeline is verified against a mock provider only, including the new 64-concurrency load test.",
-      "workaround": "Add one key and send a single request; the savings figure can then be checked against the provider's own billing."
+      "summary": "No real provider API key has been supplied for any provider, including the newly-added Vertex AI (which needs a GCP service-account JSON key, not an API key).",
+      "impact": "The pipeline is verified against a mock provider only. TTFT, tokens/sec, and any real cross-provider performance comparison remain entirely unmeasured -- not estimated, not claimed.",
+      "workaround": "Add one key (Gemini) and one GCP service account (Vertex) and send a single request each; the savings figure and Vertex's live token exchange can then be checked for real."
     }
   ],
   "launch_blockers": [
     {
-      "id": "pricing-partially-unverified",
-      "summary": "5 of 38 priced models remain marked UNVERIFIED: mistral/mistral-large-latest, mistral/mistral-small-latest, groq/llama-3.3-70b-versatile, groq/llama-3.1-8b-instant, moonshot/kimi-k2. The other 33 were checked against live provider pages in an earlier session and carry a checked date.",
-      "impact": "Every savings figure and invoice line for these 5 models depends on unverified numbers.",
-      "action": "Follow docs/runbooks/pricing-update.md for the 5 remaining rows before billing any customer using them. Verify with: grep -c 'UNVERIFIED.to_string()' apps/gateway/src/metering/pricing.rs (must read 0)."
+      "id": "budget-check-race",
+      "summary": "budget::check() is not atomic under concurrency -- proven with real numbers, session 5. 20 concurrent requests against a $1.00 hard limit with $0.05 headroom admitted 2-5 of them (15-45% overshoot) in 8 of 8 runs under genuine multi-thread parallelism. Applies to all four budget scopes.",
+      "impact": "A customer's stated hard spending ceiling is not reliably enforced under exactly the condition (bursty/concurrent/retried traffic) it exists to protect against.",
+      "action": "Redesign to a reserve-then-true-up or atomic increment-check-rollback model, matching the rate limiter's already-proven atomic Lua-script pattern. See apps/gateway/src/middleware/budget.rs::concurrent_requests_can_overshoot_a_hard_budget for the reproduction."
+    },
+    {
+      "id": "pricing-partially-unverified-and-incomplete",
+      "summary": "9 of the priced models remain marked UNVERIFIED (mistral x2, groq x2, moonshot/kimi-k2, google/gemini-1.5-flash, google/gemini-1.5-pro, vertex/gemini-3.6-flash, vertex/gemini-3.1-pro-preview). Separately and more importantly (session 5): no provider's pricing accounts for cached tokens at all, and Gemini 2.5 Pro's 200K-token pricing tier isn't modeled.",
+      "impact": "Every savings figure and invoice line for the 9 unverified models depends on unconfirmed numbers. Any customer using prompt caching (a common pattern, not an edge case) gets a wrong actual_cost today -- Anthropic under-counted, OpenAI over-counted.",
+      "action": "Follow docs/runbooks/pricing-update.md for the 9 remaining rows. Separately, add a cached-token dimension to TokenUsage and a cache-rate pair to ModelPricing -- a schema-level fix, not a table update. Verify with: grep -c 'UNVERIFIED.to_string()' apps/gateway/src/metering/pricing.rs (must read 0)."
+    },
+    {
+      "id": "fallback-chain-hardcoded-empty",
+      "summary": "FallbackChain::build's alternates parameter is hardcoded to &[] at its one production call site (routes/openai_compat.rs). Combined with the router's never-downgrade guarantee, complex/passthrough requests get zero cross-provider redundancy and no outer request timeout bounds the resulting hang (up to ~90-360s).",
+      "impact": "A routine provider hiccup -- not even severe enough to trip the 5-failure circuit breaker -- can hang exactly the highest-value requests for minutes with total failure and no fallback.",
+      "action": "Populate alternates from the pricing table's cross-provider equivalents at the call site; add an outer request timeout at the router level. The FallbackChain logic itself is already built and tested."
     },
     {
       "id": "load-test-not-run-against-deployment",
-      "summary": "infra/loadtest/k6-gateway.js has never been executed against a deployed instance. tests/overhead_under_load.rs now provides real in-process evidence (P99 1.27ms, 64-way concurrency, mock provider, debug build) but this excludes network, real DB/Redis contention, and does not reach 1k RPS.",
-      "impact": "The sub-1ms P99 overhead claim on the landing page is now partially substantiated, not purely a design target, but the full production-conditions claim is still unverified.",
-      "action": "Deploy to staging and run infra/loadtest/k6-gateway.js; record the measured P99 before repeating the claim under production-network conditions."
+      "summary": "infra/loadtest/k6-gateway.js has never been executed against a deployed instance. tests/overhead_under_load.rs provides real in-process evidence (P99 1.27ms, 64-way concurrency, mock provider, debug build) but this excludes network, real DB/Redis contention, and does not reach 1k RPS.",
+      "impact": "The sub-1ms P99 overhead claim on the landing page is partially substantiated (gateway overhead only), not purely a design target, but the full production-conditions claim and any TTFT/tokens-per-second/provider-comparison claim remain entirely unverified.",
+      "action": "Deploy to staging and run infra/loadtest/k6-gateway.js; record the measured P99 before repeating any performance claim under production-network conditions."
     },
     {
       "id": "restore-drill-not-run",
       "summary": "No backup has ever been taken, so none has ever been restored.",
-      "impact": "Part 13 item 6: an untested backup is not a backup. This is also the single largest gap flagged in docs/compliance/soc2-readiness.md (Availability criterion A1.3).",
+      "impact": "An untested backup is not a backup. Also the largest gap flagged in docs/compliance/soc2-readiness.md (Availability criterion A1.3).",
       "action": "Run scripts/backup-restore-drill.sh once a database exists and record the result in MEMORY.md."
     }
   ],
+  "fixed_this_session": [
+    {
+      "id": "ssrf-via-byok-base-url",
+      "summary": "A zero-privilege free-tier signup could register a BYOK provider with base_url pointed at 169.254.169.254 (cloud metadata); the gateway's own credential-test endpoint would issue the request server-side. Fixed with middleware/ssrf_guard.rs (resolve-then-classify against loopback/RFC1918/link-local/CGN/IPv6-unique-local/IPv4-mapped-IPv6), wired into create_provider. Proven closed by a new integration test against the real handler and a real database. Residual, documented risk: validation-time not connect-time, so DNS rebinding is not fully closed."
+    },
+    {
+      "id": "metering-completeness-metric-blind",
+      "summary": "usage::emit's Result was discarded at all three call sites in routes/openai_compat.rs, so the Prometheus metric built to detect 'served but never billed' incremented regardless of whether the write actually succeeded. Fixed to gate the metric on success and log failures with context; stream failures now carry a real error_type."
+    },
+    {
+      "id": "compliance-whitepaper-content-storage-claim",
+      "summary": "docs/compliance/security-whitepaper.md described content_capture as an opt-in, encrypted content-storage control. It is dead code; only zero_retention gates anything, and the exact-match cache stores plaintext content in Redis for 24h by default. Corrected in the document with the correction left visible."
+    }
+  ],
   "verification": {
-    "unit_tests": 682,
+    "unit_tests_lib": 708,
+    "unit_tests_lib_ignored": 1,
     "unit_tests_passing": true,
-    "full_test_suite_total": 702,
-    "integration_tests_written": 14,
+    "full_test_suite_total": 730,
+    "full_test_suite_ignored": 1,
+    "integration_tests_written": 16,
     "integration_tests_run_locally": false,
+    "integration_tests_run_against_real_redis": false,
     "route_surface_test_passing": true,
     "concurrency_overhead_test_passing": true,
     "concurrency_overhead_p99_ms": 1.27,
+    "budget_race_reproduced": true,
+    "budget_race_reproduction_runs": "8/8",
+    "ssrf_exploit_chain_proven_and_fixed": true,
     "clippy_clean": true,
     "fmt_clean": true,
     "web_builds": true,
@@ -121,7 +175,9 @@
     "load_test_executed_against_deployment": false,
     "restore_drill_executed": false,
     "live_provider_verified": false,
+    "vertex_ai_live_verified": false,
     "docker_functional_on_build_machine": false,
-    "phase_tasks_complete": "68/69"
+    "phase_tasks_complete": "63/69",
+    "providers_registered": 10
   }
 }
