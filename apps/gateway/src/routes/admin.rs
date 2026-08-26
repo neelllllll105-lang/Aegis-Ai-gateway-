@@ -11,10 +11,11 @@ use crate::error::{AegisError, Result};
 use crate::middleware::auth::{self, AuthContext};
 use crate::workers::reconciliation;
 use crate::AppState;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use serde::Deserialize;
 
 /// Authenticate and require staff privileges.
 async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<AuthContext> {
@@ -152,11 +153,46 @@ pub async fn pricing_table(State(state): State<AppState>, headers: HeaderMap) ->
 }
 
 /// `GET /api/admin/audit` — the audit log for the acting organisation.
-pub async fn audit_log(State(state): State<AppState>, headers: HeaderMap) -> Response {
+#[derive(Debug, Deserialize)]
+pub struct AdminAuditQuery {
+    /// Which organisation to inspect. Defaults to the calling admin's own — which is
+    /// almost never the org a support investigation actually needs, since staff accounts
+    /// are not usually members of the customer organisation they are helping.
+    pub org_id: Option<uuid::Uuid>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// `GET /api/admin/audit?org_id=...`
+///
+/// Before `org_id` existed as a parameter here, this endpoint could only ever show the
+/// calling admin's *own* organisation's audit log — useless for the purpose the endpoint
+/// exists for, which is a staff member investigating a *customer's* issue. A platform
+/// admin's own org membership has nothing to do with which customer they are looking at.
+/// Found in the enterprise readiness audit.
+///
+/// Scoping is enforced by `is_admin` alone, deliberately: this is the one place in the
+/// codebase where reading *any* organisation's data on request is the correct behaviour,
+/// not a tenant-isolation violation — the same trust boundary every other staff-only admin
+/// endpoint in this file already sits behind.
+pub async fn audit_log(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AdminAuditQuery>,
+) -> Response {
     match async {
         let context = require_admin(&state, &headers).await?;
-        let entries = repo::list_audit_logs(state.db()?, context.org_id, 500, 0).await?;
-        Ok::<_, AegisError>(Json(serde_json::json!({"entries": entries})).into_response())
+        let org_id = query.org_id.unwrap_or(context.org_id);
+        let entries = repo::list_audit_logs(
+            state.db()?,
+            org_id,
+            query.limit.unwrap_or(500),
+            query.offset.unwrap_or(0),
+        )
+        .await?;
+        Ok::<_, AegisError>(
+            Json(serde_json::json!({"org_id": org_id, "entries": entries})).into_response(),
+        )
     }
     .await
     {
@@ -222,7 +258,16 @@ mod tests {
             system_metrics(State(state.clone()), headers.clone()).await,
             routing_intelligence(State(state.clone()), headers.clone()).await,
             pricing_table(State(state.clone()), headers.clone()).await,
-            audit_log(State(state.clone()), headers.clone()).await,
+            audit_log(
+                State(state.clone()),
+                headers.clone(),
+                Query(AdminAuditQuery {
+                    org_id: None,
+                    limit: None,
+                    offset: None,
+                }),
+            )
+            .await,
         ] {
             assert!(
                 response.status() == StatusCode::UNAUTHORIZED

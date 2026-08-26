@@ -116,6 +116,7 @@ fn advertised_routes() -> Vec<(&'static str, &'static str)> {
         ("GET", "/api/usage/chargeback.csv"),
         ("GET", "/api/requests"),
         ("GET", "/api/savings/report.csv"),
+        ("GET", "/api/audit-log.jsonl"),
         // Billing.
         ("GET", "/api/billing/plan"),
         ("GET", "/api/billing/credits"),

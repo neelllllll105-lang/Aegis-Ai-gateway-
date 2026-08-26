@@ -107,6 +107,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/savings/report.csv",
             get(management::savings_report_csv),
         )
+        // A customer's own audit trail. `/api/admin/audit` existed but is gated by
+        // `is_admin` (platform staff), so no customer could ever reach it — the
+        // compliance whitepaper's "audit log export (JSONL, SIEM-friendly)" described a
+        // capability nothing in the router actually provided. Found in the enterprise
+        // readiness audit.
+        .route("/api/audit-log.jsonl", get(management::audit_log_export))
         .route("/api/billing/plan", get(management::billing_plan))
         .route("/api/billing/credits", get(management::list_credits))
         .route("/api/billing/referral", post(management::claim_referral))

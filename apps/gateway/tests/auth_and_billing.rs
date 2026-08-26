@@ -875,3 +875,164 @@ async fn a_scim_token_is_scoped_to_the_organisation_that_issued_it() {
     cleanup(&pool, &owner).await;
     cleanup(&pool, &other).await;
 }
+
+// -----------------------------------------------------------------------------
+// Audit log export and admin-scoped investigation, end to end against real handlers and
+// a real database.
+//
+// /api/admin/audit existed but could only ever show the calling admin's own
+// organisation's log -- useless for its stated purpose (staff investigating a customer).
+// No customer-facing audit export existed at all, despite the compliance whitepaper
+// describing one. Found in the enterprise readiness audit.
+// -----------------------------------------------------------------------------
+
+async fn make_platform_admin(pool: &sqlx::PgPool, fixture: &common::Fixture) {
+    sqlx::query("UPDATE users SET is_admin = true WHERE id = $1")
+        .bind(fixture.user_id)
+        .execute(pool)
+        .await
+        .expect("grant admin");
+}
+
+#[tokio::test]
+async fn a_customer_can_export_their_own_audit_log() {
+    use aegis_gateway::routes::management;
+    use axum::extract::{Query, State};
+
+    let Some((state, pool)) = setup().await else {
+        return skip("a_customer_can_export_their_own_audit_log");
+    };
+
+    let fixture = create_org(&pool, "audit-export").await;
+    let headers = owner_session_headers(&pool, &fixture).await;
+
+    // Do something that actually writes an audit entry.
+    let _ = management::create_scim_token(State(state.clone()), headers.clone()).await;
+
+    let response = management::audit_log_export(
+        State(state),
+        headers,
+        Query(management::AuditLogQuery {
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap(),
+        "application/x-ndjson; charset=utf-8"
+    );
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    assert!(!lines.is_empty(), "expected at least one audit entry");
+    for line in &lines {
+        let parsed: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("line was not valid JSON ({e}): {line}"));
+        assert_eq!(
+            parsed["org_id"],
+            fixture.org_id.to_string(),
+            "every line must belong to the exporting organisation"
+        );
+    }
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn an_ordinary_member_cannot_reach_the_admin_audit_endpoint() {
+    let Some((state, pool)) = setup().await else {
+        return skip("an_ordinary_member_cannot_reach_the_admin_audit_endpoint");
+    };
+    use aegis_gateway::routes::admin;
+    use axum::extract::{Query, State};
+
+    let fixture = create_org(&pool, "not-an-admin").await;
+    let headers = owner_session_headers(&pool, &fixture).await;
+
+    let response = admin::audit_log(
+        State(state),
+        headers,
+        Query(admin::AdminAuditQuery {
+            org_id: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::NOT_FOUND,
+        "an org owner who is not platform staff must not reach the admin surface"
+    );
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn a_platform_admin_can_inspect_a_different_organisations_audit_log() {
+    // The actual fix: an admin's own org membership must not determine which customer
+    // they can investigate.
+    use aegis_gateway::routes::{admin, management};
+    use axum::extract::{Query, State};
+
+    let Some((state, pool)) = setup().await else {
+        return skip("a_platform_admin_can_inspect_a_different_organisations_audit_log");
+    };
+
+    let staff = create_org(&pool, "staff-account").await;
+    make_platform_admin(&pool, &staff).await;
+    let staff_headers = owner_session_headers(&pool, &staff).await;
+
+    let customer = create_org(&pool, "customer-being-investigated").await;
+    let customer_headers = owner_session_headers(&pool, &customer).await;
+    // Give the customer's org a real audit entry to find.
+    let _ = management::create_scim_token(State(state.clone()), customer_headers.clone()).await;
+
+    // Without org_id: defaults to the admin's own org, which has no entries.
+    let response = admin::audit_log(
+        State(state.clone()),
+        staff_headers.clone(),
+        Query(admin::AdminAuditQuery {
+            org_id: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await;
+    let body = body_json(response).await;
+    assert_eq!(body["org_id"], staff.org_id.to_string());
+    assert!(
+        body["entries"].as_array().unwrap().is_empty(),
+        "the staff account's own org has no activity"
+    );
+
+    // With org_id set to the customer: this is the fix. Before it, there was no way to
+    // ever reach this data through the endpoint at all.
+    let response = admin::audit_log(
+        State(state),
+        staff_headers,
+        Query(admin::AdminAuditQuery {
+            org_id: Some(customer.org_id),
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await;
+    let body = body_json(response).await;
+    assert_eq!(body["org_id"], customer.org_id.to_string());
+    assert!(
+        !body["entries"].as_array().unwrap().is_empty(),
+        "a platform admin must be able to inspect a customer's audit log by org_id"
+    );
+
+    cleanup(&pool, &staff).await;
+    cleanup(&pool, &customer).await;
+}

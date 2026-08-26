@@ -1877,6 +1877,71 @@ pub async fn savings_report_csv(
     }
 }
 
+/// `GET /api/audit-log.jsonl`
+///
+/// A customer's own audit trail, one JSON object per line — the shape a SIEM ingests
+/// directly, no client-side parsing of a wrapping array required.
+///
+/// This did not exist before this session. `/api/admin/audit` existed, but it is gated by
+/// `is_admin` — a platform-staff flag, not an organisation role — so no customer could
+/// ever reach it, and the compliance whitepaper's "audit log export (JSONL, SIEM-friendly)"
+/// described a capability nothing in the router actually provided. Found in the enterprise
+/// readiness audit, alongside the related finding that the *admin* endpoint was also
+/// scoped to the wrong organisation for its own stated purpose.
+pub async fn audit_log_export(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AuditLogQuery>,
+) -> Response {
+    match async {
+        let context = require_reader(&state, &headers).await?;
+        let entries = repo::list_audit_logs(
+            state.analytics_db()?,
+            context.org_id,
+            query.limit.unwrap_or(1_000),
+            query.offset.unwrap_or(0),
+        )
+        .await?;
+
+        let mut jsonl = String::new();
+        for entry in &entries {
+            if let Ok(line) = serde_json::to_string(entry) {
+                jsonl.push_str(&line);
+                jsonl.push('\n');
+            }
+        }
+
+        Ok::<_, AegisError>(
+            (
+                StatusCode::OK,
+                [
+                    (
+                        axum::http::header::CONTENT_TYPE,
+                        "application/x-ndjson; charset=utf-8",
+                    ),
+                    (
+                        axum::http::header::CONTENT_DISPOSITION,
+                        "attachment; filename=\"aegis-audit-log.jsonl\"",
+                    ),
+                ],
+                jsonl,
+            )
+                .into_response(),
+        )
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuditLogQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
 /// Format micro-cents as a plain decimal for CSV, without a currency symbol.
 ///
 /// Spreadsheets treat `$0.0075` as text and `0.007500` as a number, and a finance team
