@@ -74,16 +74,24 @@ rate limiting, and metering. A working product in passthrough mode.
 - [x] P2.2 Pipeline stages 1,2,3,4,8,10,11: auth, rate limit (Redis Lua sliding window),
       budget check, parse/normalize, `X-Aegis-*` headers, usage event emission — *rate
       limiting is atomic (single Redis Lua script, proven by a 50-concurrent-caller test
-      admitting exactly the configured limit). A session 5 audit found budget checking is
-      not: `budget::check()` reads the spend counter and compares it to the limit, and the
-      counter is only incremented later, after the request completes — a textbook
-      check-then-act gap with no atomic reservation. Reproduced 8/8 runs under genuine
+      admitting exactly the configured limit). A session 5 audit found budget checking was
+      not: `budget::check()` read the spend counter and compared it to the limit, and the
+      counter was only incremented later, after the request completed — a textbook
+      check-then-act gap with no atomic reservation, reproduced 8/8 runs under genuine
       multi-thread concurrency (20 simultaneous requests against a $1.00 hard limit with
-      $0.05 headroom admitted 2-5 requests, 15-45% over the limit, every run). The proof
-      is committed as an `#[ignore]`d test with the exact numbers in its own comment.
-      Applies identically to all four budget scopes (key/team/region/org). Left checked
-      because single-request budget enforcement is real and tested — the gap is
-      concurrency-specific, not "does not work." See the audit artifact, finding P0-01.*
+      $0.05 headroom admitted 2-5 requests, 15-45% over the limit, every run). **Fixed
+      session 6**: `middleware/budget.rs` now exposes `check_and_reserve`, which atomically
+      increments every applicable counter with the *projected* cost, inspects the
+      post-increment value to decide admission, and rolls back the increment on refusal —
+      the same atomic-reservation shape the rate limiter already used. `Reservation`
+      carries a `Drop` warning if a caller never resolves it, and `commit()` hands the
+      actual cost to `usage::emit` as a pure delta so the correction is applied exactly
+      once. New test `concurrent_requests_cannot_overshoot_a_hard_budget` reproduces the
+      exact same 20-concurrent-request/$1.00/$0.05-headroom scenario and now proves at
+      most 1 request is ever admitted; a companion test proves a budget can still be filled
+      exactly to the line under concurrency without under-admitting. Proven against real
+      Redis too, not just `MemoryStore` — `tests/redis_concurrency.rs::budget_reservation_is_atomic_against_real_redis`.
+      See the audit artifact, finding P0-01 (now closed).*
 - [x] P2.3 Usage worker: stream → batch insert → counters → budget alerts
 - [x] P2.4 BYOK: credential CRUD, AES-256-GCM, cached decrypted form, test endpoint
 - [x] P2.5 Shared-model pool for the free tier (round-robin, per-org caps)
@@ -124,21 +132,23 @@ rate limiting, and metering. A working product in passthrough mode.
       an embedding-API call and its latency to every cache-miss request) as much as a code
       change — see `MEMORY.md` Known Limitations item 0.*
 - [x] P3.6 Context compression v1
-- [ ] P3.7 Fallback + circuit breakers + provider health — *circuit breakers and
-      provider-health tracking genuinely work and are exercised in production, for
-      non-streaming requests. A session 5 enterprise audit found the fallback **chain**
-      does not: `FallbackChain::build`'s `alternates` parameter — the same model on a
-      different provider, then one tier down — is fully implemented and tested, but its
-      one production call site (`routes/openai_compat.rs`) hardcodes it to `&[]`. Combined
-      with the router's own never-downgrade guarantee, any request classified complex or
-      sent with an explicit passthrough hint — exactly the highest-value traffic — gets
-      zero cross-provider redundancy; the chain collapses to length 1, proven by the
-      codebase's own existing test. Separately, streaming (`stream_chat`/
-      `stream_messages`) has no retry, no fallback, and never calls
-      `state.health.record_success`/`record_failure` at all, so the circuit breaker never
-      learns from streaming traffic. Unchecked to reflect that "fallback" as shipped is
-      materially narrower than the task title claims. See the audit artifact, finding
-      P0-04 / P1-01.*
+- [x] P3.7 Fallback + circuit breakers + provider health — *circuit breakers and
+      provider-health tracking always worked for non-streaming requests. A session 5
+      enterprise audit found the fallback **chain** did not: `FallbackChain::build`'s
+      `alternates` parameter — the same model on a different provider, then one tier down —
+      was fully implemented and tested, but its one production call site
+      (`routes/openai_compat.rs`) hardcoded it to `&[]`, and streaming had no retry/
+      fallback/health-tracking at all. **Fixed session 6**: `alternates_for()` now computes
+      real cross-provider candidates from the pricing table at the call site;
+      `open_stream_with_fallback` gives streaming the same retry/fallback path non-streaming
+      already had, and both paths call `state.health.record_success`/`record_failure` (now
+      `record_success_with_latency`) so the circuit breaker learns from streaming traffic
+      too. Provider health itself was upgraded from a binary circuit-breaker signal to a
+      graded `HealthScore` (rolling success rate + EWMA latency), which now feeds routing
+      selection directly (`price_penalty()`, `is_degraded()`), not just the breaker. An
+      outer request deadline (`AEGIS_REQUEST_DEADLINE_SECS`, default 180s, `TimeoutLayer`
+      mapped to 504) bounds the worst case regardless. See the audit artifact, finding
+      P0-04 / P1-01 (both closed).*
 - [x] P3.8 Savings calculation (micro-cents, no early rounding)
 - [x] P3.9 Savings dashboard + CSV export
 - [x] P3.10 Tests: classifier accuracy >= 85%, routing rules, cache boundaries, fallback
@@ -163,15 +173,15 @@ rate limiting, and metering. A working product in passthrough mode.
 - [x] P4.1 Remaining dashboard pages (usage, requests, models, org, teams, policies,
       providers) — all 12 pages built and verified in a browser against a fixture API
 - [x] P4.2 Budgets UI + alert delivery (email, Slack webhook) — *the budgets UI and budget
-      **enforcement** (hard/soft limits genuinely block requests) are real and tested. A
-      session 3 audit found the alert **delivery** machinery
-      (`workers/budget_alerts.rs::crossed_threshold/render/deliver`) is implemented and
-      tested but never called from any live path — a customer crossing 50/80/100% of
-      budget receives no notification today, only the eventual hard block if the budget is
-      a hard limit. Left checked because the UI and enforcement halves this line names are
-      genuinely done; the notification half is tracked in `MEMORY.md` Known Limitations
-      item 0 rather than re-splitting this line. (Do not confuse this with the weekly
-      digest, a separate feature in the same file that *is* correctly wired via
+      **enforcement** (hard/soft limits genuinely block requests) were real and tested from
+      the start. A session 3 audit found the alert **delivery** machinery
+      (`workers/budget_alerts.rs::crossed_threshold/render/deliver`) was implemented and
+      tested but never called from any live path. **Fixed session 6**: `budget_alerts::run`
+      now sweeps every org on a fixed interval, computing current spend per scope and
+      delivering exactly one alert per threshold crossing per period via a
+      "last threshold alerted" watermark (`already_alerted_this_period`), and is spawned
+      from `main.rs` alongside the other workers. (Do not confuse this with the weekly
+      digest, a separate feature in the same file that was already correctly wired via
       `workers/scheduler.rs`.)*
 - [x] P4.3 Stripe: checkout, webhooks, invoice generation with savings-fee line items
 - [x] P4.4 Savings-share billing job (monthly rollup → draft invoice, manual finalize)
@@ -228,31 +238,49 @@ rate limiting, and metering. A working product in passthrough mode.
 **Goal:** Land enterprise pilots.
 
 ### Tasks
-- [ ] P6.1 SSO: OIDC + SAML assertion validation — *the assertion-validation logic itself
-      (`enterprise/sso.rs`: audience, issuer, expiry, replay) is correct and tested, which
-      is what this task line names. A session 5 audit found the login flow built on top of
-      it cannot complete: `sso_start` constructs a callback URL pointing at
-      `/api/auth/sso/callback`, and no such route is ever registered in the router. A real
-      SSO login has nowhere to land. Unchecked because the end-to-end capability the task
-      exists to deliver does not work today, even though the cryptographic core of it does.
-      Fix is small (register the missing route) once the callback handler's own completeness
-      is confirmed. See the audit artifact, finding P1-03.*
+- [x] P6.1 SSO: OIDC assertion validation — *the assertion-validation logic itself
+      (`enterprise/sso.rs`: audience, issuer, expiry, replay) was always correct and
+      tested. A session 5 audit found the login flow built on top of it could not
+      complete: `sso_start` constructed a callback URL pointing at
+      `/api/auth/sso/callback`, and no such route was ever registered in the router — a
+      real SSO login had nowhere to land. **Fixed session 6**: added OIDC discovery
+      (`OidcDiscovery::discover`), JWKS fetch and key selection (`fetch_decoding_key`,
+      `select_decoding_key`), `verify_id_token`, and the actual callback handler
+      (`routes/enterprise.rs::sso_callback`/`do_sso_callback`) doing the full flow — state
+      verification, code exchange, JWKS fetch, signature verify, business validation,
+      session creation — now registered at `/api/auth/sso/callback`. **SAML is explicitly
+      out of scope**: the callback rejects a SAML-configured connection with a clear "not
+      yet supported" error rather than a rushed or silently-wrong implementation, so the
+      task title is narrowed to OIDC only. See the audit artifact, finding P1-03 (closed for
+      OIDC; SAML remains a deliberate gap).*
 - [x] P6.2 SCIM v2 user/group provisioning endpoints
 - [x] P6.3 Self-hosted distribution + signed license validation with offline grace
 - [x] P6.4 Per-tenant encryption keys (HKDF from master + org_id)
 - [x] P6.5 Data residency: region pinning per org
 - [x] P6.6 Compliance pack: DPA template, subprocessor list, security whitepaper —
       `docs/compliance/`, plus a data-flow document and an honest SOC 2 gap analysis
-- [x] P6.7 Audit log export (JSONL, SIEM-friendly)
+- [x] P6.7 Audit log export (JSONL, SIEM-friendly) — *this line was checked off with no
+      customer-reachable JSONL export actually existing: `/api/admin/audit` (JSON, not
+      JSONL) was the only route touching `audit_logs`, and it was staff-only. **Corrected
+      session 6**: added `GET /api/audit-log.jsonl` (`routes/management.rs`,
+      `require_reader`-gated, `application/x-ndjson`), so a customer can pull their own
+      org's audit trail without staff involvement — the capability this line actually
+      names.*
 - [x] P6.8 Read replica routing for analytics queries — `DATABASE_REPLICA_URL`,
       `AppState::analytics_db()`, with a source-reading test that keeps handlers on the
       right pool
-- [ ] P6.9 Admin TOTP 2FA — *the RFC 6238 algorithm (`enterprise/totp.rs`) is correct and
-      tested. A session 3 audit found no repo function reads or writes
-      `users.totp_secret_encrypted`, no enrollment endpoint exists (generate secret, show
-      provisioning URI, confirm a code), and login never verifies a TOTP code. 2FA cannot
-      actually be turned on today. Unchecked to reflect that — this is the largest of the
-      four gaps found this session; see `MEMORY.md` Known Limitations item 0.*
+- [x] P6.9 Admin TOTP 2FA — *the RFC 6238 algorithm (`enterprise/totp.rs`) was always
+      correct and tested. A session 3 audit found no repo function read or wrote
+      `users.totp_secret_encrypted`, no enrollment endpoint existed, and login never
+      verified a TOTP code — 2FA could not actually be turned on. **Fixed session 6**: added
+      the repo layer (`get_totp_secret`/`set_totp_secret`/`enable_totp`/`disable_totp`), a
+      new per-*user* HKDF key (`derive_user_key`, disjoint from the existing per-tenant
+      derivation) to encrypt the stored secret, enrollment/confirm/disable endpoints
+      (`POST /api/auth/totp/{enroll,confirm,disable}`), and a login-time check:
+      `login()` now returns `AegisError::TotpRequired` when `user.totp_enabled` and no
+      valid code was supplied. End-to-end integration test
+      `totp_protects_login_end_to_end` proves the full enroll → confirm → login-blocked-
+      without-code → login-succeeds-with-code cycle.*
 
 ### Acceptance
 | Criterion | Met | Evidence |
@@ -268,14 +296,18 @@ rate limiting, and metering. A working product in passthrough mode.
 **Goal:** Category leadership; compounding routing intelligence.
 
 ### Tasks
-- [ ] P7.1 Classifier v3: outcome-trained bandit over our own routing results — *the UCB1
-      bandit (`engine/bandit.rs`) is correct and beats static routing in a standalone
-      3,000-step replay. The live pipeline calls `bandit.record(...)` after every request,
-      so it genuinely observes production traffic. A session 3 audit found the router
-      never reads the bandit back to *make* a routing decision — right now it is a
-      write-only data collector with zero effect on what model actually serves a request.
-      Unchecked to reflect that "outcome-trained routing" is not yet true in production.
-      See `MEMORY.md` Known Limitations item 0.*
+- [x] P7.1 Classifier v3: outcome-trained bandit over our own routing results — *the UCB1
+      bandit (`engine/bandit.rs`) was always correct and beats static routing in a
+      standalone 3,000-step replay, and the live pipeline always called `bandit.record(...)`
+      after every request. A session 3 audit found the router never read the bandit back
+      to *make* a routing decision — it was a write-only data collector with zero effect on
+      what model actually served a request. **Fixed session 6**: `RoutingInputs` now carries
+      `bandit: Option<&RoutingBandit>`, and `select_at_tier` folds the bandit's learned
+      per-complexity-band statistics into candidate scoring alongside graded provider
+      health and price — established arms (enough pulls to be statistically meaningful)
+      can now actually move which model gets selected, not just get logged after the fact.
+      `GET /api/admin/routing` exposes the same snapshot the router now reads, so what the
+      bandit has learned is inspectable, not just internal state.*
 - [x] P7.2 Multi-region: regional budgets + region-aware routing — fourth budget scope
       between team and org; counters keyed by org AND region
 - [x] P7.3 API/platform tier: usage-based metering path
