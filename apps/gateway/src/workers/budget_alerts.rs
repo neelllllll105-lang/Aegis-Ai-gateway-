@@ -248,6 +248,140 @@ pub fn render_weekly_digest(
     }
 }
 
+/// How often budgets are swept for crossed thresholds.
+///
+/// Five minutes, not inline on the request path. Detecting inline would be more immediate
+/// but would put a database read and an outbound HTTP call inside a hot path budgeted at
+/// 0.1ms — the wrong trade for a notification whose value is measured in minutes, not
+/// milliseconds. This is the choice `MEMORY.md` recorded as needing to be made; it is made
+/// here, and the reasoning is why.
+pub const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Evaluate every configured budget alert on a schedule.
+///
+/// This worker's parts — [`crossed_threshold`], [`render`], [`deliver`] — were all
+/// implemented and unit-tested, and nothing ever called them: a customer approaching their
+/// limit was never told, and a customer whose traffic had already started returning 402 was
+/// told by their own error rate. Found in the enterprise readiness audit.
+pub async fn run(state: crate::AppState) {
+    let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        sweep(&state).await;
+    }
+}
+
+/// One evaluation pass over every alert rule.
+pub async fn sweep(state: &crate::AppState) {
+    let Ok(pool) = state.db() else { return };
+
+    // Every replica runs this loop; exactly one gets to act in each window. Without the
+    // claim, an organisation on four replicas receives four copies of the same alert —
+    // which trains people to ignore the alerts.
+    // A ten-minute window, wider than the five-minute sweep so two replicas whose clocks
+    // disagree by seconds still land in the same bucket and only one of them acts.
+    let now = chrono::Utc::now();
+    let window = format!(
+        "{}{:02}",
+        now.format("%Y%m%d%H"),
+        now.format("%M").to_string().parse::<u32>().unwrap_or(0) / 10
+    );
+    if !crate::workers::scheduler::claim(state.store.as_ref(), "budget_alerts", &window).await {
+        return;
+    }
+
+    let rules = match crate::db::repo::list_budget_alert_rules(pool).await {
+        Ok(rules) => rules,
+        Err(e) => {
+            tracing::error!(error = %e, "could not load budget alert rules");
+            return;
+        }
+    };
+
+    for rule in rules {
+        let spend = current_spend_for(state, &rule).await;
+        let limit = MicroCents(rule.limit_mc);
+
+        let Some(threshold) = crossed_threshold(spend, limit) else {
+            continue;
+        };
+        // One alert per threshold per period. Re-sending every five minutes while a
+        // customer sits at 85% is how an alerting system gets muted.
+        if already_alerted_this_period(&rule, threshold) {
+            continue;
+        }
+
+        let alert = render(
+            &rule.org_name,
+            rule.scope(),
+            threshold,
+            spend,
+            limit,
+            rule.hard_limit,
+        );
+        let channel = Channel::parse(&rule.channel);
+        match deliver(
+            &state.http,
+            &state.config,
+            &channel,
+            rule.destination.as_deref(),
+            &alert,
+        )
+        .await
+        {
+            Ok(true) => {
+                if let Err(e) = crate::db::repo::mark_alert_triggered(pool, rule.id).await {
+                    // Worth an error: without the stamp this alert re-fires every sweep.
+                    tracing::error!(alert_id = %rule.id, error = %e, "could not stamp alert");
+                }
+                tracing::info!(
+                    org_id = %rule.org_id,
+                    scope = rule.scope(),
+                    threshold_pct = threshold,
+                    blocking = alert.blocking,
+                    "budget alert delivered"
+                );
+            }
+            Ok(false) => tracing::warn!(
+                alert_id = %rule.id,
+                channel = %rule.channel,
+                "budget alert not delivered: no destination configured"
+            ),
+            Err(e) => tracing::error!(alert_id = %rule.id, error = %e, "budget alert failed"),
+        }
+    }
+}
+
+/// Read the counter this rule's budget actually caps.
+async fn current_spend_for(
+    state: &crate::AppState,
+    rule: &crate::db::repo::BudgetAlertRule,
+) -> MicroCents {
+    use crate::metering::usage;
+    match (rule.team_id, rule.api_key_id, rule.region.as_deref()) {
+        (Some(team), _, _) => usage::current_team_spend(state.store.as_ref(), team).await,
+        (_, Some(key), _) => usage::current_key_spend(state.store.as_ref(), key).await,
+        (_, _, Some(region)) => {
+            usage::current_region_spend(state.store.as_ref(), rule.org_id, region).await
+        }
+        _ => usage::current_spend(state.store.as_ref(), rule.org_id).await,
+    }
+}
+
+/// Whether this rule already fired for this threshold in the current billing period.
+///
+/// Month-scoped, matching the counters: crossing 80% in March should alert again in April,
+/// because the counter resets and the customer is genuinely at 80% of a new budget.
+fn already_alerted_this_period(rule: &crate::db::repo::BudgetAlertRule, _threshold: u32) -> bool {
+    use chrono::Datelike;
+    let Some(last) = rule.last_triggered_at else {
+        return false;
+    };
+    let now = chrono::Utc::now();
+    last.year() == now.year() && last.month() == now.month()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

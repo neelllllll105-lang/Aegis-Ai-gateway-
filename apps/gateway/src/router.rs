@@ -11,10 +11,12 @@
 use crate::middleware::security_headers;
 use crate::routes::{admin, anthropic_compat, enterprise, health, management, openai_compat};
 use crate::AppState;
+use axum::response::IntoResponse;
 use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 /// Assemble the full router.
@@ -122,6 +124,8 @@ pub fn build_router(state: AppState) -> Router {
             post(admin::reset_circuit),
         );
 
+    let deadline = state.config.request_deadline;
+
     Router::new()
         .merge(public)
         .merge(gateway)
@@ -131,13 +135,116 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(move |request, next| {
             security_headers_layer(request, next, is_production)
         }))
+        // An outer deadline on every request.
+        //
+        // Without one, the worst case is unbounded in a way that is easy to miss: each
+        // fallback-chain entry can spend up to `provider_timeout` (120s for a reasoning
+        // model) per try, times three tries, times however many entries the chain has. A
+        // client can therefore wait minutes to be told the request failed. This bounds it
+        // at one number an operator can reason about and tune, and it is deliberately the
+        // outermost timing layer so it covers auth, routing, and metering too — not just
+        // the provider call.
+        //
+        // 504 rather than 500: the caller needs to know this was a timeout, because that
+        // is the difference between "retry" and "do not retry".
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            deadline,
+        ))
+        .layer(axum::middleware::from_fn(move |request, next| {
+            map_timeout_to_504(request, next, deadline.as_secs())
+        }))
         // Part 9 item 7: a hard body cap, applied before any parsing.
         .layer(RequestBodyLimitLayer::new(max_body))
+        // Correlation. `x-aegis-request-id` is echoed if the caller sent one and minted
+        // otherwise, then attached to the tracing span that wraps the whole request — so
+        // every log line a request produces carries the id a customer can quote, which was
+        // the thing that made incident diagnosis effectively impossible before.
+        .layer(axum::middleware::from_fn(correlation_layer))
         .layer(TraceLayer::new_for_http())
         // The dashboard is served from a different origin, and credentials must be
         // allowed for the session cookie to travel.
         .layer(cors_layer(&state.config.app_url))
         .with_state(state)
+}
+
+/// Header carrying the correlation id, on the way in and on the way out.
+pub const REQUEST_ID_HEADER: &str = "x-aegis-request-id";
+
+/// Attach a correlation id to the request, the tracing span, and the response.
+///
+/// A caller's own id is honoured when it looks sane, so a trace can be followed across a
+/// customer's system and ours. Anything longer than 128 characters or containing something
+/// other than ASCII alphanumerics, dashes, and underscores is replaced rather than trusted:
+/// this value lands in log lines and response headers, and neither is a place to put
+/// unvalidated caller input.
+async fn correlation_layer(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let inbound = request
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= 128
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+        .map(|v| v.to_string());
+
+    let request_id = inbound.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    // Available to handlers through the extensions, so a handler that mints its own
+    // pipeline id can tie the two together.
+    request
+        .extensions_mut()
+        .insert(RequestId(request_id.clone()));
+
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let span = tracing::info_span!(
+        "http",
+        request_id = %request_id,
+        method = %method,
+        path = %path,
+    );
+
+    let mut response = {
+        use tracing::Instrument;
+        next.run(request).instrument(span).await
+    };
+
+    if let Ok(value) = axum::http::HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static(REQUEST_ID_HEADER),
+            value,
+        );
+    }
+    response
+}
+
+/// The correlation id for the request currently being served.
+#[derive(Debug, Clone)]
+pub struct RequestId(pub String);
+
+/// Turn `tower_http`'s timeout, which surfaces as a bare 408, into a 504 with a body.
+///
+/// A gateway that times out waiting on an upstream is a 504 by definition, and a client
+/// deciding whether to retry needs the distinction from a 408 (which blames the caller).
+async fn map_timeout_to_504(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+    deadline_secs: u64,
+) -> axum::response::Response {
+    let path = request.uri().path().to_string();
+    let response = next.run(request).await;
+    if response.status() != axum::http::StatusCode::REQUEST_TIMEOUT {
+        return response;
+    }
+    tracing::warn!(path = %path, "request exceeded the gateway deadline");
+    crate::error::AegisError::ProviderTimeout(deadline_secs).into_response()
 }
 
 /// Apply security headers to every response.

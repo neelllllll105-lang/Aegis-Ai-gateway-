@@ -172,7 +172,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // Periodic jobs with external side effects. Safe to start on every replica: the
         // scheduler claims each run in the shared store, so exactly one replica acts.
         tokio::spawn(workers::scheduler::run(state.clone()));
-        tracing::info!("background workers started");
+        // Billing reconciliation. This worker was implemented, unit-tested, and never
+        // spawned — the one job that watches for silent billing loss was not running, on a
+        // product whose entire pitch is that its metering is checkable. Found in the
+        // enterprise readiness audit.
+        tokio::spawn(workers::reconciliation::run(state.clone()));
+        // Budget threshold alerts. Same story: detection, rendering, and delivery all
+        // existed and were tested; nothing called them, so a customer approaching their
+        // limit was never told.
+        tokio::spawn(workers::budget_alerts::run(state.clone()));
+        // Dependency reachability, published as a metric so an alert can fire on Redis
+        // being down without anything having to poll /health and parse JSON.
+        tokio::spawn(workers::health_probe::run(state.clone()));
+        tracing::info!(
+            workers = "usage_writer, partitions, scheduler, reconciliation, budget_alerts, \
+                       health_probe",
+            "background workers started"
+        );
     } else {
         tracing::warn!("workers not started: no database configured");
     }

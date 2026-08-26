@@ -80,6 +80,20 @@ pub struct UsageEvent {
     #[serde(default)]
     pub region: Option<String>,
 
+    /// How much of this request's cost the budget check already added to the spend
+    /// counters, via [`crate::middleware::budget::check_and_reserve`].
+    ///
+    /// [`emit`] increments the spend counters by `actual_cost_mc - reserved_mc`, so a
+    /// request whose projection was reserved up front is counted exactly once. Zero — the
+    /// default, and the value on every path that does not reserve, such as a rejection —
+    /// makes `emit` behave exactly as it did before reservations existed.
+    ///
+    /// Deliberately `skip`ped rather than serialised: it is an accounting detail of the
+    /// in-process counter bump, and the writer's insert maps `UsageEvent` fields directly
+    /// onto `usage_records` columns, where there is no column for it and should not be.
+    #[serde(skip)]
+    pub reserved_mc: i64,
+
     pub created_at: DateTime<Utc>,
 }
 
@@ -127,6 +141,7 @@ impl UsageEvent {
             status_code,
             error_type: None,
             region: None,
+            reserved_mc: 0,
             tokens_saved_by_compression: 0,
             created_at: Utc::now(),
         }
@@ -169,6 +184,7 @@ impl UsageEvent {
             status_code,
             error_type: Some(error_type.to_string()),
             region: None,
+            reserved_mc: 0,
             tokens_saved_by_compression: 0,
             created_at: Utc::now(),
         }
@@ -240,6 +256,15 @@ const COUNTER_TTL: std::time::Duration = std::time::Duration::from_secs(45 * 24 
 /// Counter updates are best-effort — a failed counter bump must never fail a request that
 /// the customer has already been served, because the authoritative figures are rebuilt
 /// from `usage_records` by the reconciliation job.
+///
+/// # Reservations
+///
+/// Spend counters are bumped by `actual_cost_mc - reserved_mc`, not by the full cost.
+/// When [`crate::middleware::budget::check_and_reserve`] has already added a projection to
+/// these same counters, this applies only the correction, so the counter ends at the true
+/// figure rather than projection-plus-actual. `reserved_mc` defaults to zero, so every
+/// path that does not reserve — cache hits, rejections, tests — behaves exactly as it did
+/// before reservations existed.
 pub async fn emit(store: &dyn KvStore, event: &UsageEvent) -> Result<String> {
     let payload = serde_json::to_string(event)
         .map_err(|e| crate::error::AegisError::Internal(format!("usage serialization: {e}")))?;
@@ -249,16 +274,19 @@ pub async fn emit(store: &dyn KvStore, event: &UsageEvent) -> Result<String> {
         .await?;
 
     let at = event.created_at;
+    let spend_delta = event.actual_cost_mc - event.reserved_mc;
 
     // Spend and request counters gate budget enforcement and the free-tier allowance at
     // stage [3], so they must reflect this request before the next one arrives.
-    let _ = store
-        .incr_by(
-            &org_spend_key(event.org_id, at),
-            event.actual_cost_mc,
-            Some(COUNTER_TTL),
-        )
-        .await;
+    if spend_delta != 0 {
+        let _ = store
+            .incr_by(
+                &org_spend_key(event.org_id, at),
+                spend_delta,
+                Some(COUNTER_TTL),
+            )
+            .await;
+    }
     let _ = store
         .incr_by(&org_requests_key(event.org_id, at), 1, Some(COUNTER_TTL))
         .await;
@@ -270,35 +298,29 @@ pub async fn emit(store: &dyn KvStore, event: &UsageEvent) -> Result<String> {
         )
         .await;
 
-    if let Some(team_id) = event.team_id {
-        let _ = store
-            .incr_by(
-                &team_spend_key(team_id, at),
-                event.actual_cost_mc,
-                Some(COUNTER_TTL),
-            )
-            .await;
-    }
-    if let Some(key_id) = event.api_key_id {
-        let _ = store
-            .incr_by(
-                &key_spend_key(key_id, at),
-                event.actual_cost_mc,
-                Some(COUNTER_TTL),
-            )
-            .await;
-    }
-    // Regional counter. Always written, even for single-region organisations: the cost is
-    // one INCR, and without it a customer who adds a regional budget later would start
-    // from an empty counter and get a month of free overspend.
-    if let Some(region) = event.region.as_deref() {
-        let _ = store
-            .incr_by(
-                &org_region_spend_key(event.org_id, region, at),
-                event.actual_cost_mc,
-                Some(COUNTER_TTL),
-            )
-            .await;
+    if spend_delta != 0 {
+        if let Some(team_id) = event.team_id {
+            let _ = store
+                .incr_by(&team_spend_key(team_id, at), spend_delta, Some(COUNTER_TTL))
+                .await;
+        }
+        if let Some(key_id) = event.api_key_id {
+            let _ = store
+                .incr_by(&key_spend_key(key_id, at), spend_delta, Some(COUNTER_TTL))
+                .await;
+        }
+        // Regional counter. Always written, even for single-region organisations: the cost
+        // is one INCR, and without it a customer who adds a regional budget later would
+        // start from an empty counter and get a month of free overspend.
+        if let Some(region) = event.region.as_deref() {
+            let _ = store
+                .incr_by(
+                    &org_region_spend_key(event.org_id, region, at),
+                    spend_delta,
+                    Some(COUNTER_TTL),
+                )
+                .await;
+        }
     }
 
     Ok(id)
@@ -309,7 +331,7 @@ pub async fn emit(store: &dyn KvStore, event: &UsageEvent) -> Result<String> {
 /// Scoped by organisation as well as region, exactly like every other counter here. A
 /// key of the form `region:eu-central` would aggregate every tenant in the region into
 /// one number, which is both useless to a customer and a cross-tenant leak.
-fn org_region_spend_key(org_id: Uuid, region: &str, at: DateTime<Utc>) -> String {
+pub fn org_region_spend_key(org_id: Uuid, region: &str, at: DateTime<Utc>) -> String {
     format!(
         "aegis:spend:org:{org_id}:region:{}:{}",
         region.to_ascii_lowercase(),

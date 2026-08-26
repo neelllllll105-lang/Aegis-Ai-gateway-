@@ -5,6 +5,7 @@
 //! the pricing table.
 
 pub mod budget_alerts;
+pub mod health_probe;
 pub mod reconciliation;
 pub mod scheduler;
 pub mod usage_writer;

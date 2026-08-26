@@ -15,7 +15,7 @@ use crate::enterprise::residency;
 use crate::error::{AegisError, Result};
 use crate::metering::usage;
 use crate::middleware::auth;
-use crate::middleware::{budget, rate_limit};
+use crate::middleware::rate_limit;
 use crate::routes::openai_compat::{execute, PipelineOutcome};
 use crate::types::{Content, Message, NormalizedRequest, Role, RoutingHint};
 use crate::AppState;
@@ -236,15 +236,8 @@ async fn handle_messages(
         return Err(limit.into_error());
     }
 
-    // [3] Budget.
-    let budget_decision =
-        budget::check(state.store.as_ref(), &auth_context, None, None, None).await?;
-    if !budget_decision.allowed {
-        state.metrics.record_budget_blocked(budget_decision.scope);
-        return Err(budget_decision.into_error());
-    }
-
-    // [4] Parse and normalise.
+    // [4] Parse and normalise. Ahead of the budget check, which needs a priced request to
+    // reserve against — see the same reordering and its reasoning in openai_compat.rs.
     if body.len() > state.config.max_body_bytes {
         return Err(AegisError::PayloadTooLarge);
     }
@@ -258,6 +251,22 @@ async fn handle_messages(
     }
 
     let request = inbound.normalize();
+
+    // [3] Budget. Atomically reserves this request's projected cost against every ceiling
+    // that applies, exactly as the OpenAI-compatible endpoint does. Both endpoints share
+    // one implementation so neither can drift into being the lenient one.
+    let reservation = match crate::routes::openai_compat::reserve_budget(
+        state,
+        &auth_context,
+        &request,
+        "/v1/messages",
+    )
+    .await?
+    {
+        Ok(reservation) => reservation,
+        Err(error) => return Err(error),
+    };
+
     let hint = RoutingHint::parse(
         headers
             .get("x-aegis-routing-hint")
@@ -265,16 +274,35 @@ async fn handle_messages(
     );
 
     if request.stream {
-        return stream_messages(state, &auth_context, request, hint).await;
+        return stream_messages(state, &auth_context, request, hint, reservation).await;
     }
 
     // [5]-[9] The same pipeline as the OpenAI endpoint.
-    let outcome = execute(state, &auth_context, request, hint).await?;
+    let outcome = match execute(state, &auth_context, request, hint).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            reservation.release(state.store.as_ref()).await;
+            return Err(e);
+        }
+    };
 
     // [10] Metering.
-    let event = outcome.usage_event(&auth_context, 200, &state.config.region);
-    let _ = usage::emit(state.store.as_ref(), &event).await;
-    state.metrics.record_usage_event();
+    let mut event = outcome.usage_event(&auth_context, 200, &state.config.region);
+    event.reserved_mc = reservation.commit();
+    // Only count a request as metered when it was actually persisted. This endpoint kept
+    // the discarded-Result form after the other three call sites were corrected, which
+    // meant the metering-completeness metric stayed blind on exactly the endpoint built
+    // for streaming-heavy clients. Found while wiring budget reservations through it.
+    match usage::emit(state.store.as_ref(), &event).await {
+        Ok(_) => state.metrics.record_usage_event(),
+        Err(e) => tracing::error!(
+            request_id = %outcome.request_id,
+            org_id = %auth_context.org_id,
+            error = %e,
+            "usage event lost: request was served and is billable, but could not be \
+             persisted"
+        ),
+    }
     state.metrics.record_request("/v1/messages", 200);
     state
         .metrics
@@ -331,6 +359,7 @@ async fn stream_messages(
     auth_context: &crate::middleware::auth::AuthContext,
     request: NormalizedRequest,
     hint: RoutingHint,
+    reservation: crate::middleware::budget::Reservation,
 ) -> Result<Response> {
     use crate::engine::classifier::Classifier;
     use crate::engine::router::{Router, RoutingInputs};
@@ -355,42 +384,53 @@ async fn stream_messages(
     let router = Router::with_classifier(Classifier::new());
     let decision = router.route(&request, &state.pricing, &state.health, &inputs)?;
 
-    let provider = state
-        .providers
-        .for_model(&decision.served_model)
-        .ok_or_else(|| {
-            AegisError::AllProvidersFailed(format!("no adapter serves {}", decision.served_model))
-        })?;
-
-    let credential =
-        crate::routes::openai_compat::resolve_credential(state, auth_context, provider.id())
-            .await?;
+    // Retry and fail over while opening the stream, exactly as the OpenAI-compatible
+    // endpoint does. Until the first byte reaches the client nothing is observable, so a
+    // different provider can serve the request transparently. Shared implementation so the
+    // two endpoints cannot drift apart on resilience.
+    let opened = match crate::routes::openai_compat::open_stream_for(
+        state,
+        auth_context,
+        &request,
+        &decision,
+        &requested_model,
+    )
+    .await
+    {
+        Ok(opened) => opened,
+        Err(e) => {
+            reservation.release(state.store.as_ref()).await;
+            return Err(e);
+        }
+    };
 
     let overhead_ms = started.elapsed().as_secs_f64() * 1_000.0;
 
-    let upstream = provider
-        .chat_stream(
-            &state.http,
-            &request,
-            &decision.served_model,
-            &credential,
-            state.config.provider_timeout,
-        )
-        .await?;
-
     let state_for_stream = state.clone();
     let auth_for_stream = auth_context.clone();
-    let served_model = decision.served_model.clone();
-    let provider_id = provider.id().to_string();
+    let served_model = opened.model_id.clone();
+    let provider_id = opened.provider_id.clone();
+    let upstream = opened.upstream;
     let estimated_input = request.estimated_input_tokens();
     let complexity = decision.complexity_score;
-    let routing_reason = decision.reason;
+    let routing_reason = if opened.used_fallback {
+        crate::types::RoutingReason::Fallback
+    } else {
+        decision.reason
+    };
+    state
+        .metrics
+        .record_routing(routing_reason.as_str(), &served_model);
     let message_id = format!("msg_{}", request_id.simple());
 
     let mut input_tokens: u64 = 0;
     let mut output_tokens: u64 = 0;
     let mut output_chars: u64 = 0;
     let mut stop_reason = "end_turn".to_string();
+    // Set the moment the upstream stream reports a failure. Without it a provider that
+    // dies mid-stream is metered as a clean 200 and the circuit breaker never hears about
+    // it -- on the endpoint built specifically for streaming-heavy clients.
+    let mut stream_error: Option<String> = None;
 
     let sse = async_stream::stream! {
         // message_start. The input token count is reported here and nowhere else, so a
@@ -449,6 +489,7 @@ async fn stream_messages(
                     }
                 }
                 Err(e) => {
+                    stream_error = Some(e.error_type().to_string());
                     // Anthropic signals a mid-stream failure with a named error event.
                     // Dropping the connection instead would leave the SDK hanging.
                     yield Ok(axum::body::Bytes::from(sse_event(
@@ -510,7 +551,7 @@ async fn stream_messages(
             auth_for_stream.savings_share_bp,
         );
 
-        let event = UsageEvent::new(
+        let mut event = UsageEvent::new(
             request_id,
             auth_for_stream.org_id,
             auth_for_stream.api_key_id,
@@ -525,12 +566,57 @@ async fn stream_messages(
             CacheOutcome::Skipped,
             routing_reason,
             complexity,
+            // SSE cannot change the status mid-stream, and the client genuinely received a
+            // 200. `error_type` below is what records that the stream itself failed part
+            // way, which the status code alone cannot express.
             200,
         );
-        let _ = usage::emit(state_for_stream.store.as_ref(), &event).await;
-        state_for_stream.metrics.record_usage_event();
-        state_for_stream.metrics.record_request("/v1/messages", 200);
+
+        // Feed the outcome back into the circuit breaker. Content has already been sent by
+        // this point, so failing over is not possible -- but the *next* request can route
+        // around a provider that just died, which it could not before: neither streaming
+        // entry point recorded provider health at all.
+        if let Some(error_type) = stream_error.as_deref() {
+            let after = state_for_stream.health.record_failure(&provider_id);
+            state_for_stream.metrics.record_provider_error(&provider_id, error_type);
+            if after == crate::engine::fallback::CircuitState::Open {
+                state_for_stream.metrics.record_circuit_change(&provider_id, after.as_str());
+            }
+            tracing::warn!(
+                request_id = %request_id,
+                org_id = %auth_for_stream.org_id,
+                provider = %provider_id,
+                model = %served_model,
+                error_type = %error_type,
+                "stream failed after content was already sent; cannot fail over,                  recorded against the provider's circuit"
+            );
+        } else {
+            state_for_stream.health.record_success(&provider_id);
+        }
+
+        event.error_type = stream_error;
+        event.reserved_mc = reservation.commit();
+
+        // Metering completeness must reflect whether the event was actually durable, not
+        // whether we attempted to make it durable -- see the identical reasoning in
+        // openai_compat.rs. This call site kept the discarded-Result form after the other
+        // three were corrected.
+        match usage::emit(state_for_stream.store.as_ref(), &event).await {
+            Ok(_) => state_for_stream.metrics.record_usage_event(),
+            Err(e) => tracing::error!(
+                request_id = %request_id,
+                org_id = %auth_for_stream.org_id,
+                error = %e,
+                "usage event lost: streaming request was served and is billable, but                  could not be persisted"
+            ),
+        }
+        let status = if event.error_type.is_some() { 502 } else { 200 };
+        state_for_stream.metrics.record_request("/v1/messages", status);
         state_for_stream.metrics.record_savings(savings.gross_savings.as_i64());
+        state_for_stream.metrics.record_latency_ms(
+            started.elapsed().as_millis().min(u32::MAX as u128) as f64,
+        );
+        state_for_stream.metrics.record_overhead_ms(overhead_ms);
     };
 
     let mut response = Response::new(axum::body::Body::from_stream(sse));

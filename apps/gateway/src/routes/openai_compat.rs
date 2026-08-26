@@ -270,10 +270,6 @@ pub async fn execute(
     let router = Router::with_classifier(Classifier::new());
     let decision = router.route(&request, &state.pricing, &state.health, &inputs)?;
 
-    state
-        .metrics
-        .record_routing(decision.reason.as_str(), &decision.served_model);
-
     // ---- [7] Provider execution with fallback -------------------------------------
     let requested_provider = state
         .pricing
@@ -286,7 +282,7 @@ pub async fn execute(
         &decision.provider,
         &requested_model,
         &requested_provider,
-        &[],
+        &alternates_for(state, &request, &decision),
     );
 
     clock.enter_provider();
@@ -347,6 +343,16 @@ pub async fn execute(
     } else {
         decision.reason
     };
+
+    // Recorded after failover has resolved, not at selection time. Previously this ran
+    // immediately after `router.route()` and before `execute_with_fallback`, so the reason
+    // label was always the *intended* one — meaning the one aggregate an SRE would alert on
+    // ("how often are we falling back") could structurally never show a fallback, and the
+    // model label was wrong for every request that failed over. Found in the enterprise
+    // readiness audit.
+    state
+        .metrics
+        .record_routing(routing_reason.as_str(), &served_model);
 
     Ok(PipelineOutcome {
         request_id,
@@ -440,6 +446,192 @@ async fn execute_with_fallback(
             "no configured provider could serve this request".to_string(),
         )
     }))
+}
+
+/// A successfully opened upstream stream, and which attempt produced it.
+pub(crate) struct StreamAttempt {
+    pub upstream: crate::providers::ChunkStream,
+    pub model_id: String,
+    pub provider_id: String,
+    pub used_fallback: bool,
+}
+
+/// Build a fallback chain for a streaming request and open the first attempt that answers.
+///
+/// The entry point `/v1/messages` uses; `stream_chat` inlines the same two steps because it
+/// already has the chain in hand. Sharing this is what keeps the Anthropic-compatible
+/// endpoint from being the one without retries — which is what it was.
+pub(crate) async fn open_stream_for(
+    state: &AppState,
+    auth: &AuthContext,
+    request: &NormalizedRequest,
+    decision: &crate::engine::router::RoutingDecision,
+    requested_model: &str,
+) -> Result<StreamAttempt> {
+    let requested_provider = state
+        .pricing
+        .get(requested_model)
+        .map(|m| m.provider.clone())
+        .unwrap_or_else(|| decision.provider.clone());
+    let chain = FallbackChain::build(
+        &decision.served_model,
+        &decision.provider,
+        requested_model,
+        &requested_provider,
+        &alternates_for(state, request, decision),
+    );
+    open_stream_with_fallback(state, auth, request, &chain).await
+}
+
+/// Open an upstream stream, retrying and failing over until the first byte is sent.
+///
+/// The mirror of [`execute_with_fallback`] for streams. Everything here happens before any
+/// content reaches the client, so a failure is invisible and failover is safe. Circuit
+/// state is updated on both outcomes, which is what lets streaming traffic participate in
+/// provider health at all.
+async fn open_stream_with_fallback(
+    state: &AppState,
+    auth: &AuthContext,
+    request: &NormalizedRequest,
+    chain: &FallbackChain,
+) -> Result<StreamAttempt> {
+    let mut last_error = None;
+
+    for (index, attempt) in chain.attempts.iter().enumerate() {
+        let Some(provider) = state.providers.for_model(&attempt.model_id) else {
+            continue;
+        };
+        if !state.health.is_available(provider.id()) || !state.health.try_probe(provider.id()) {
+            continue;
+        }
+
+        let credential = match resolve_credential(state, auth, provider.id()).await {
+            Ok(credential) => credential,
+            Err(e) => {
+                last_error = Some(e);
+                continue;
+            }
+        };
+
+        let timeout = if is_reasoning_model(&attempt.model_id) {
+            state.config.provider_timeout_reasoning
+        } else {
+            state.config.provider_timeout
+        };
+
+        let mut tries = 0;
+        loop {
+            match provider
+                .chat_stream(
+                    &state.http,
+                    request,
+                    &attempt.model_id,
+                    &credential,
+                    timeout,
+                )
+                .await
+            {
+                Ok(upstream) => {
+                    state.health.record_success(provider.id());
+                    return Ok(StreamAttempt {
+                        upstream,
+                        model_id: attempt.model_id.clone(),
+                        provider_id: provider.id().to_string(),
+                        used_fallback: index > 0,
+                    });
+                }
+                Err(e) => {
+                    tries += 1;
+                    if tries <= fallback::MAX_RETRIES && fallback::is_retryable(&e) {
+                        tokio::time::sleep(fallback::retry_delay(tries)).await;
+                        continue;
+                    }
+                    record_provider_failure(state, provider.id(), &e);
+                    // A 4xx will fail identically everywhere; failing over would burn
+                    // three providers to return the same error.
+                    if !fallback::is_retryable(&e) && !matches!(e, AegisError::Unauthorized(_)) {
+                        return Err(e);
+                    }
+                    last_error = Some(e);
+                    break;
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        AegisError::AllProvidersFailed(
+            "no configured provider could serve this request".to_string(),
+        )
+    }))
+}
+
+/// Record a provider failure against its circuit breaker and the metrics.
+///
+/// Extracted so the streaming and non-streaming paths cannot drift: they previously did,
+/// with streaming recording nothing at all.
+fn record_provider_failure(state: &AppState, provider_id: &str, error: &AegisError) {
+    let state_after = state.health.record_failure(provider_id);
+    state
+        .metrics
+        .record_provider_error(provider_id, error.error_type());
+    if state_after == fallback::CircuitState::Open {
+        state
+            .metrics
+            .record_circuit_change(provider_id, state_after.as_str());
+    }
+}
+
+/// Cross-provider substitutes for the selected model, cheapest first.
+///
+/// This is what makes the fallback chain a chain. `FallbackChain::build` has always
+/// accepted an `alternates` list — "the same capability on a different provider, then one
+/// tier down" — and its only production call site passed an empty slice, so the chain
+/// collapsed to the selected model plus the requested one. For a request the router
+/// refuses to downgrade (anything classified complex, or an explicit passthrough) those
+/// two are the *same* model, leaving a chain of length one: the highest-value traffic in
+/// the product had no provider redundancy at all. Found in the enterprise readiness audit.
+///
+/// Candidates are drawn from a different provider than the selection, must satisfy the
+/// same capability requirements, and must sit in the same tier or better — a "fallback"
+/// that quietly answers a complex request on a cheap model is a quality regression wearing
+/// a resilience label. Capped at two, because a third alternate adds latency to a request
+/// that is already having a bad time.
+fn alternates_for(
+    state: &AppState,
+    request: &NormalizedRequest,
+    decision: &crate::engine::router::RoutingDecision,
+) -> Vec<(String, String)> {
+    let Some(selected) = state.pricing.get(&decision.served_model) else {
+        return Vec::new();
+    };
+    let requirements = crate::metering::pricing::Requirements {
+        tools: request.requires_tools(),
+        vision: request.requires_vision(),
+        min_context: request.estimated_input_tokens().min(u32::MAX as u64) as u32,
+    };
+
+    let mut candidates: Vec<&crate::metering::pricing::ModelPricing> = state
+        .pricing
+        .all()
+        .filter(|m| m.provider != selected.provider)
+        .filter(|m| m.tier >= selected.tier)
+        .filter(|m| crate::metering::pricing::PricingTable::satisfies(m, requirements))
+        .collect();
+
+    // Cheapest first, then by id: a deterministic order means the same outage produces the
+    // same failover every time, which is what makes an incident reproducible.
+    candidates.sort_by(|a, b| {
+        a.blended_per_mtok()
+            .cmp(&b.blended_per_mtok())
+            .then_with(|| a.model_id.cmp(&b.model_id))
+    });
+
+    candidates
+        .into_iter()
+        .take(2)
+        .map(|m| (m.model_id.clone(), m.provider.clone()))
+        .collect()
 }
 
 /// One provider call with the retry policy from Part 5 [7].
@@ -625,23 +817,13 @@ async fn handle_chat(
         return Err(limit.into_error());
     }
 
-    // ---- [3] Budget --------------------------------------------------------------
-    let budget_decision =
-        budget::check(state.store.as_ref(), &auth_context, None, None, None).await?;
-    if !budget_decision.allowed {
-        state.metrics.record_budget_blocked(budget_decision.scope);
-        record_rejection(
-            state,
-            &auth_context,
-            "/v1/chat/completions",
-            402,
-            "budget_exceeded",
-        )
-        .await;
-        return Err(budget_decision.into_error());
-    }
-
     // ---- [4] Parse ---------------------------------------------------------------
+    // Parsing moved ahead of the budget check, which the pipeline numbering has as [3].
+    // The budget check reserves a *projected* cost rather than only reading a counter (see
+    // `middleware::budget`), and a projection needs the model and the prompt — both of
+    // which only exist after parsing. Parsing has no side effects and no external I/O, so
+    // the only thing the swap changes is that a request too malformed to price is refused
+    // for being malformed rather than for a budget it was never measured against.
     if body.len() > state.config.max_body_bytes {
         return Err(AegisError::PayloadTooLarge);
     }
@@ -654,6 +836,13 @@ async fn handle_chat(
         ));
     }
 
+    // ---- [3] Budget --------------------------------------------------------------
+    let reservation =
+        match reserve_budget(state, &auth_context, &request, "/v1/chat/completions").await? {
+            Ok(reservation) => reservation,
+            Err(error) => return Err(error),
+        };
+
     let hint = RoutingHint::parse(
         headers
             .get("x-aegis-routing-hint")
@@ -661,14 +850,25 @@ async fn handle_chat(
     );
 
     if request.stream {
-        return stream_chat(state, &auth_context, request, hint).await;
+        return stream_chat(state, &auth_context, request, hint, reservation).await;
     }
 
     // ---- [5]-[9] Pipeline --------------------------------------------------------
-    let outcome = execute(state, &auth_context, request, hint).await?;
+    let outcome = match execute(state, &auth_context, request, hint).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // The request never produced a billable response, so give the projection back
+            // rather than leaving it held against the customer's ceiling until it expires.
+            reservation.release(state.store.as_ref()).await;
+            return Err(e);
+        }
+    };
 
     // ---- [10] Usage emission (non-blocking) --------------------------------------
-    let event = outcome.usage_event(&auth_context, 200, &state.config.region);
+    let mut event = outcome.usage_event(&auth_context, 200, &state.config.region);
+    // Hand the held projection to `emit`, which applies the correction to the real cost.
+    // `reserved_mc` is how it knows this request's projection is already in the counters.
+    event.reserved_mc = reservation.commit();
     // Only count a request as metered when it was actually persisted. Incrementing this
     // unconditionally (the previous behaviour) meant the "metering completeness" metric
     // and dashboard panel could never detect the one failure mode they exist to catch —
@@ -713,11 +913,27 @@ async fn handle_chat(
 /// chunk and metered after the stream completes. Principle 2 holds for streams too — the
 /// usage event is emitted from inside the stream, so a client that disconnects mid-stream
 /// is still billed for the tokens the provider produced.
+///
+/// # Where failover is and is not possible
+///
+/// Opening the upstream stream is retried and failed over exactly like a non-streaming
+/// call: until the first byte reaches the client, nothing is observable and a different
+/// provider can serve the request transparently. Once bytes have been sent, the response
+/// is committed — a second provider would produce a different continuation of a partly
+/// delivered answer, which is worse than an honest error. So a mid-stream failure ends the
+/// stream with an error event, and is recorded as a failure against the provider's circuit
+/// breaker so the *next* request routes around it.
+///
+/// That health recording is new. Before it, neither streaming entry point called
+/// `record_success` or `record_failure` at all, so a provider failing every streaming
+/// request could never trip its own circuit — on the endpoint built for streaming-heavy
+/// clients. Found in the enterprise readiness audit.
 async fn stream_chat(
     state: &AppState,
     auth_context: &AuthContext,
     request: NormalizedRequest,
     hint: RoutingHint,
+    reservation: budget::Reservation,
 ) -> Result<Response> {
     let started = Instant::now();
     let request_id = Uuid::new_v4();
@@ -734,39 +950,53 @@ async fn stream_chat(
     let router = Router::with_classifier(Classifier::new());
     let decision = router.route(&request, &state.pricing, &state.health, &inputs)?;
 
-    let provider = state
-        .providers
-        .for_model(&decision.served_model)
-        .ok_or_else(|| {
-            AegisError::AllProvidersFailed(format!("no adapter serves {}", decision.served_model))
-        })?;
-    let credential = resolve_credential(state, auth_context, provider.id()).await?;
+    let requested_provider = state
+        .pricing
+        .get(&requested_model)
+        .map(|m| m.provider.clone())
+        .unwrap_or_else(|| decision.provider.clone());
+    let chain = FallbackChain::build(
+        &decision.served_model,
+        &decision.provider,
+        &requested_model,
+        &requested_provider,
+        &alternates_for(state, &request, &decision),
+    );
 
-    let timeout = if is_reasoning_model(&decision.served_model) {
-        state.config.provider_timeout_reasoning
-    } else {
-        state.config.provider_timeout
+    let opened = match open_stream_with_fallback(state, auth_context, &request, &chain).await {
+        Ok(opened) => opened,
+        Err(e) => {
+            // Nothing was streamed, so nothing is billable. Give the projection back.
+            reservation.release(state.store.as_ref()).await;
+            return Err(e);
+        }
     };
 
     let overhead_ms = started.elapsed().as_secs_f64() * 1_000.0;
 
-    let upstream = provider
-        .chat_stream(
-            &state.http,
-            &request,
-            &decision.served_model,
-            &credential,
-            timeout,
-        )
-        .await?;
+    let StreamAttempt {
+        upstream,
+        model_id: served_model,
+        provider_id,
+        used_fallback,
+    } = opened;
 
     let state_for_stream = state.clone();
     let auth_for_stream = auth_context.clone();
-    let served_model = decision.served_model.clone();
-    let provider_id = provider.id().to_string();
     let estimated_input = request.estimated_input_tokens();
     let complexity = decision.complexity_score;
-    let routing_reason = decision.reason;
+    let routing_reason = if used_fallback {
+        RoutingReason::Fallback
+    } else {
+        decision.reason
+    };
+    // Recorded here, after failover has resolved, rather than at selection time. The
+    // non-streaming path had the same bug: `record_routing` ran before the fallback chain
+    // executed, so the one aggregate an SRE would alert on -- "how often are we falling
+    // back" -- could structurally never show a fallback.
+    state
+        .metrics
+        .record_routing(routing_reason.as_str(), &served_model);
 
     // Accumulated as the stream runs, then metered when it ends.
     let mut final_usage: Option<TokenUsage> = None;
@@ -857,7 +1087,38 @@ async fn stream_chat(
             // cannot express.
             200,
         );
+        // A stream that died partway still failed, and the circuit breaker has to hear
+        // about it or the next request routes straight back into the same provider. This
+        // is the only place a mid-stream failure can be observed — by the time the error
+        // chunk arrives, `open_stream_with_fallback` has long since returned success.
+        if let Some(error_type) = stream_error.as_deref() {
+            let after = state_for_stream.health.record_failure(&provider_id);
+            state_for_stream
+                .metrics
+                .record_provider_error(&provider_id, error_type);
+            if after == fallback::CircuitState::Open {
+                state_for_stream
+                    .metrics
+                    .record_circuit_change(&provider_id, after.as_str());
+            }
+            tracing::warn!(
+                request_id = %request_id,
+                org_id = %auth_for_stream.org_id,
+                provider = %provider_id,
+                model = %served_model,
+                error_type = %error_type,
+                "stream failed after content was already sent; cannot fail over, \
+                 recorded against the provider's circuit"
+            );
+        } else {
+            state_for_stream.health.record_success(&provider_id);
+        }
+
         event.error_type = stream_error;
+        // Convert the held projection into the real cost, exactly as the non-streaming
+        // path does. Without this the reservation would sit on the counter until it
+        // expired, and every subsequent request would see inflated spend.
+        event.reserved_mc = reservation.commit();
 
         // Metering completeness must reflect whether the event was actually durable, not
         // whether we attempted to make it durable. The prior version incremented this
@@ -877,8 +1138,13 @@ async fn stream_chat(
                  could not be persisted"
             ),
         }
-        state_for_stream.metrics.record_request("/v1/chat/completions", 200);
+        let status = if event.error_type.is_some() { 502 } else { 200 };
+        state_for_stream.metrics.record_request("/v1/chat/completions", status);
         state_for_stream.metrics.record_savings(savings.gross_savings.as_i64());
+        state_for_stream.metrics.record_latency_ms(
+            started.elapsed().as_millis().min(u32::MAX as u128) as f64,
+        );
+        state_for_stream.metrics.record_overhead_ms(overhead_ms);
     };
 
     let mut response = Response::new(Body::from_stream(sse));
@@ -901,6 +1167,52 @@ async fn stream_chat(
     Ok(response)
 }
 
+/// Load this organisation's budgets and atomically reserve this request's projected cost.
+///
+/// Returns `Ok(Ok(reservation))` to proceed, `Ok(Err(error))` when a hard limit refuses the
+/// request (already metered and counted), and `Err` only for a genuine internal failure.
+///
+/// Shared by `/v1/chat/completions`, `/v1/messages`, and `/v1/embeddings` so all three
+/// enforce identically — before this existed each passed `None` for every limit, which
+/// meant org, team, and regional budgets were configurable, listed on the dashboard, and
+/// enforced nowhere.
+pub(crate) async fn reserve_budget(
+    state: &AppState,
+    auth: &AuthContext,
+    request: &NormalizedRequest,
+    path: &str,
+) -> Result<std::result::Result<budget::Reservation, AegisError>> {
+    let region = Some(state.config.region.as_str());
+    let limits = budget::load_limits(state.store.as_ref(), state.db.as_ref(), auth, region).await;
+    let projected = budget::project_cost(request, &state.pricing);
+
+    match budget::check_and_reserve(
+        state.store.as_ref(),
+        auth,
+        &limits,
+        region,
+        projected.as_i64(),
+    )
+    .await?
+    {
+        budget::BudgetOutcome::Allowed(reservation) => Ok(Ok(reservation)),
+        budget::BudgetOutcome::Denied(decision) => {
+            state.metrics.record_budget_blocked(decision.scope);
+            tracing::info!(
+                org_id = %auth.org_id,
+                scope = decision.scope,
+                spend_mc = decision.spend.as_i64(),
+                limit_mc = decision.limit.unwrap_or(MicroCents::ZERO).as_i64(),
+                projected_mc = projected.as_i64(),
+                "request refused: hard budget would be exceeded"
+            );
+            record_rejection_for_model(state, auth, &request.model, path, 402, "budget_exceeded")
+                .await;
+            Ok(Err(decision.into_error()))
+        }
+    }
+}
+
 /// Meter a request rejected before it reached a provider.
 ///
 /// Principle 2: every request produces a usage record, including the ones we refuse.
@@ -911,11 +1223,27 @@ async fn record_rejection(
     status: u16,
     error_type: &str,
 ) {
+    record_rejection_for_model(state, auth, "unknown", path, status, error_type).await;
+}
+
+/// As [`record_rejection`], for a rejection that happened after the model was known.
+///
+/// A 402 recorded against `unknown` is not much use to a customer asking which model they
+/// were blocked on, and the budget check now runs after parsing, so the real name is
+/// available.
+async fn record_rejection_for_model(
+    state: &AppState,
+    auth: &AuthContext,
+    model: &str,
+    path: &str,
+    status: u16,
+    error_type: &str,
+) {
     let event = UsageEvent::rejected(
         Uuid::new_v4(),
         auth.org_id,
         auth.api_key_id,
-        "unknown".to_string(),
+        model.to_string(),
         status,
         error_type,
         0.0,

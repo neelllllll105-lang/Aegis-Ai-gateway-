@@ -107,37 +107,171 @@ pub fn check_metering_completeness(state: &AppState) -> Option<String> {
     ))
 }
 
+/// Where the previous run's drift observation for an organisation is kept.
+///
+/// Repairing a counter takes two consecutive observations of the same drift, so one
+/// snapshot has to survive between runs.
+fn last_observation_key(org_id: Uuid) -> String {
+    format!("aegis:reconcile:last:{org_id}")
+}
+
 /// Run reconciliation on a schedule.
-pub async fn run(state: AppState, org_ids: Vec<Uuid>) {
+///
+/// Discovers organisations itself rather than taking a fixed list. Requiring the caller to
+/// supply one is why this worker existed, passed its unit tests, and was **never spawned**
+/// — `main.rs` had nothing sensible to pass, so the one job that watches for silent
+/// billing loss never ran at all. Found in the enterprise readiness audit.
+pub async fn run(state: AppState) {
     let mut ticker = tokio::time::interval(INTERVAL);
+    // The first tick fires immediately; skip it so startup is not competing with traffic.
+    ticker.tick().await;
+
     loop {
         ticker.tick().await;
+        run_once(&state).await;
+    }
+}
 
-        if let Some(gap) = check_metering_completeness(&state) {
-            tracing::error!(gap, "metering completeness check failed");
+/// One reconciliation pass. Separated from the loop so it can be triggered on demand.
+pub async fn run_once(state: &AppState) {
+    if let Some(gap) = check_metering_completeness(state) {
+        tracing::error!(gap, "metering completeness check failed");
+    }
+
+    let Ok(pool) = state.db() else {
+        tracing::debug!("reconciliation skipped: no database configured");
+        return;
+    };
+
+    let org_ids = match repo::list_active_org_ids(pool).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::error!(error = %e, "reconciliation could not list organisations");
+            return;
         }
+    };
 
-        for org_id in &org_ids {
-            match reconcile_org(&state, *org_id).await {
-                Ok(result) if result.is_significant() => {
-                    // Error level, not warn: this is a billing-accuracy incident.
-                    tracing::error!(
-                        org_id = %result.org_id,
-                        drift_mc = result.drift_mc,
-                        direction = result.direction(),
-                        counter = result.counter_spend_mc,
-                        recorded = result.recorded_spend_mc,
-                        "billing drift exceeds threshold"
-                    );
-                }
-                Ok(result) => tracing::debug!(
+    let mut significant = 0usize;
+    for org_id in org_ids {
+        match reconcile_org(state, org_id).await {
+            Ok(result) if result.is_significant() => {
+                significant += 1;
+                // Error level, not warn: this is a billing-accuracy incident.
+                tracing::error!(
+                    org_id = %result.org_id,
+                    drift_mc = result.drift_mc,
+                    direction = result.direction(),
+                    counter = result.counter_spend_mc,
+                    recorded = result.recorded_spend_mc,
+                    "billing drift exceeds threshold"
+                );
+                repair_if_confirmed(state, &result).await;
+            }
+            Ok(result) => {
+                let _ = state.store.del(&last_observation_key(result.org_id)).await;
+                tracing::debug!(
                     org_id = %result.org_id,
                     drift_mc = result.drift_mc,
                     "reconciliation clean"
-                ),
-                Err(e) => tracing::error!(org_id = %org_id, error = %e, "reconciliation failed"),
+                );
             }
+            Err(e) => tracing::error!(org_id = %org_id, error = %e, "reconciliation failed"),
         }
+    }
+
+    state.metrics.record_reconciliation(significant);
+}
+
+/// Bring a counter back down to the authoritative figure, but only when it is safe.
+///
+/// The module's standing rule is that PostgreSQL is authoritative and a mismatch is
+/// reported rather than papered over — silently rewriting a billing number to match
+/// whichever source was trusted last is how a reconciliation job becomes the bug. Two
+/// narrow conditions make a repair the right call anyway:
+///
+/// * **Only `counter_ahead`.** A counter above the records over-blocks a customer against
+///   their own budget. The opposite direction would mean forgiving spend that was really
+///   incurred, which is never repaired here.
+/// * **Only when confirmed twice.** The counters lead the records by design — the writer
+///   is asynchronous — so a single observation cannot distinguish a leak from a write
+///   still in flight. Two consecutive runs a day apart can.
+///
+/// The signature this catches in practice is a budget reservation orphaned by a process
+/// that died between reserving and settling. Nothing else produces persistent, one-sided,
+/// counter-ahead drift.
+async fn repair_if_confirmed(state: &AppState, result: &Reconciliation) {
+    if result.direction() != "counter_ahead" {
+        return;
+    }
+
+    let key = last_observation_key(result.org_id);
+    let previous: Option<i64> = state
+        .store
+        .get(&key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok());
+
+    let Some(previous_drift) = previous else {
+        // First sighting. Remember it and wait for confirmation.
+        let _ = state
+            .store
+            .set_ex(
+                &key,
+                &result.drift_mc.to_string(),
+                INTERVAL.saturating_mul(3),
+            )
+            .await;
+        tracing::warn!(
+            org_id = %result.org_id,
+            drift_mc = result.drift_mc,
+            "counter is ahead of records; will repair if the same drift is still present \
+             on the next run"
+        );
+        return;
+    };
+
+    // Drift that grew is live traffic outrunning the writer, not a leak. Only a drift that
+    // has stopped moving is stale.
+    if result.drift_mc > previous_drift {
+        tracing::warn!(
+            org_id = %result.org_id,
+            previous_drift_mc = previous_drift,
+            drift_mc = result.drift_mc,
+            "counter drift is still growing; not repairing"
+        );
+        let _ = state
+            .store
+            .set_ex(
+                &key,
+                &result.drift_mc.to_string(),
+                INTERVAL.saturating_mul(3),
+            )
+            .await;
+        return;
+    }
+
+    let correction = -result.drift_mc;
+    let counter_key = usage::org_spend_key(result.org_id, Utc::now());
+    match state.store.incr_by(&counter_key, correction, None).await {
+        Ok(now) => {
+            tracing::warn!(
+                org_id = %result.org_id,
+                correction_mc = correction,
+                counter_now_mc = now,
+                recorded_mc = result.recorded_spend_mc,
+                "repaired a stale spend counter down to the recorded figure; the most \
+                 likely cause is a budget reservation orphaned by a process that stopped \
+                 between reserving and settling"
+            );
+            let _ = state.store.del(&key).await;
+        }
+        Err(e) => tracing::error!(
+            org_id = %result.org_id,
+            error = %e,
+            "could not repair a stale spend counter"
+        ),
     }
 }
 

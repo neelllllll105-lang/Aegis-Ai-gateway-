@@ -1,16 +1,50 @@
 //! Budget enforcement — pipeline stage [3].
 //!
-//! Reads Redis spend counters and rejects with **402 Payment Required** when a hard limit
-//! is exceeded. Budget: 0.1ms, so this is counter reads only — the authoritative figures
-//! are rebuilt from `usage_records` by the reconciliation worker.
+//! Rejects with **402 Payment Required** when a hard limit is exceeded. Budget: 0.1ms, so
+//! this is counter operations only — the authoritative figures are rebuilt from
+//! `usage_records` by the reconciliation worker.
+//!
+//! # Reserve, then true up
+//!
+//! A budget check that only *reads* a counter is not enforcement. The cost of a request is
+//! not known until after the provider answers, so a read-compare-then-charge-later design
+//! leaves a window in which every concurrent request sees the same pre-request spend and
+//! every one of them is admitted. That was measured, not theorised: 20 simultaneous
+//! requests against a $1.00 hard limit with $0.05 of headroom admitted 2-5 of them, 8 runs
+//! out of 8 (enterprise readiness audit, 2026-08-25).
+//!
+//! So the check does not read. It **reserves**:
+//!
+//! 1. [`check_and_reserve`] atomically adds a *projected* cost to every applicable spend
+//!    counter and inspects the value that increment returned. One round trip, one atomic
+//!    operation per scope — the same primitive the rate limiter's proven-atomic Lua script
+//!    relies on.
+//! 2. If any scope would breach its limit, every increment already applied is rolled back
+//!    and the request is refused. A refused request leaves the counters exactly as it
+//!    found them.
+//! 3. When the request finishes, [`Reservation::commit`] hands the held projection to
+//!    [`crate::metering::usage::emit`], which applies the *difference* between the real
+//!    cost and the projection so the counter ends up holding the true figure. Exactly one
+//!    of the two moves the counter — see [`Reservation::commit`] for why that matters.
+//!
+//! The reservation is therefore live for exactly the duration of the request, which is the
+//! window a competing request needs to see it in.
+//!
+//! # Hard limits block; soft limits alert
+//!
+//! `budgets.hard_limit` is honoured rather than ignored. A hard limit refuses a request
+//! that *would* take the org past the line — that is what "hard" has to mean, or the
+//! number is advisory. A soft limit never blocks; it exists to fire the threshold alerts
+//! in [`crate::workers::budget_alerts`].
 //!
 //! # Fail open, deliberately
 //!
-//! If Redis is unreachable, [`crate::metering::usage::current_spend`] reports zero and the
-//! request proceeds. That is a considered trade: during a cache outage we would rather
-//! serve traffic we reconcile afterwards than reject paying customers because our own
-//! infrastructure is unwell. The exposure is bounded by how long an outage lasts, and the
-//! reconciliation job surfaces any overspend.
+//! If the store is unreachable, a counter reads as zero and the request proceeds. That is
+//! a considered trade: during an outage of *our* infrastructure we would rather serve
+//! traffic we reconcile afterwards than reject paying customers. The exposure is bounded
+//! by outage duration, and the reconciliation worker rebuilds the counters from
+//! `usage_records` afterwards — which is also what recovers a reservation orphaned by a
+//! process that died mid-request.
 //!
 //! The free tier's *request* allowance is enforced the same way, which is the one place
 //! where failing open costs us real money — so free-tier overage is capped by the pooled
@@ -22,6 +56,8 @@ use crate::middleware::auth::AuthContext;
 use crate::money::MicroCents;
 use crate::store::KvStore;
 use crate::types::NormalizedRequest;
+use chrono::Utc;
+use uuid::Uuid;
 
 /// A spend limit that applies to one region only (`P7.2`).
 ///
@@ -65,11 +101,277 @@ impl BudgetDecision {
     }
 }
 
-/// Check every budget that applies to this request.
+/// One budget counter this request touches, and the ceiling that applies to it.
 ///
-/// Checked innermost first — key, then team, then organisation — so the rejection names
-/// the most specific limit that was actually hit, which is the one the customer can act
-/// on.
+/// `limit` is `None` when the counter is tracked but unconstrained. Those still take part
+/// in a reservation: [`crate::metering::usage::emit`] subtracts the reserved amount from
+/// every counter it bumps, so a counter that skipped the reservation would end the request
+/// under-counted by exactly the projection.
+#[derive(Debug, Clone)]
+struct Scope {
+    name: &'static str,
+    key: String,
+    limit: Option<i64>,
+    /// Soft limits never refuse a request — they exist to fire threshold alerts.
+    hard: bool,
+}
+
+/// Every budget applying to one organisation, resolved from the database once and cached.
+///
+/// Before this existed, `budgets` rows were writable through the management API, listed on
+/// the dashboard, and **never consulted by the request path** — every call site passed
+/// `None` for the org, team, and region limits, so the only ceiling with any effect was
+/// the one stored directly on the API key. Found in the enterprise readiness audit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BudgetLimits {
+    /// Organisation-wide monthly ceiling.
+    pub org: Option<Limit>,
+    /// Ceiling for the calling key's team.
+    pub team: Option<Limit>,
+    /// Ceiling for the calling key itself, from the `budgets` table.
+    ///
+    /// Separate from [`AuthContext::monthly_budget_mc`], which is the limit stored on the
+    /// `api_keys` row. Both are enforced; the tighter one wins naturally, because whichever
+    /// is breached first refuses the request.
+    pub key: Option<Limit>,
+    /// Ceiling for the region serving this request.
+    pub region: Option<Limit>,
+}
+
+/// A ceiling and whether breaching it refuses the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Limit {
+    pub limit_mc: i64,
+    pub hard: bool,
+}
+
+impl Limit {
+    pub fn hard(limit_mc: i64) -> Limit {
+        Limit {
+            limit_mc,
+            hard: true,
+        }
+    }
+}
+
+impl BudgetLimits {
+    /// Whether any ceiling at all applies. Lets the caller skip work entirely.
+    pub fn is_empty(&self) -> bool {
+        self.org.is_none() && self.team.is_none() && self.key.is_none() && self.region.is_none()
+    }
+
+    /// Fold `budgets` rows into the four scopes this request could breach.
+    ///
+    /// Only monthly budgets are honoured, because the counters they are checked against are
+    /// monthly — enforcing a `daily` row against a month-to-date counter would refuse
+    /// traffic for the rest of the month the moment one day went heavy. The management API
+    /// refuses to create one; this is the second line of defence for rows that predate it.
+    ///
+    /// Rows scoped to a team, key, or region other than this request's are skipped rather
+    /// than applied — the most common way a budget system goes wrong is capping the wrong
+    /// caller.
+    pub fn from_rows(
+        rows: &[crate::db::repo::Budget],
+        team_id: Option<Uuid>,
+        api_key_id: Option<Uuid>,
+        region: Option<&str>,
+    ) -> BudgetLimits {
+        let mut limits = BudgetLimits::default();
+        for row in rows
+            .iter()
+            .filter(|r| r.period.eq_ignore_ascii_case("monthly"))
+        {
+            let limit = Limit {
+                limit_mc: row.limit_mc,
+                hard: row.hard_limit,
+            };
+            match (row.team_id, row.api_key_id, row.region.as_deref()) {
+                (None, None, None) => limits.org = Some(tighter(limits.org, limit)),
+                (Some(t), _, _) if Some(t) == team_id => {
+                    limits.team = Some(tighter(limits.team, limit))
+                }
+                (_, Some(k), _) if Some(k) == api_key_id => {
+                    limits.key = Some(tighter(limits.key, limit))
+                }
+                (_, _, Some(r))
+                    if region.is_some_and(|serving| serving.eq_ignore_ascii_case(r)) =>
+                {
+                    limits.region = Some(tighter(limits.region, limit))
+                }
+                // Scoped to a different team, key, or region than this caller's. Not ours.
+                _ => {}
+            }
+        }
+        limits
+    }
+}
+
+/// How long a resolved budget set is cached before the database is consulted again.
+///
+/// Sixty seconds, matching the API-key cache: long enough to keep PostgreSQL off a hot
+/// path budgeted at 0.1ms, short enough that raising a limit for a blocked customer takes
+/// effect while the operator is still on the call.
+const LIMITS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Load every budget applying to this request, cached.
+///
+/// Returns an empty set — meaning "no ceiling" — when there is no database, when the query
+/// fails, or when the organisation has configured nothing. Failing open here is the same
+/// trade the rest of this module makes: an unavailable budget table must not stop a paying
+/// customer's traffic.
+pub async fn load_limits(
+    store: &dyn KvStore,
+    db: Option<&sqlx::PgPool>,
+    auth: &AuthContext,
+    region: Option<&str>,
+) -> BudgetLimits {
+    // Cached per key and region, not per org: two keys in the same org can sit in
+    // different teams and therefore resolve to different ceilings.
+    let cache_key = format!(
+        "aegis:budget_limits:{}:{}:{}",
+        auth.org_id,
+        auth.api_key_id.map(|id| id.to_string()).unwrap_or_default(),
+        region.unwrap_or("-")
+    );
+
+    if let Ok(Some(raw)) = store.get(&cache_key).await {
+        if let Ok(limits) = serde_json::from_str::<BudgetLimits>(&raw) {
+            return limits;
+        }
+    }
+
+    let Some(pool) = db else {
+        return BudgetLimits::default();
+    };
+    let Ok(rows) = crate::db::repo::list_budgets(pool, auth.org_id).await else {
+        tracing::warn!(
+            org_id = %auth.org_id,
+            "could not load budgets; proceeding without a ceiling for this request"
+        );
+        return BudgetLimits::default();
+    };
+
+    let limits = BudgetLimits::from_rows(&rows, auth.team_id, auth.api_key_id, region);
+    if let Ok(encoded) = serde_json::to_string(&limits) {
+        let _ = store.set_ex(&cache_key, &encoded, LIMITS_CACHE_TTL).await;
+    }
+    limits
+}
+
+/// Drop every cached budget set for an organisation.
+///
+/// Called when a budget is created or deleted, so a change takes effect on the next
+/// request rather than up to [`LIMITS_CACHE_TTL`] later. Without this, raising a limit for
+/// a customer who is currently blocked appears not to work.
+pub async fn invalidate_limits(store: &dyn KvStore, org_id: Uuid) {
+    let _ = store
+        .del_prefix(&format!("aegis:budget_limits:{org_id}:"))
+        .await;
+}
+
+/// The lower of two ceilings, preferring the stricter enforcement mode on a tie.
+fn tighter(existing: Option<Limit>, candidate: Limit) -> Limit {
+    match existing {
+        Some(current) if current.limit_mc < candidate.limit_mc => current,
+        Some(current) if current.limit_mc == candidate.limit_mc => Limit {
+            limit_mc: current.limit_mc,
+            hard: current.hard || candidate.hard,
+        },
+        _ => candidate,
+    }
+}
+
+/// Spend held against every applicable counter for the lifetime of one request.
+///
+/// Created by [`check_and_reserve`], consumed by [`Reservation::settle`] (the request ran)
+/// or [`Reservation::release`] (it did not). Dropping one without doing either logs, and
+/// leaves the reconciliation worker to correct the counter from `usage_records` — the same
+/// mechanism that recovers a reservation orphaned by a process that died mid-request.
+#[derive(Debug)]
+#[must_use = "a reservation must be settled or released, or it holds budget until reconciliation"]
+pub struct Reservation {
+    keys: Vec<String>,
+    amount_mc: i64,
+    resolved: bool,
+}
+
+impl Reservation {
+    /// The projected amount currently held.
+    pub fn amount_mc(&self) -> i64 {
+        self.amount_mc
+    }
+
+    /// Hand the held projection over to [`crate::metering::usage::emit`], which applies
+    /// the correction to the real cost.
+    ///
+    /// Returns the amount to put on [`crate::metering::usage::UsageEvent::reserved_mc`].
+    ///
+    /// # Why this does no I/O
+    ///
+    /// The obvious design has `settle` apply `actual - projected` itself. That is wrong,
+    /// and wrong in a way that is easy to miss and expensive to ship: `emit` *also*
+    /// applies `actual - reserved` to the very same counters, so both running leaves each
+    /// counter one full correction too high — every customer's metered spend inflated by
+    /// the difference between estimate and reality, on every request. Caught by
+    /// `emit_does_not_double_count_a_reserved_request`, which is the reason it exists.
+    ///
+    /// So exactly one place moves the counter after a reservation, and it is `emit` —
+    /// which already owns the org, team, key, and region counters and knows the real cost.
+    /// This method exists to make the handover explicit and to mark the reservation
+    /// resolved so [`Drop`] does not report it as leaked.
+    ///
+    /// If `emit` then fails, the projection stays held rather than being released. That is
+    /// the safe direction: the request *was* served and *is* billable, so holding budget
+    /// against it is closer to the truth than giving it back. The loss is logged, counted
+    /// by `aegis_usage_events_lost_total`, and repaired by the reconciliation worker.
+    #[must_use = "the returned amount must be put on UsageEvent::reserved_mc, or emit will \
+                  double-count this request"]
+    pub fn commit(mut self) -> i64 {
+        self.resolved = true;
+        self.amount_mc
+    }
+
+    /// Give the projection back untouched, for a request that never reached a provider.
+    pub async fn release(mut self, store: &dyn KvStore) {
+        self.resolved = true;
+        if self.amount_mc == 0 {
+            return;
+        }
+        for key in &self.keys {
+            let _ = store.incr_by(key, -self.amount_mc, Some(COUNTER_TTL)).await;
+        }
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if !self.resolved && self.amount_mc != 0 {
+            // Cannot do async work here, so this is a report rather than a repair. The
+            // counter self-corrects when the reconciliation worker next runs.
+            tracing::warn!(
+                amount_mc = self.amount_mc,
+                scopes = self.keys.len(),
+                "budget reservation dropped without settle or release; the counter holds \
+                 this amount until reconciliation rebuilds it from usage_records"
+            );
+        }
+    }
+}
+
+/// Either a granted reservation or the decision that refused it.
+#[derive(Debug)]
+pub enum BudgetOutcome {
+    /// The request may proceed; the projection is held until settled.
+    Allowed(Reservation),
+    /// The request is refused. Nothing was left held.
+    Denied(Box<BudgetDecision>),
+}
+
+/// Read-only budget check. Reports where an organisation stands without reserving.
+///
+/// This is what the dashboard and a pre-flight estimate want. **It is not enforcement** —
+/// a request path that uses it admits concurrent requests past the limit, which is exactly
+/// the bug that motivated [`check_and_reserve`]. The request path must use that instead.
 pub async fn check(
     store: &dyn KvStore,
     auth: &AuthContext,
@@ -77,57 +379,28 @@ pub async fn check(
     team_budget_mc: Option<i64>,
     region_budget: Option<RegionBudget<'_>>,
 ) -> Result<BudgetDecision> {
-    if let (Some(api_key_id), Some(limit)) = (auth.api_key_id, auth.monthly_budget_mc) {
-        let spend = usage::current_key_spend(store, api_key_id).await;
-        if spend.as_i64() >= limit {
-            return Ok(BudgetDecision {
-                allowed: false,
-                spend,
-                limit: Some(MicroCents(limit)),
-                scope: "key",
-            });
-        }
-    }
+    let limits = BudgetLimits {
+        org: org_budget_mc.map(Limit::hard),
+        team: team_budget_mc.map(Limit::hard),
+        key: None,
+        region: region_budget.map(|r| Limit::hard(r.limit_mc)),
+    };
+    let region_name = region_budget.map(|r| r.region);
 
-    if let (Some(team_id), Some(limit)) = (auth.team_id, team_budget_mc) {
-        let spend = usage::current_team_spend(store, team_id).await;
-        if spend.as_i64() >= limit {
+    for scope in scopes(auth, &limits, region_name) {
+        let Some(limit) = scope.limit else { continue };
+        let spend = read_counter(store, &scope.key).await;
+        if spend >= limit {
             return Ok(BudgetDecision {
                 allowed: false,
-                spend,
+                spend: MicroCents(spend),
                 limit: Some(MicroCents(limit)),
-                scope: "team",
-            });
-        }
-    }
-
-    // Regional limit. An organisation running in several regions has one spend figure but
-    // several exposures: the org budget stops the total and does nothing to stop one
-    // region consuming the whole allowance before the others wake up.
-    if let Some(RegionBudget { region, limit_mc }) = region_budget {
-        let spend = usage::current_region_spend(store, auth.org_id, region).await;
-        if spend.as_i64() >= limit_mc {
-            return Ok(BudgetDecision {
-                allowed: false,
-                spend,
-                limit: Some(MicroCents(limit_mc)),
-                scope: "region",
+                scope: scope.name,
             });
         }
     }
 
     let org_spend = usage::current_spend(store, auth.org_id).await;
-    if let Some(limit) = org_budget_mc {
-        if org_spend.as_i64() >= limit {
-            return Ok(BudgetDecision {
-                allowed: false,
-                spend: org_spend,
-                limit: Some(MicroCents(limit)),
-                scope: "organization",
-            });
-        }
-    }
-
     Ok(BudgetDecision {
         allowed: true,
         spend: org_spend,
@@ -135,6 +408,151 @@ pub async fn check(
         scope: "organization",
     })
 }
+
+/// Atomically reserve `projected_mc` against every budget this request touches.
+///
+/// The increment *is* the check: `incr_by` returns the post-increment total, so a scope's
+/// ceiling is evaluated against a figure that already includes this request and every other
+/// request currently in flight. Two callers racing at the same headroom get two different
+/// totals back, and at most one of them fits.
+///
+/// On refusal, every increment already applied is rolled back before returning, so a
+/// rejected request leaves the counters exactly as it found them.
+pub async fn check_and_reserve(
+    store: &dyn KvStore,
+    auth: &AuthContext,
+    limits: &BudgetLimits,
+    region: Option<&str>,
+    projected_mc: i64,
+) -> Result<BudgetOutcome> {
+    let projected_mc = projected_mc.max(0);
+    let scopes = scopes(auth, limits, region);
+
+    let mut held: Vec<String> = Vec::with_capacity(scopes.len());
+    let mut breach: Option<BudgetDecision> = None;
+
+    for scope in &scopes {
+        // Fail open on a store error: an unreachable counter must not reject a paying
+        // customer. The scope is skipped rather than reserved, so nothing is left held.
+        let Ok(total) = store
+            .incr_by(&scope.key, projected_mc, Some(COUNTER_TTL))
+            .await
+        else {
+            continue;
+        };
+        held.push(scope.key.clone());
+
+        let Some(limit) = scope.limit else { continue };
+        if !scope.hard {
+            // Soft limits are for alerting, not refusal.
+            continue;
+        }
+
+        // Two ways to be over. `total > limit` catches the request that would cross the
+        // line — the case a hard limit exists to prevent. `committed >= limit` catches an
+        // organisation already at or past it, including when the projection is zero
+        // because the model has no price.
+        let committed = total - projected_mc;
+        if total > limit || committed >= limit {
+            breach = Some(BudgetDecision {
+                allowed: false,
+                spend: MicroCents(committed.max(0)),
+                limit: Some(MicroCents(limit)),
+                scope: scope.name,
+            });
+            break;
+        }
+    }
+
+    if let Some(decision) = breach {
+        // Roll back everything, including the scope that tripped: a refused request must
+        // not consume budget it was never allowed to spend.
+        if projected_mc != 0 {
+            for key in &held {
+                let _ = store.incr_by(key, -projected_mc, Some(COUNTER_TTL)).await;
+            }
+        }
+        return Ok(BudgetOutcome::Denied(Box::new(decision)));
+    }
+
+    Ok(BudgetOutcome::Allowed(Reservation {
+        keys: held,
+        amount_mc: projected_mc,
+        resolved: false,
+    }))
+}
+
+/// Every counter this request touches, innermost scope first.
+///
+/// Order matters for the error message: a rejection should name the most specific limit
+/// that was actually hit, because that is the one the customer can act on.
+fn scopes(auth: &AuthContext, limits: &BudgetLimits, region: Option<&str>) -> Vec<Scope> {
+    let at = Utc::now();
+    let mut scopes = Vec::with_capacity(4);
+
+    if let Some(api_key_id) = auth.api_key_id {
+        // The key can be capped in two places: on the `api_keys` row and by a `budgets`
+        // row. Both point at the same counter, so take the tighter of the two.
+        let from_key_row = auth.monthly_budget_mc.map(Limit::hard);
+        let limit = match (from_key_row, limits.key) {
+            (Some(a), Some(b)) => Some(tighter(Some(a), b)),
+            (a, b) => a.or(b),
+        };
+        scopes.push(Scope {
+            name: "key",
+            key: usage::key_spend_key(api_key_id, at),
+            limit: limit.map(|l| l.limit_mc),
+            hard: limit.is_none_or(|l| l.hard),
+        });
+    }
+
+    if let Some(team_id) = auth.team_id {
+        scopes.push(Scope {
+            name: "team",
+            key: usage::team_spend_key(team_id, at),
+            limit: limits.team.map(|l| l.limit_mc),
+            hard: limits.team.is_none_or(|l| l.hard),
+        });
+    }
+
+    // Regional limit. An organisation running in several regions has one spend figure but
+    // several exposures: the org budget stops the total and does nothing to stop one
+    // region consuming the whole allowance before the others wake up.
+    if let Some(region) = region {
+        scopes.push(Scope {
+            name: "region",
+            key: usage::org_region_spend_key(auth.org_id, region, at),
+            limit: limits.region.map(|l| l.limit_mc),
+            hard: limits.region.is_none_or(|l| l.hard),
+        });
+    }
+
+    scopes.push(Scope {
+        name: "organization",
+        key: usage::org_spend_key(auth.org_id, at),
+        limit: limits.org.map(|l| l.limit_mc),
+        hard: limits.org.is_none_or(|l| l.hard),
+    });
+
+    scopes
+}
+
+/// Read one counter, treating an unreadable one as zero. See "fail open" above.
+async fn read_counter(store: &dyn KvStore, key: &str) -> i64 {
+    store
+        .get(key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// TTL applied to a counter created by a reservation.
+///
+/// Matches [`crate::metering::usage`]'s own counter TTL so a counter first touched by a
+/// reservation expires on the same schedule as one first touched by an emit.
+const COUNTER_TTL: std::time::Duration = std::time::Duration::from_secs(45 * 24 * 3_600);
 
 /// Check the free tier's monthly request allowance.
 ///
@@ -195,6 +613,33 @@ mod tests {
             zero_retention: false,
             org_region: "eu-central".into(),
         })
+    }
+
+    /// A billable usage event for `cost` micro-cents, without emitting it.
+    fn billed_event(auth: &AuthContext, cost: i64) -> UsageEvent {
+        let mut event = UsageEvent::new(
+            Uuid::new_v4(),
+            auth.org_id,
+            auth.api_key_id,
+            auth.team_id,
+            "gpt-4o".into(),
+            "gpt-4o".into(),
+            "openai".into(),
+            TokenUsage {
+                input_tokens: 10,
+                output_tokens: 10,
+                estimated: false,
+            },
+            SavingsBreakdown::compute(MicroCents(cost), MicroCents(cost), 2_000),
+            10,
+            0.1,
+            CacheOutcome::Miss,
+            RoutingReason::Passthrough,
+            None,
+            200,
+        );
+        event.actual_cost_mc = cost;
+        event
     }
 
     /// Record `cost` micro-cents of spend for this caller.
@@ -568,62 +1013,62 @@ mod tests {
     // single-threaded `#[tokio::test]` runtime schedules spawned tasks cooperatively on
     // one OS thread, and this test's own first attempt under that default did not
     // reproduce the race even once in several runs — not because the check-then-act gap
-    // in `check()` isn't real (it plainly is, reading the function), but because
-    // cooperative single-threaded scheduling happened to let each task's check-then-spend
-    // sequence complete before the next task got a turn. Real production concurrency runs
-    // on genuinely parallel OS threads (`tokio::main`'s default multi-threaded runtime,
-    // same as `overhead_under_load.rs` uses), so the test needs to as well or it is
-    // testing a weaker property than the one that actually matters.
-    // #[ignore] rather than deleted or left to fail permanently: this documents a real,
-    // reproduced, currently-unfixed vulnerability (enterprise readiness audit, 2026-08-25)
-    // rather than a hypothetical one. Measured across 8 runs under genuine multi-thread
-    // parallelism: 2-5 of 20 concurrent requests admitted past a hard budget with only
-    // $0.05 of headroom, final spend $1.15-$1.45 against a $1.00 limit -- a 15-45%
-    // overshoot from concurrency alone, no application bug beyond the architecture. Run
-    // it directly with `cargo test -- --ignored concurrent_requests_can_overshoot`.
+    // was not real (it plainly was, reading the function), but because cooperative
+    // single-threaded scheduling happened to let each task's check-then-spend sequence
+    // complete before the next task got a turn. Real production concurrency runs on
+    // genuinely parallel OS threads, so the test needs to as well or it is proving a
+    // weaker property than the one that actually matters.
     //
-    // Left failing-on-purpose rather than fixed alongside this audit because the honest
-    // fix is bigger than it looks: `check()` runs before the provider call, but the real
-    // cost isn't known until after it returns, so an atomic fix needs a reserve-an-estimate
-    // -then-true-up model (or an atomic increment-check-and-rollback applied to every one
-    // of the four budget scopes: key, team, region, org) -- a genuine redesign of how spend
-    // accounting relates to the request lifecycle, not a bounded validation-style fix like
-    // the SSRF and data-residency gaps this same audit closed directly. Remove #[ignore]
-    // once that redesign lands; this test is what should turn green to prove it worked.
-    #[ignore = "documents a real, reproduced budget-bypass race — see comment above; run \
-                explicitly with --ignored, do not delete"]
+    // History, because it is the point of this test: written during the enterprise
+    // readiness audit (2026-08-25) to *demonstrate* a bypass, and it did — 2-5 of 20
+    // concurrent requests admitted past a hard budget with $0.05 of headroom, final spend
+    // $1.15-$1.45 against a $1.00 limit, 8 runs out of 8. It was committed `#[ignore]`d so
+    // the proof stayed runnable without permanently reddening CI. `check_and_reserve` then
+    // replaced read-compare with an atomic reserve-and-check, and this test is what proves
+    // it worked: same barrier, same headroom, same concurrency, now passing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn concurrent_requests_can_overshoot_a_hard_budget() {
+    async fn concurrent_requests_cannot_overshoot_a_hard_budget() {
         let store = std::sync::Arc::new(MemoryStore::new());
         let context = auth("pro");
         let limit = 1_000_000; // $1.00 hard budget
         let cost_per_request = 100_000; // $0.10 per request
+        let limits = BudgetLimits {
+            org: Some(Limit::hard(limit)),
+            ..BudgetLimits::default()
+        };
 
         // Prime spend to $0.95 — five cents of headroom, half a request's worth.
         spend(&store, &context, 950_000).await;
 
-        // A barrier forces all 20 tasks to call check() at effectively the same instant,
-        // rather than relying on tokio::spawn's scheduling to happen to overlap them —
-        // the whole point is to remove luck from whether the race window is hit.
+        // A barrier forces all 20 tasks to reserve at effectively the same instant, rather
+        // than relying on tokio::spawn's scheduling to happen to overlap them — the whole
+        // point is to remove luck from whether the race window is hit.
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(20));
 
-        // Fire 20 requests "concurrently": each checks the budget, and only AFTER being
-        // told it is allowed does it record its own spend — exactly the real pipeline's
-        // order (budget::check runs before the provider call; usage::emit runs after).
+        // Each task follows the real pipeline's order exactly: reserve a projection before
+        // the (here, simulated) provider call, then settle the real cost afterwards.
         let mut handles = Vec::new();
         for _ in 0..20 {
             let store = std::sync::Arc::clone(&store);
             let context = context.clone();
+            let limits = limits.clone();
             let barrier = std::sync::Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                let decision = check(store.as_ref(), &context, Some(limit), None, None)
-                    .await
-                    .unwrap();
-                if decision.allowed {
-                    spend(store.as_ref(), &context, cost_per_request).await;
+                let outcome =
+                    check_and_reserve(store.as_ref(), &context, &limits, None, cost_per_request)
+                        .await
+                        .unwrap();
+                match outcome {
+                    BudgetOutcome::Allowed(reservation) => {
+                        // The request runs and costs exactly what was projected, so the
+                        // correction `emit` would apply is zero and the held amount is
+                        // already the right figure.
+                        let _ = reservation.commit();
+                        true
+                    }
+                    BudgetOutcome::Denied(_) => false,
                 }
-                decision.allowed
             }));
         }
 
@@ -635,25 +1080,315 @@ mod tests {
         }
 
         let final_spend = usage::current_spend(store.as_ref(), context.org_id).await;
-
         println!(
             "admitted: {admitted}, final spend: {} micro-cents (limit was {limit})",
             final_spend.as_i64()
         );
 
-        // With $0.05 of headroom and a hard $1.00 budget, at most one request should ever
-        // have been let through — spend should land at $1.05, never higher. This is
-        // expected to FAIL on the current implementation: budget::check has no atomic
-        // reservation, so every concurrent request reads the same pre-request spend
-        // figure and is admitted before any of them has recorded its own cost.
+        // A hard limit means the line is not crossed. With $0.05 of headroom and requests
+        // costing $0.10, no request fits, so spend must not move at all.
         assert!(
-            final_spend.as_i64() <= limit + cost_per_request,
-            "BUDGET BYPASSED: {admitted} of 20 concurrent requests were admitted with only \
+            final_spend.as_i64() <= limit,
+            "budget bypassed: {admitted} of 20 concurrent requests were admitted with only \
              $0.05 of headroom against a $1.00 hard limit. Final spend {} micro-cents, \
-             {} micro-cents over the limit. budget::check() reads spend and compares it \
-             to the limit, but nothing reserves that spend atomically.",
+             {} over.",
             final_spend.as_i64(),
             final_spend.as_i64() - limit
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_requests_fill_a_budget_exactly_to_the_line() {
+        // The complement of the test above, and the one that proves the fix is not simply
+        // "refuse everything": with room for exactly four requests, exactly four are
+        // admitted — not three (too strict, revenue left on the table) and not five.
+        let store = std::sync::Arc::new(MemoryStore::new());
+        let context = auth("pro");
+        let limit = 1_000_000;
+        let cost_per_request = 250_000; // $0.25 — exactly four fit
+        let limits = BudgetLimits {
+            org: Some(Limit::hard(limit)),
+            ..BudgetLimits::default()
+        };
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(20));
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let store = std::sync::Arc::clone(&store);
+            let context = context.clone();
+            let limits = limits.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                match check_and_reserve(store.as_ref(), &context, &limits, None, cost_per_request)
+                    .await
+                    .unwrap()
+                {
+                    BudgetOutcome::Allowed(reservation) => {
+                        let _ = reservation.commit();
+                        true
+                    }
+                    BudgetOutcome::Denied(_) => false,
+                }
+            }));
+        }
+
+        let mut admitted = 0;
+        for handle in handles {
+            if handle.await.unwrap() {
+                admitted += 1;
+            }
+        }
+
+        assert_eq!(
+            admitted, 4,
+            "exactly four requests fit a $1.00 budget at $0.25 each"
+        );
+        assert_eq!(
+            usage::current_spend(store.as_ref(), context.org_id)
+                .await
+                .as_i64(),
+            limit
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_leaves_the_counter_untouched() {
+        // The rollback path. Without it, every refused request would still consume its own
+        // projection, so a customer sitting at their limit would watch their spend keep
+        // climbing from requests that were never served.
+        let store = MemoryStore::new();
+        let context = auth("pro");
+        let limits = BudgetLimits {
+            org: Some(Limit::hard(1_000_000)),
+            ..BudgetLimits::default()
+        };
+        spend(&store, &context, 1_000_000).await;
+
+        for _ in 0..5 {
+            let outcome = check_and_reserve(&store, &context, &limits, None, 100_000)
+                .await
+                .unwrap();
+            assert!(matches!(outcome, BudgetOutcome::Denied(_)));
+        }
+
+        assert_eq!(
+            usage::current_spend(&store, context.org_id).await.as_i64(),
+            1_000_000,
+            "refused requests must not accumulate spend"
+        );
+    }
+
+    #[tokio::test]
+    async fn committing_replaces_the_projection_with_the_real_cost() {
+        // The projection is an estimate. If the true-up were additive rather than a
+        // difference, every request would be billed twice against its own budget.
+        let store = MemoryStore::new();
+        let context = auth("pro");
+        let limits = BudgetLimits::default();
+
+        let BudgetOutcome::Allowed(reservation) =
+            check_and_reserve(&store, &context, &limits, None, 500_000)
+                .await
+                .unwrap()
+        else {
+            panic!("no limit configured, so nothing should refuse this");
+        };
+        assert_eq!(
+            usage::current_spend(&store, context.org_id).await.as_i64(),
+            500_000,
+            "the projection is held while the request runs"
+        );
+
+        // The request turned out cheaper than projected. `commit` hands the projection
+        // over; `emit` is what applies the correction, so the counter only moves there.
+        let reserved = reservation.commit();
+        assert_eq!(reserved, 500_000);
+
+        let mut event = billed_event(&context, 120_000);
+        event.reserved_mc = reserved;
+        usage::emit(&store, &event).await.unwrap();
+
+        assert_eq!(
+            usage::current_spend(&store, context.org_id).await.as_i64(),
+            120_000,
+            "the counter ends at the real cost, not projection plus cost"
+        );
+    }
+
+    #[tokio::test]
+    async fn releasing_gives_the_whole_projection_back() {
+        let store = MemoryStore::new();
+        let context = auth("pro");
+        let limits = BudgetLimits::default();
+
+        let BudgetOutcome::Allowed(reservation) =
+            check_and_reserve(&store, &context, &limits, None, 500_000)
+                .await
+                .unwrap()
+        else {
+            panic!("no limit configured");
+        };
+        reservation.release(&store).await;
+
+        assert_eq!(
+            usage::current_spend(&store, context.org_id).await.as_i64(),
+            0,
+            "a request that never ran must cost nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_does_not_double_count_a_reserved_request() {
+        // The two halves have to agree: `check_and_reserve` adds the projection, `emit`
+        // adds only the difference. This is the seam where a mistake would silently
+        // double every customer's metered spend.
+        let store = MemoryStore::new();
+        let context = auth("pro");
+        let limits = BudgetLimits::default();
+
+        let BudgetOutcome::Allowed(reservation) =
+            check_and_reserve(&store, &context, &limits, None, 300_000)
+                .await
+                .unwrap()
+        else {
+            panic!("no limit configured");
+        };
+        let reserved = reservation.commit();
+
+        let mut event = UsageEvent::new(
+            Uuid::new_v4(),
+            context.org_id,
+            context.api_key_id,
+            None,
+            "gpt-4o".into(),
+            "gpt-4o".into(),
+            "openai".into(),
+            TokenUsage {
+                input_tokens: 10,
+                output_tokens: 10,
+                estimated: false,
+            },
+            SavingsBreakdown::compute(MicroCents(400_000), MicroCents(400_000), 2_000),
+            10,
+            0.1,
+            CacheOutcome::Miss,
+            RoutingReason::Passthrough,
+            None,
+            200,
+        );
+        event.actual_cost_mc = 400_000;
+        event.reserved_mc = reserved;
+        usage::emit(&store, &event).await.unwrap();
+
+        assert_eq!(
+            usage::current_spend(&store, context.org_id).await.as_i64(),
+            400_000,
+            "a reserved-then-settled-then-emitted request must count exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_soft_limit_never_refuses() {
+        // `hard_limit = false` exists in the schema and was previously ignored entirely.
+        // A soft limit is for alerting; blocking on one would be a surprise a customer
+        // explicitly opted out of.
+        let store = MemoryStore::new();
+        let context = auth("pro");
+        let limits = BudgetLimits {
+            org: Some(Limit {
+                limit_mc: 1_000,
+                hard: false,
+            }),
+            ..BudgetLimits::default()
+        };
+        spend(&store, &context, 900_000).await;
+
+        let outcome = check_and_reserve(&store, &context, &limits, None, 100_000)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, BudgetOutcome::Allowed(_)),
+            "a soft limit must not block"
+        );
+        if let BudgetOutcome::Allowed(r) = outcome {
+            r.release(&store).await;
+        }
+    }
+
+    #[test]
+    fn budget_rows_resolve_onto_the_scope_they_name() {
+        let team = Uuid::new_v4();
+        let key = Uuid::new_v4();
+        let other_team = Uuid::new_v4();
+
+        let rows = vec![
+            budget_row(None, None, None, 10_000, true),
+            budget_row(Some(team), None, None, 5_000, true),
+            budget_row(None, Some(key), None, 2_000, true),
+            budget_row(None, None, Some("eu-central"), 7_000, true),
+            // Belongs to someone else. Applying it would cap the wrong caller, which is
+            // the single most damaging way a budget system can be wrong.
+            budget_row(Some(other_team), None, None, 1, true),
+            // Wrong region for this request.
+            budget_row(None, None, Some("us-east"), 1, true),
+        ];
+
+        let limits = BudgetLimits::from_rows(&rows, Some(team), Some(key), Some("eu-central"));
+        assert_eq!(limits.org.unwrap().limit_mc, 10_000);
+        assert_eq!(limits.team.unwrap().limit_mc, 5_000);
+        assert_eq!(limits.key.unwrap().limit_mc, 2_000);
+        assert_eq!(limits.region.unwrap().limit_mc, 7_000);
+    }
+
+    #[test]
+    fn a_daily_budget_is_ignored_rather_than_misapplied() {
+        // The counters are month-to-date. Enforcing a daily figure against them would
+        // refuse traffic for the rest of the month after one heavy day — worse than not
+        // enforcing it, because it looks like it works.
+        let mut row = budget_row(None, None, None, 10_000, true);
+        row.period = "daily".to_string();
+        let limits = BudgetLimits::from_rows(&[row], None, None, None);
+        assert!(limits.is_empty());
+    }
+
+    #[test]
+    fn the_tighter_of_two_budgets_on_one_scope_wins() {
+        let rows = vec![
+            budget_row(None, None, None, 10_000, true),
+            budget_row(None, None, None, 3_000, true),
+        ];
+        let limits = BudgetLimits::from_rows(&rows, None, None, None);
+        assert_eq!(limits.org.unwrap().limit_mc, 3_000);
+    }
+
+    #[test]
+    fn a_hard_and_soft_budget_at_the_same_figure_resolve_to_hard() {
+        let rows = vec![
+            budget_row(None, None, None, 5_000, false),
+            budget_row(None, None, None, 5_000, true),
+        ];
+        let limits = BudgetLimits::from_rows(&rows, None, None, None);
+        assert!(limits.org.unwrap().hard, "the stricter mode must win a tie");
+    }
+
+    fn budget_row(
+        team_id: Option<Uuid>,
+        api_key_id: Option<Uuid>,
+        region: Option<&str>,
+        limit_mc: i64,
+        hard_limit: bool,
+    ) -> crate::db::repo::Budget {
+        crate::db::repo::Budget {
+            id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            team_id,
+            api_key_id,
+            region: region.map(|r| r.to_string()),
+            period: "monthly".to_string(),
+            limit_mc,
+            hard_limit,
+            created_at: Utc::now(),
+        }
     }
 }

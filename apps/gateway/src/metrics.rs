@@ -135,6 +135,107 @@ impl Histogram {
     }
 }
 
+/// A histogram broken out by label set.
+///
+/// Exists because the two unlabelled latency histograms could not answer the question the
+/// Grafana dashboard's own panel description promised — "useful for spotting a slow
+/// provider" — since nothing in the series said which provider a measurement came from.
+/// Found in the enterprise readiness audit.
+///
+/// Cardinality is the risk with any labelled histogram. It is bounded here by construction:
+/// the only labels used are provider id and model id, both drawn from the pricing table
+/// rather than from anything a caller controls, so the series count is the size of the
+/// model catalogue and cannot be inflated by traffic.
+#[derive(Default)]
+struct HistogramVec {
+    series: RwLock<BTreeMap<String, Histogram>>,
+}
+
+impl HistogramVec {
+    fn observe(&self, labels: &str, value_ms: f64, buckets: &'static [f64]) {
+        if let Ok(guard) = self.series.read() {
+            if let Some(histogram) = guard.get(labels) {
+                histogram.observe(value_ms);
+                return;
+            }
+        }
+        if let Ok(mut guard) = self.series.write() {
+            guard
+                .entry(labels.to_string())
+                .or_insert_with(|| Histogram::new(buckets))
+                .observe(value_ms);
+        }
+    }
+
+    fn render(&self, name: &str, help: &str, out: &mut String) {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} histogram");
+        let Ok(guard) = self.series.read() else {
+            return;
+        };
+        for (labels, histogram) in guard.iter() {
+            let mut cumulative = 0u64;
+            for (i, edge) in histogram.buckets.iter().enumerate() {
+                cumulative += histogram.counts[i].load(Ordering::Relaxed);
+                let _ = writeln!(out, "{name}_bucket{{{labels},le=\"{edge}\"}} {cumulative}");
+            }
+            cumulative += histogram.counts[histogram.buckets.len()].load(Ordering::Relaxed);
+            let _ = writeln!(out, "{name}_bucket{{{labels},le=\"+Inf\"}} {cumulative}");
+            let sum_ms = histogram.sum_millis.load(Ordering::Relaxed) as f64 / 1_000.0;
+            let _ = writeln!(out, "{name}_sum{{{labels}}} {sum_ms}");
+            let _ = writeln!(
+                out,
+                "{name}_count{{{labels}}} {}",
+                histogram.count.load(Ordering::Relaxed)
+            );
+        }
+    }
+
+    /// Approximate quantile for one label set, for the admin console.
+    fn quantile(&self, labels: &str, q: f64) -> Option<f64> {
+        self.series
+            .read()
+            .ok()
+            .and_then(|g| g.get(labels).map(|h| h.quantile(q)))
+    }
+
+    /// Every label set currently carrying observations.
+    fn label_sets(&self) -> Vec<String> {
+        self.series
+            .read()
+            .map(|g| g.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// A gauge: a value that goes up and down, unlike a counter.
+#[derive(Default)]
+struct GaugeVec {
+    series: RwLock<BTreeMap<String, i64>>,
+}
+
+impl GaugeVec {
+    fn set(&self, labels: &str, value: i64) {
+        if let Ok(mut guard) = self.series.write() {
+            guard.insert(labels.to_string(), value);
+        }
+    }
+
+    fn render(&self, name: &str, help: &str, out: &mut String) {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} gauge");
+        if let Ok(guard) = self.series.read() {
+            for (labels, value) in guard.iter() {
+                if labels.is_empty() {
+                    let _ = writeln!(out, "{name} {value}");
+                } else {
+                    let _ = writeln!(out, "{name}{{{labels}}} {value}");
+                }
+            }
+        }
+    }
+}
+
 /// The gateway's metric registry. One instance, shared through `AppState`.
 pub struct Metrics {
     requests_total: CounterVec,
@@ -144,10 +245,17 @@ pub struct Metrics {
     rate_limited_total: CounterVec,
     budget_blocked_total: CounterVec,
     usage_events_total: CounterVec,
+    usage_events_lost_total: CounterVec,
     savings_micro_cents_total: CounterVec,
     circuit_state_changes_total: CounterVec,
+    fallback_total: CounterVec,
+    tokens_total: CounterVec,
     overhead: Histogram,
     latency: Histogram,
+    provider_latency: HistogramVec,
+    time_to_first_token: HistogramVec,
+    reconciliation_drift: GaugeVec,
+    store_health: GaugeVec,
 }
 
 impl Default for Metrics {
@@ -167,10 +275,17 @@ impl Metrics {
             rate_limited_total: CounterVec::default(),
             budget_blocked_total: CounterVec::default(),
             usage_events_total: CounterVec::default(),
+            usage_events_lost_total: CounterVec::default(),
             savings_micro_cents_total: CounterVec::default(),
             circuit_state_changes_total: CounterVec::default(),
+            fallback_total: CounterVec::default(),
+            tokens_total: CounterVec::default(),
             overhead: Histogram::new(OVERHEAD_BUCKETS_MS),
             latency: Histogram::new(LATENCY_BUCKETS_MS),
+            provider_latency: HistogramVec::default(),
+            time_to_first_token: HistogramVec::default(),
+            reconciliation_drift: GaugeVec::default(),
+            store_health: GaugeVec::default(),
         }
     }
 
@@ -237,6 +352,92 @@ impl Metrics {
     pub fn record_circuit_change(&self, provider: &str, state: &str) {
         self.circuit_state_changes_total
             .inc(&format!("provider=\"{provider}\",state=\"{state}\""), 1);
+    }
+
+    /// Record a usage event that could not be persisted.
+    ///
+    /// The counterpart to [`Metrics::record_usage_event`]. Together they make silent
+    /// billing loss visible as a rate rather than only as a discrepancy between two other
+    /// series — which is what an alert needs to fire on.
+    pub fn record_usage_event_lost(&self, reason: &str) {
+        self.usage_events_lost_total
+            .inc(&format!("reason=\"{reason}\""), 1);
+    }
+
+    /// Record that a request was served by a fallback rather than the routed model.
+    ///
+    /// Distinct from `routing_decisions_total{reason="fallback"}`: this carries which
+    /// provider was abandoned and which one answered, which is what an operator needs to
+    /// tell "one provider is degraded" from "our routing is thrashing".
+    pub fn record_fallback(&self, from_provider: &str, to_provider: &str) {
+        self.fallback_total
+            .inc(&format!("from=\"{from_provider}\",to=\"{to_provider}\""), 1);
+    }
+
+    /// Accumulate tokens served, split by direction and model.
+    ///
+    /// The denominator for cost-per-token dashboards, and the fastest way to spot a
+    /// customer whose prompt size changed underneath them.
+    pub fn record_tokens(&self, model: &str, input: u64, output: u64) {
+        if input > 0 {
+            self.tokens_total
+                .inc(&format!("model=\"{model}\",direction=\"input\""), input);
+        }
+        if output > 0 {
+            self.tokens_total
+                .inc(&format!("model=\"{model}\",direction=\"output\""), output);
+        }
+    }
+
+    /// Record how long one provider took to answer, by provider and model.
+    ///
+    /// This is the series that makes "which provider is slow right now" answerable. The
+    /// unlabelled `aegis_request_latency_ms` cannot: it blends every provider together.
+    pub fn record_provider_latency_ms(&self, provider: &str, model: &str, ms: f64) {
+        self.provider_latency.observe(
+            &format!("provider=\"{provider}\",model=\"{model}\""),
+            ms,
+            LATENCY_BUCKETS_MS,
+        );
+    }
+
+    /// Record time to first token for a streaming request.
+    ///
+    /// The number a streaming client actually experiences as "responsiveness" — total
+    /// latency says nothing about it, because a long answer and a slow start look
+    /// identical in an end-to-end measurement.
+    pub fn record_ttft_ms(&self, provider: &str, model: &str, ms: f64) {
+        self.time_to_first_token.observe(
+            &format!("provider=\"{provider}\",model=\"{model}\""),
+            ms,
+            LATENCY_BUCKETS_MS,
+        );
+    }
+
+    /// Publish the number of organisations whose billing drift exceeded the threshold.
+    pub fn record_reconciliation(&self, organisations_over_threshold: usize) {
+        self.reconciliation_drift
+            .set("", organisations_over_threshold as i64);
+    }
+
+    /// Publish a dependency's reachability: 1 up, 0 down.
+    ///
+    /// Scraped rather than only surfaced on `/health`, so an alert can fire on Redis being
+    /// unreachable without anything having to poll a JSON endpoint and parse it.
+    pub fn record_dependency_up(&self, dependency: &str, up: bool) {
+        self.store_health
+            .set(&format!("dependency=\"{dependency}\""), i64::from(up));
+    }
+
+    /// Approximate P99 latency for one provider and model, for the admin console.
+    pub fn provider_latency_p99_ms(&self, provider: &str, model: &str) -> Option<f64> {
+        self.provider_latency
+            .quantile(&format!("provider=\"{provider}\",model=\"{model}\""), 0.99)
+    }
+
+    /// Every provider/model pair currently carrying latency observations.
+    pub fn observed_provider_models(&self) -> Vec<String> {
+        self.provider_latency.label_sets()
     }
 
     /// Total requests recorded. Used by the reconciliation self-check.
@@ -315,6 +516,42 @@ impl Metrics {
         self.latency.render(
             "aegis_request_latency_ms",
             "End-to-end request latency",
+            &mut out,
+        );
+        self.usage_events_lost_total.render(
+            "aegis_usage_events_lost_total",
+            "Usage events that could not be persisted — any non-zero rate is billable \
+             traffic being served without a record",
+            &mut out,
+        );
+        self.fallback_total.render(
+            "aegis_fallback_total",
+            "Requests served by a fallback provider, by provider abandoned and provider used",
+            &mut out,
+        );
+        self.tokens_total.render(
+            "aegis_tokens_total",
+            "Tokens served by model and direction",
+            &mut out,
+        );
+        self.provider_latency.render(
+            "aegis_provider_latency_ms",
+            "Upstream provider latency by provider and model",
+            &mut out,
+        );
+        self.time_to_first_token.render(
+            "aegis_time_to_first_token_ms",
+            "Time to first streamed token by provider and model",
+            &mut out,
+        );
+        self.reconciliation_drift.render(
+            "aegis_reconciliation_orgs_over_threshold",
+            "Organisations whose billing drift exceeded the alert threshold on the last run",
+            &mut out,
+        );
+        self.store_health.render(
+            "aegis_dependency_up",
+            "Dependency reachability: 1 up, 0 down",
             &mut out,
         );
         out

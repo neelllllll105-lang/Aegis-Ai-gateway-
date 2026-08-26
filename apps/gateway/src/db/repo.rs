@@ -165,6 +165,10 @@ pub struct Budget {
     pub org_id: Uuid,
     pub team_id: Option<Uuid>,
     pub api_key_id: Option<Uuid>,
+    /// Region this budget caps, lower-cased. `None` for a budget that is not
+    /// region-scoped. Exactly one of `team_id`, `api_key_id`, `region` may be set; a row
+    /// with none of them is the organisation-wide budget.
+    pub region: Option<String>,
     pub period: String,
     pub limit_mc: i64,
     pub hard_limit: bool,
@@ -1050,40 +1054,137 @@ pub async fn delete_policy(pool: &PgPool, org_id: Uuid, policy_id: Uuid) -> Resu
 
 /// List budgets.
 pub async fn list_budgets(pool: &PgPool, org_id: Uuid) -> Result<Vec<Budget>> {
-    sqlx::query_as::<_, Budget>(
-        "SELECT id, org_id, team_id, api_key_id, period, limit_mc, hard_limit, created_at
-         FROM budgets WHERE org_id = $1 ORDER BY created_at",
-    )
+    sqlx::query_as::<_, Budget>(concat!(
+        "SELECT id, org_id, team_id, api_key_id, region, period, limit_mc, hard_limit, ",
+        "created_at FROM budgets WHERE org_id = $1 ORDER BY created_at",
+    ))
     .bind(org_id)
     .fetch_all(pool)
     .await
     .map_err(AegisError::Database)
 }
 
+/// The fields of a new budget.
+///
+/// A struct rather than eight positional parameters: `create_budget(pool, org, None, None,
+/// None, "monthly", 1000, true)` is a line nobody can read, and the two `Option<Uuid>`s
+/// next to each other are exactly the shape that silently swaps a team budget for a key
+/// budget.
+#[derive(Debug, Clone)]
+pub struct NewBudget<'a> {
+    pub org_id: Uuid,
+    pub team_id: Option<Uuid>,
+    pub api_key_id: Option<Uuid>,
+    pub region: Option<&'a str>,
+    pub period: &'a str,
+    pub limit_mc: i64,
+    pub hard_limit: bool,
+}
+
 /// Create a budget.
-pub async fn create_budget(
-    pool: &PgPool,
-    org_id: Uuid,
-    team_id: Option<Uuid>,
-    api_key_id: Option<Uuid>,
-    period: &str,
-    limit_mc: i64,
-    hard_limit: bool,
-) -> Result<Budget> {
-    sqlx::query_as::<_, Budget>(
-        "INSERT INTO budgets (org_id, team_id, api_key_id, period, limit_mc, hard_limit)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, org_id, team_id, api_key_id, period, limit_mc, hard_limit, created_at",
-    )
-    .bind(org_id)
-    .bind(team_id)
-    .bind(api_key_id)
-    .bind(period)
-    .bind(limit_mc)
-    .bind(hard_limit)
+pub async fn create_budget(pool: &PgPool, budget: NewBudget<'_>) -> Result<Budget> {
+    // Lower-cased here rather than trusted from the caller: the database CHECK constraint
+    // rejects a mixed-case region, and the request path compares this against the
+    // gateway's own configured region without normalising on every lookup.
+    let region = budget.region.map(|r| r.trim().to_ascii_lowercase());
+    sqlx::query_as::<_, Budget>(concat!(
+        "INSERT INTO budgets ",
+        "(org_id, team_id, api_key_id, region, period, limit_mc, hard_limit) ",
+        "VALUES ($1, $2, $3, $4, $5, $6, $7) ",
+        "RETURNING id, org_id, team_id, api_key_id, region, period, limit_mc, ",
+        "hard_limit, created_at",
+    ))
+    .bind(budget.org_id)
+    .bind(budget.team_id)
+    .bind(budget.api_key_id)
+    .bind(region)
+    .bind(budget.period)
+    .bind(budget.limit_mc)
+    .bind(budget.hard_limit)
     .fetch_one(pool)
     .await
     .map_err(AegisError::Database)
+}
+
+/// A configured budget alert, joined with the budget it watches.
+#[derive(Debug, Clone, FromRow)]
+pub struct BudgetAlertRule {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub org_name: String,
+    pub team_id: Option<Uuid>,
+    pub api_key_id: Option<Uuid>,
+    pub region: Option<String>,
+    pub limit_mc: i64,
+    pub hard_limit: bool,
+    pub threshold_pct: i32,
+    pub channel: String,
+    pub destination: Option<String>,
+    pub last_triggered_at: Option<DateTime<Utc>>,
+}
+
+impl BudgetAlertRule {
+    /// Which counter this rule's budget caps. Mirrors `middleware::budget::scopes`.
+    pub fn scope(&self) -> &'static str {
+        match (self.team_id, self.api_key_id, self.region.as_deref()) {
+            (Some(_), _, _) => "team",
+            (_, Some(_), _) => "key",
+            (_, _, Some(_)) => "region",
+            _ => "organization",
+        }
+    }
+}
+
+/// Every alert rule whose budget is still live.
+///
+/// Joined rather than fetched per budget: an alert sweep touching every organisation
+/// should be one query, not one per row. `org_name` comes along because the rendered alert
+/// names the organisation and a second lookup per alert would be wasteful.
+pub async fn list_budget_alert_rules(pool: &PgPool) -> Result<Vec<BudgetAlertRule>> {
+    sqlx::query_as::<_, BudgetAlertRule>(concat!(
+        "SELECT a.id, b.org_id, o.name AS org_name, b.team_id, b.api_key_id, b.region, ",
+        "       b.limit_mc, b.hard_limit, a.threshold_pct, a.channel, a.destination, ",
+        "       a.last_triggered_at ",
+        "FROM budget_alerts a ",
+        "JOIN budgets b ON b.id = a.budget_id ",
+        "JOIN organizations o ON o.id = b.org_id ",
+        "WHERE b.period = 'monthly'",
+    ))
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Stamp an alert as fired, so the same threshold does not re-fire every sweep.
+pub async fn mark_alert_triggered(pool: &PgPool, alert_id: Uuid) -> Result<()> {
+    sqlx::query("UPDATE budget_alerts SET last_triggered_at = NOW() WHERE id = $1")
+        .bind(alert_id)
+        .execute(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(())
+}
+
+/// Every organisation that has served a request this month.
+///
+/// Scoped to organisations with recent activity rather than every row in the table: the
+/// reconciliation worker compares month-to-date counters against month-to-date records,
+/// and an organisation that has sent nothing this month has nothing to reconcile. On a
+/// large tenant base that is the difference between a job that finishes and one that does
+/// not.
+///
+/// Not tenant-scoped, and deliberately so — this is a platform-operations query, not a
+/// customer-facing one, and it returns identifiers only. It is called from the
+/// reconciliation worker, never from a request handler.
+pub async fn list_active_org_ids(pool: &PgPool) -> Result<Vec<Uuid>> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT DISTINCT org_id FROM usage_records
+         WHERE created_at >= DATE_TRUNC('month', NOW())",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
 /// Delete a budget.

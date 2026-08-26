@@ -1268,6 +1268,12 @@ pub struct CreateBudgetRequest {
     pub team_id: Option<Uuid>,
     #[serde(default)]
     pub api_key_id: Option<Uuid>,
+    /// Cap one region's share of the organisation's spend, e.g. `eu-central`.
+    ///
+    /// Mutually exclusive with `team_id` and `api_key_id` — a budget caps one counter, and
+    /// a row naming several scopes would be ambiguous about which.
+    #[serde(default)]
+    pub region: Option<String>,
     #[serde(default = "default_period")]
     pub period: String,
     pub limit_mc: i64,
@@ -1294,16 +1300,53 @@ pub async fn create_budget(
         if request.limit_mc < 0 {
             return Err(AegisError::BadRequest("limit must not be negative".into()));
         }
+        // One scope per budget. The database enforces this too, but a 400 naming the
+        // problem is a better answer than a constraint violation surfacing as a 500.
+        let scopes = [
+            request.team_id.is_some(),
+            request.api_key_id.is_some(),
+            request.region.is_some(),
+        ]
+        .iter()
+        .filter(|set| **set)
+        .count();
+        if scopes > 1 {
+            return Err(AegisError::BadRequest(
+                "a budget caps one scope: set at most one of team_id, api_key_id, or region".into(),
+            ));
+        }
+        if !["monthly", "daily"].contains(&request.period.as_str()) {
+            return Err(AegisError::BadRequest(
+                "period must be 'monthly' or 'daily'".into(),
+            ));
+        }
+        // Enforcement reads month-to-date counters, so a daily row would refuse traffic for
+        // the rest of the month after one heavy day. Say so rather than accepting a budget
+        // that would behave nothing like its name.
+        if request.period == "daily" {
+            return Err(AegisError::BadRequest(
+                "daily budgets are not enforced yet — the spend counters they would be \
+                 checked against are monthly. Use 'monthly'."
+                    .into(),
+            ));
+        }
         let budget = repo::create_budget(
             state.db()?,
-            context.org_id,
-            request.team_id,
-            request.api_key_id,
-            &request.period,
-            request.limit_mc,
-            request.hard_limit,
+            repo::NewBudget {
+                org_id: context.org_id,
+                team_id: request.team_id,
+                api_key_id: request.api_key_id,
+                region: request.region.as_deref(),
+                period: &request.period,
+                limit_mc: request.limit_mc,
+                hard_limit: request.hard_limit,
+            },
         )
         .await?;
+        // A budget nobody can see take effect is worse than no budget. Drop the cached
+        // limit set now rather than letting an operator watch a blocked customer stay
+        // blocked for up to a minute after they raised the ceiling.
+        crate::middleware::budget::invalidate_limits(state.store.as_ref(), context.org_id).await;
         audit(
             &state,
             &context,
@@ -1334,6 +1377,7 @@ pub async fn delete_budget(
         if !deleted {
             return Err(AegisError::NotFound("budget not found".into()));
         }
+        crate::middleware::budget::invalidate_limits(state.store.as_ref(), context.org_id).await;
         audit(
             &state,
             &context,

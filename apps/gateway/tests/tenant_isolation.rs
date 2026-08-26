@@ -230,9 +230,20 @@ async fn teams_budgets_and_policies_are_all_org_scoped() {
     let team = repo::create_team(&pool, victim.org_id, "engineering", Some(1_000_000))
         .await
         .expect("team creation");
-    let budget = repo::create_budget(&pool, victim.org_id, None, None, "monthly", 500_000, true)
-        .await
-        .expect("budget creation");
+    let budget = repo::create_budget(
+        &pool,
+        repo::NewBudget {
+            org_id: victim.org_id,
+            team_id: None,
+            api_key_id: None,
+            region: None,
+            period: "monthly",
+            limit_mc: 500_000,
+            hard_limit: true,
+        },
+    )
+    .await
+    .expect("budget creation");
     let policy = repo::create_policy(
         &pool,
         victim.org_id,

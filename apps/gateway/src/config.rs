@@ -97,6 +97,13 @@ pub struct Config {
     pub provider_timeout: Duration,
     /// Longer ceiling for reasoning models.
     pub provider_timeout_reasoning: Duration,
+    /// Outer deadline on a whole request, applied at the router.
+    ///
+    /// Bounds the worst case that `provider_timeout` alone cannot: retries multiply it,
+    /// and the fallback chain multiplies it again. Set above
+    /// `provider_timeout_reasoning` or a reasoning model can never finish; the default of
+    /// 180s leaves room for one 120s reasoning call plus a failover attempt.
+    pub request_deadline: Duration,
 
     /// Default per-key rate limit, requests/minute.
     pub default_rate_limit_per_minute: u32,
@@ -154,6 +161,7 @@ impl Config {
                 "AEGIS_PROVIDER_TIMEOUT_REASONING_SECS",
                 120,
             )?),
+            request_deadline: Duration::from_secs(num("AEGIS_REQUEST_DEADLINE_SECS", 180)?),
 
             default_rate_limit_per_minute: num("AEGIS_DEFAULT_RATE_LIMIT", 60)?,
             cache_ttl: Duration::from_secs(num("AEGIS_CACHE_TTL_SECS", 86_400)?),
@@ -189,6 +197,7 @@ impl Config {
             max_body_bytes: 10 * 1024 * 1024,
             provider_timeout: Duration::from_secs(30),
             provider_timeout_reasoning: Duration::from_secs(120),
+            request_deadline: Duration::from_secs(180),
             default_rate_limit_per_minute: 60,
             cache_ttl: Duration::from_secs(86_400),
             semantic_similarity_threshold: 0.95,
