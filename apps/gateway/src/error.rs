@@ -55,6 +55,16 @@ pub enum AegisError {
     #[error("request body too large")]
     PayloadTooLarge,
 
+    /// Password was correct but the account has two-factor enabled and no valid code was
+    /// supplied.
+    ///
+    /// Deliberately distinct from `Unauthorized`: a client needs to tell "your password is
+    /// wrong" from "your password is right, now show me a code" apart to prompt correctly,
+    /// and folding this into a generic 401 was exactly the gap that left TOTP enforced by
+    /// nothing — the login handler had no way to *ask* for the second factor.
+    #[error("a valid TOTP code is required")]
+    TotpRequired,
+
     // ---- 5xx / upstream: our problem or the provider's ----
     /// An upstream provider returned an error we could not recover from.
     #[error("provider error: {message}")]
@@ -105,6 +115,7 @@ impl AegisError {
             AegisError::BudgetExceeded { .. } => "budget_exceeded",
             AegisError::ModelNotAllowed(_) => "model_not_allowed",
             AegisError::PayloadTooLarge => "payload_too_large",
+            AegisError::TotpRequired => "totp_required",
             AegisError::Provider { .. } => "provider_error",
             AegisError::AllProvidersFailed(_) => "all_providers_failed",
             AegisError::ProviderTimeout(_) => "provider_timeout",
@@ -127,6 +138,11 @@ impl AegisError {
             AegisError::BudgetExceeded { .. } => StatusCode::PAYMENT_REQUIRED,
             AegisError::ModelNotAllowed(_) => StatusCode::FORBIDDEN,
             AegisError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            // 401, same as a wrong password: this must not distinguish "right password,
+            // wrong/missing code" from "wrong password" by status code alone, or the
+            // status code becomes an account-enumeration and 2FA-detection oracle. A
+            // client tells the two apart from the `error.type` in the body instead.
+            AegisError::TotpRequired => StatusCode::UNAUTHORIZED,
             AegisError::Provider { status, .. } => {
                 StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY)
             }

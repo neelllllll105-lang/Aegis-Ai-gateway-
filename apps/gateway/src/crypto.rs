@@ -190,6 +190,22 @@ pub fn derive_tenant_key(master_key: &[u8; 32], org_id: &str) -> [u8; 32] {
     derived
 }
 
+/// Derive a per-*user* encryption key, for secrets that belong to an account rather than
+/// an organisation.
+///
+/// A TOTP secret is exactly this shape: a user can belong to several organisations, so
+/// encrypting it under [`derive_tenant_key`] would either tie it to one organisation
+/// arbitrarily or require re-encrypting it per membership. A distinct HKDF `info` string
+/// (`"aegis-user-key-v1"` vs. `"aegis-tenant-key-v1"`) keeps the two derivation spaces
+/// disjoint under the same master key, so a leaked user key reveals nothing about any
+/// tenant key and vice versa.
+pub fn derive_user_key(master_key: &[u8; 32], user_id: &str) -> [u8; 32] {
+    let hk = hkdf::Hkdf::<Sha256>::new(Some(b"aegis-user-key-v1"), master_key);
+    let mut derived = [0u8; 32];
+    let _ = hk.expand(user_id.as_bytes(), &mut derived);
+    derived
+}
+
 // ---------------------------------------------------------------------------
 // Password hashing
 // ---------------------------------------------------------------------------

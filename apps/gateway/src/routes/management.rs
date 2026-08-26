@@ -240,6 +240,11 @@ async fn do_signup(
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+    /// Required when the account has TOTP enabled. Absent for every account that does
+    /// not, which is most of them — this field does not change the shape of an ordinary
+    /// login.
+    #[serde(default)]
+    pub totp_code: Option<String>,
 }
 
 /// `POST /api/auth/login`
@@ -290,6 +295,38 @@ async fn do_login(
         ));
     }
 
+    // Two-factor. The algorithm (`enterprise::totp`), the schema columns, and this exact
+    // check were all previously unconnected: `totp_enabled` was read onto `User` but
+    // nothing in the login path looked at it, so a stolen password was fully sufficient
+    // regardless of whether the account owner believed 2FA protected them. Found in the
+    // enterprise readiness audit.
+    if user.totp_enabled {
+        let encrypted_secret = repo::get_totp_secret(pool, user.id).await?.ok_or_else(|| {
+            // totp_enabled with no secret is a data inconsistency, not a normal
+            // "no code supplied" case — enable_totp is only ever called right after a
+            // secret is confirmed. Fail closed rather than silently skip the check.
+            tracing::error!(user_id = %user.id, "totp_enabled but no secret is stored");
+            AegisError::Internal("account's two-factor configuration is inconsistent".into())
+        })?;
+        let user_key = crypto::derive_user_key(&state.config.master_key, &user.id.to_string());
+        let secret = crypto::decrypt(&user_key, &encrypted_secret)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .ok_or_else(|| AegisError::Internal("could not decrypt TOTP secret".into()))?;
+
+        let code = request.totp_code.as_deref().unwrap_or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if !crate::enterprise::totp::verify_code(&secret, code, now) {
+            // Same status as a wrong password (see AegisError::TotpRequired's own doc
+            // comment) — the client distinguishes the two by error.type, not by whether a
+            // guessed password alone gets a different response than a right one.
+            return Err(AegisError::TotpRequired);
+        }
+    }
+
     let session = crypto::generate_session_token();
     repo::create_session(
         pool,
@@ -326,6 +363,184 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Respon
             .insert(axum::http::header::SET_COOKIE, cookie);
     }
     response
+}
+
+// ---------------------------------------------------------------------------
+// Two-factor authentication (TOTP)
+//
+// Self-service on the caller's *own* account, deliberately not gated by organisation
+// role: a member and an owner both have exactly the same reason to protect their own
+// login, and there is no tenant-scoping question here at all — nothing here reads or
+// writes another account's row.
+// ---------------------------------------------------------------------------
+
+/// Require a session (not an API key) and return the authenticated context.
+///
+/// TOTP protects an *account's login*, which an API key was never involved in issuing —
+/// accepting one here would let a leaked API key, a strictly lower-privilege credential by
+/// design, manage the very control meant to protect against a leaked credential.
+async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<AuthContext> {
+    let context = auth::authenticate_management(state, headers).await?;
+    if context.user_id.is_none() {
+        return Err(AegisError::Forbidden(
+            "two-factor settings require a dashboard session, not an API key".into(),
+        ));
+    }
+    Ok(context)
+}
+
+/// `POST /api/auth/totp/enroll`
+///
+/// Generates a new secret and returns the provisioning URI and the raw secret (for manual
+/// entry, the same one-time-reveal pattern as an API key). Enrollment does **not** turn
+/// enforcement on — [`totp_confirm`] does, once the caller proves they can actually
+/// generate a matching code. Storing and enabling in the same step would let a bare call
+/// to this endpoint — no proof the caller has the authenticator app running — lock the
+/// account's own owner out immediately.
+pub async fn totp_enroll(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match async {
+        let context = require_session(&state, &headers).await?;
+        let user_id = context.user_id.expect("checked by require_session");
+        let pool = state.db()?;
+        let user = repo::find_user_by_id(pool, user_id)
+            .await?
+            .ok_or_else(|| AegisError::Unauthorized("session user no longer exists".into()))?;
+
+        let secret = crate::enterprise::totp::generate_secret();
+        let user_key = crypto::derive_user_key(&state.config.master_key, &user_id.to_string());
+        let encrypted = crypto::encrypt(&user_key, secret.as_bytes())?;
+        repo::set_totp_secret(pool, user_id, &encrypted).await?;
+
+        let uri = crate::enterprise::totp::provisioning_uri(&secret, &user.email, "Aegis");
+        Ok::<_, AegisError>(respond(
+            StatusCode::OK,
+            serde_json::json!({
+                "secret": secret,
+                "provisioning_uri": uri,
+                "note": "scan provisioning_uri with an authenticator app, then POST the \
+                         code it shows to /api/auth/totp/confirm to finish enabling \
+                         two-factor. Enrolling again before confirming replaces this secret.",
+            }),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TotpConfirmRequest {
+    pub code: String,
+}
+
+/// `POST /api/auth/totp/confirm`
+///
+/// Proves the caller actually has the enrolled secret before enforcement turns on.
+pub async fn totp_confirm(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<TotpConfirmRequest>,
+) -> Response {
+    match async {
+        let context = require_session(&state, &headers).await?;
+        let user_id = context.user_id.expect("checked by require_session");
+        let pool = state.db()?;
+
+        let encrypted = repo::get_totp_secret(pool, user_id).await?.ok_or_else(|| {
+            AegisError::BadRequest(
+                "no TOTP secret is pending; call /api/auth/totp/enroll first".into(),
+            )
+        })?;
+        let user_key = crypto::derive_user_key(&state.config.master_key, &user_id.to_string());
+        let secret = crypto::decrypt(&user_key, &encrypted)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .ok_or_else(|| AegisError::Internal("could not decrypt TOTP secret".into()))?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if !crate::enterprise::totp::verify_code(&secret, &request.code, now) {
+            return Err(AegisError::Unauthorized(
+                "that code does not match — check the time on your device and try again".into(),
+            ));
+        }
+
+        repo::enable_totp(pool, user_id).await?;
+        audit(
+            &state,
+            &context,
+            "totp.enabled",
+            "user",
+            Some(user_id),
+            None,
+        )
+        .await;
+        Ok::<_, AegisError>(respond(
+            StatusCode::OK,
+            serde_json::json!({"totp_enabled": true}),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TotpDisableRequest {
+    pub password: String,
+}
+
+/// `POST /api/auth/totp/disable`
+///
+/// Requires the account password again, not just an active session — a session already
+/// past a TOTP-protected login is exactly the credential an attacker who stole it would
+/// use to turn the protection back off, so disabling it demands proof independent of the
+/// session itself.
+pub async fn totp_disable(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<TotpDisableRequest>,
+) -> Response {
+    match async {
+        let context = require_session(&state, &headers).await?;
+        let user_id = context.user_id.expect("checked by require_session");
+        let pool = state.db()?;
+        let user = repo::find_user_by_id(pool, user_id)
+            .await?
+            .ok_or_else(|| AegisError::Unauthorized("session user no longer exists".into()))?;
+
+        let invalid = || AegisError::Unauthorized("incorrect password".into());
+        let stored_hash = user.password_hash.as_ref().ok_or_else(invalid)?;
+        if !crypto::verify_password(&request.password, stored_hash) {
+            return Err(invalid());
+        }
+
+        repo::disable_totp(pool, user_id).await?;
+        audit(
+            &state,
+            &context,
+            "totp.disabled",
+            "user",
+            Some(user_id),
+            None,
+        )
+        .await;
+        Ok::<_, AegisError>(respond(
+            StatusCode::OK,
+            serde_json::json!({"totp_enabled": false}),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
 }
 
 /// `GET /api/auth/me`

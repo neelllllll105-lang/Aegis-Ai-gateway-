@@ -301,6 +301,71 @@ pub async fn find_user_by_id(pool: &PgPool, user_id: Uuid) -> Result<Option<User
     .map_err(AegisError::Database)
 }
 
+// ---------------------------------------------------------------------------
+// TOTP two-factor authentication
+//
+// `totp_secret_encrypted` and `totp_enabled` have existed on `users` since the initial
+// schema, and the RFC 6238 algorithm in `enterprise::totp` was correct from the start.
+// Nothing in between them existed: no function here read or wrote the secret column, no
+// enrollment endpoint, no login-time check. Found in the enterprise readiness audit.
+// ---------------------------------------------------------------------------
+
+/// Read a user's encrypted TOTP secret, if one has ever been set.
+///
+/// Returns the ciphertext regardless of whether `totp_enabled` is true — the enrollment
+/// flow needs to read a secret back to verify the confirmation code *before* turning
+/// enforcement on, which is exactly the state where a secret exists and enabled does not.
+pub async fn get_totp_secret(pool: &PgPool, user_id: Uuid) -> Result<Option<Vec<u8>>> {
+    let row: Option<(Option<Vec<u8>>,)> =
+        sqlx::query_as("SELECT totp_secret_encrypted FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(AegisError::Database)?;
+    Ok(row.and_then(|(secret,)| secret))
+}
+
+/// Store a newly generated TOTP secret. Does **not** enable enforcement — that only
+/// happens once the user proves they can generate a matching code, in
+/// [`enable_totp`]. Storing and enabling in one step would let a bare enrollment call
+/// (no proof of possessing the authenticator app) lock the account's own owner out.
+pub async fn set_totp_secret(pool: &PgPool, user_id: Uuid, encrypted_secret: &[u8]) -> Result<()> {
+    sqlx::query("UPDATE users SET totp_secret_encrypted = $1, updated_at = NOW() WHERE id = $2")
+        .bind(encrypted_secret)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(())
+}
+
+/// Turn on TOTP enforcement for a user who has already stored and confirmed a secret.
+pub async fn enable_totp(pool: &PgPool, user_id: Uuid) -> Result<()> {
+    sqlx::query("UPDATE users SET totp_enabled = true, updated_at = NOW() WHERE id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(())
+}
+
+/// Turn off TOTP and forget the secret entirely.
+///
+/// Clearing the secret, not just the flag, matters: leaving it in place would mean
+/// re-enabling 2FA silently reactivates an old, possibly-compromised secret rather than
+/// starting a fresh enrollment.
+pub async fn disable_totp(pool: &PgPool, user_id: Uuid) -> Result<()> {
+    sqlx::query(
+        "UPDATE users SET totp_enabled = false, totp_secret_encrypted = NULL, \
+         updated_at = NOW() WHERE id = $1",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(())
+}
+
 /// Store a session.
 pub async fn create_session(
     pool: &PgPool,

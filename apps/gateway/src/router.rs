@@ -46,6 +46,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/auth/login", post(management::login))
         .route("/api/auth/logout", post(management::logout))
         .route("/api/auth/me", get(management::me))
+        // TOTP two-factor. `totp_enabled` and `totp_secret_encrypted` have existed on
+        // `users` since the initial schema and the RFC 6238 algorithm was always correct;
+        // nothing previously read or wrote the column, and login never checked it, so
+        // 2FA could not actually be turned on. Found in the enterprise readiness audit.
+        .route("/api/auth/totp/enroll", post(management::totp_enroll))
+        .route("/api/auth/totp/confirm", post(management::totp_confirm))
+        .route("/api/auth/totp/disable", post(management::totp_disable))
         .route(
             "/api/keys",
             get(management::list_keys).post(management::create_key),

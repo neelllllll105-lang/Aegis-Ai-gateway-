@@ -454,3 +454,288 @@ async fn a_legitimate_custom_endpoint_is_still_accepted() {
 
     cleanup(&pool, &fixture).await;
 }
+
+// -----------------------------------------------------------------------------
+// TOTP two-factor authentication, end to end against real handlers and a real database.
+//
+// The algorithm was always correct in isolation (`enterprise::totp`, unit-tested with the
+// RFC 6238 test vector); what did not exist was everything connecting it to a real login —
+// no repo function read or wrote the secret column, no enrollment endpoint, and login
+// never checked `totp_enabled`. This exercises the whole path a real account would go
+// through: enroll, confirm with a real generated code, get blocked at login without one,
+// log in with one, then disable and confirm login reverts to password-only. Found in the
+// enterprise readiness audit.
+// -----------------------------------------------------------------------------
+
+/// Give a fixture a real, known password. `common::create_org` seeds an unusable
+/// placeholder hash — fine for tests that never call `login`, wrong for these.
+async fn set_known_password(pool: &sqlx::PgPool, fixture: &common::Fixture, password: &str) {
+    use aegis_gateway::crypto;
+    let hash = crypto::hash_password(password).expect("hash");
+    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        .bind(hash)
+        .bind(fixture.user_id)
+        .execute(pool)
+        .await
+        .expect("set password");
+}
+
+/// Generate a currently-valid code for a secret, exactly as an authenticator app would.
+fn code_for(secret: &str) -> String {
+    use aegis_gateway::enterprise::totp;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    totp::generate_code(secret, now).expect("generate code")
+}
+
+#[tokio::test]
+async fn totp_protects_login_end_to_end() {
+    use aegis_gateway::routes::management;
+    use axum::extract::{Json, State};
+    use axum::http::StatusCode;
+
+    let Some((state, pool)) = setup().await else {
+        return skip("totp_protects_login_end_to_end");
+    };
+
+    let fixture = create_org(&pool, "totp-flow").await;
+    let password = "correct horse battery staple 42";
+    set_known_password(&pool, &fixture, password).await;
+    let session_headers = owner_session_headers(&pool, &fixture).await;
+
+    // Before enrollment: an ordinary password login succeeds with no code.
+    let response = management::login(
+        State(state.clone()),
+        axum::http::HeaderMap::new(),
+        Json(management::LoginRequest {
+            email: fixture.email.clone(),
+            password: password.to_string(),
+            totp_code: None,
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a password login must succeed before 2FA is ever enabled"
+    );
+
+    // Enroll. This stores a secret but must not enable enforcement yet.
+    let response = management::totp_enroll(State(state.clone()), session_headers.clone()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = body_json(response).await;
+    let secret = body["secret"]
+        .as_str()
+        .expect("secret in response")
+        .to_string();
+    assert!(
+        body["provisioning_uri"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("otpauth://totp/"),
+        "must return a scannable provisioning URI"
+    );
+
+    let user_after_enroll = repo::find_user_by_id(&pool, fixture.user_id)
+        .await
+        .expect("query")
+        .expect("user exists");
+    assert!(
+        !user_after_enroll.totp_enabled,
+        "enrolling alone must not enable enforcement — only a confirmed code does"
+    );
+
+    // Confirm with the wrong code: must not enable it.
+    let response = management::totp_confirm(
+        State(state.clone()),
+        session_headers.clone(),
+        Json(management::TotpConfirmRequest {
+            code: "000000".to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // Confirm with the real code: now it is enabled.
+    let response = management::totp_confirm(
+        State(state.clone()),
+        session_headers.clone(),
+        Json(management::TotpConfirmRequest {
+            code: code_for(&secret),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let user_after_confirm = repo::find_user_by_id(&pool, fixture.user_id)
+        .await
+        .expect("query")
+        .expect("user exists");
+    assert!(user_after_confirm.totp_enabled);
+
+    // Login with the correct password and no code: this is the actual enforcement check.
+    // A stolen password must no longer be sufficient on its own.
+    let response = management::login(
+        State(state.clone()),
+        axum::http::HeaderMap::new(),
+        Json(management::LoginRequest {
+            email: fixture.email.clone(),
+            password: password.to_string(),
+            totp_code: None,
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "correct password with no TOTP code must be refused once 2FA is enabled"
+    );
+    let body: serde_json::Value = body_json(response).await;
+    assert_eq!(
+        body["error"]["type"], "totp_required",
+        "the client must be able to tell 'need a code' apart from 'wrong password': {body:?}"
+    );
+
+    // Login with the correct password and a stale/wrong code: still refused.
+    let response = management::login(
+        State(state.clone()),
+        axum::http::HeaderMap::new(),
+        Json(management::LoginRequest {
+            email: fixture.email.clone(),
+            password: password.to_string(),
+            totp_code: Some("111111".to_string()),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // Login with the correct password and a valid code: succeeds.
+    let response = management::login(
+        State(state.clone()),
+        axum::http::HeaderMap::new(),
+        Json(management::LoginRequest {
+            email: fixture.email.clone(),
+            password: password.to_string(),
+            totp_code: Some(code_for(&secret)),
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "correct password + correct code must succeed"
+    );
+    assert!(
+        response
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .is_some(),
+        "a successful TOTP login must still issue a session cookie"
+    );
+
+    // Disabling requires the password again, not just the session.
+    let response = management::totp_disable(
+        State(state.clone()),
+        session_headers.clone(),
+        Json(management::TotpDisableRequest {
+            password: "definitely the wrong password".to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a session alone must not be enough to turn 2FA off"
+    );
+
+    let response = management::totp_disable(
+        State(state.clone()),
+        session_headers.clone(),
+        Json(management::TotpDisableRequest {
+            password: password.to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Login now succeeds with no code again — enforcement genuinely turned off, and the
+    // old secret cannot be reused: enrolling fresh would start over, not resurrect it.
+    let response = management::login(
+        State(state.clone()),
+        axum::http::HeaderMap::new(),
+        Json(management::LoginRequest {
+            email: fixture.email.clone(),
+            password: password.to_string(),
+            totp_code: None,
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let user_after_disable = repo::find_user_by_id(&pool, fixture.user_id)
+        .await
+        .expect("query")
+        .expect("user exists");
+    assert!(!user_after_disable.totp_enabled);
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn totp_confirm_without_enrolling_first_is_rejected() {
+    let Some((state, pool)) = setup().await else {
+        return skip("totp_confirm_without_enrolling_first_is_rejected");
+    };
+    use aegis_gateway::routes::management;
+    use axum::extract::{Json, State};
+
+    let fixture = create_org(&pool, "totp-no-enroll").await;
+    let headers = owner_session_headers(&pool, &fixture).await;
+
+    let response = management::totp_confirm(
+        State(state),
+        headers,
+        Json(management::TotpConfirmRequest {
+            code: "123456".to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn an_api_key_cannot_manage_totp() {
+    // TOTP protects an account login, which an API key was never part of issuing.
+    // Accepting one here would let a leaked, lower-privilege credential manage the very
+    // control meant to protect against a leaked credential.
+    let Some((state, pool)) = setup().await else {
+        return skip("an_api_key_cannot_manage_totp");
+    };
+    use aegis_gateway::routes::management;
+    use axum::extract::State;
+
+    let fixture = create_org(&pool, "totp-api-key").await;
+    let (plaintext, _key_id) = create_key(&pool, &fixture, "no-totp-access").await;
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        axum::http::HeaderValue::from_str(&format!("Bearer {plaintext}")).unwrap(),
+    );
+
+    let response = management::totp_enroll(State(state), headers).await;
+    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+
+    cleanup(&pool, &fixture).await;
+}
+
+/// Parse a response body as JSON, for assertions that need to look inside it.
+async fn body_json(response: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    serde_json::from_slice(&bytes).expect("valid JSON body")
+}

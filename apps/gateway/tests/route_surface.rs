@@ -55,6 +55,9 @@ fn advertised_routes() -> Vec<(&'static str, &'static str)> {
         ("POST", "/api/auth/login"),
         ("POST", "/api/auth/logout"),
         ("GET", "/api/auth/me"),
+        ("POST", "/api/auth/totp/enroll"),
+        ("POST", "/api/auth/totp/confirm"),
+        ("POST", "/api/auth/totp/disable"),
         // Keys.
         ("GET", "/api/keys"),
         ("POST", "/api/keys"),
