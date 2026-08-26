@@ -669,8 +669,20 @@ async fn handle_chat(
 
     // ---- [10] Usage emission (non-blocking) --------------------------------------
     let event = outcome.usage_event(&auth_context, 200, &state.config.region);
-    let _ = usage::emit(state.store.as_ref(), &event).await;
-    state.metrics.record_usage_event();
+    // Only count a request as metered when it was actually persisted. Incrementing this
+    // unconditionally (the previous behaviour) meant the "metering completeness" metric
+    // and dashboard panel could never detect the one failure mode they exist to catch —
+    // see the identical fix and full reasoning in stream_chat, a few hundred lines below.
+    match usage::emit(state.store.as_ref(), &event).await {
+        Ok(_) => state.metrics.record_usage_event(),
+        Err(e) => tracing::error!(
+            request_id = %outcome.request_id,
+            org_id = %auth_context.org_id,
+            error = %e,
+            "usage event lost: request was served and is billable, but could not be \
+             persisted"
+        ),
+    }
     state.metrics.record_request("/v1/chat/completions", 200);
     state
         .metrics
@@ -759,6 +771,13 @@ async fn stream_chat(
     // Accumulated as the stream runs, then metered when it ends.
     let mut final_usage: Option<TokenUsage> = None;
     let mut output_chars: u64 = 0;
+    // Set the moment the upstream stream itself reports an error. Without this, a
+    // provider that dies mid-stream was metered and counted in `/metrics` as a clean
+    // 200 — the response the client actually saw *was* an SSE error event, but nothing
+    // downstream of this function could tell the two apart. Found in the enterprise
+    // readiness audit: a support engineer given a customer's request_id could not
+    // distinguish "this failed" from "this succeeded" in the usage record it produced.
+    let mut stream_error: Option<String> = None;
 
     let sse = async_stream::stream! {
         let mut upstream = upstream;
@@ -783,6 +802,7 @@ async fn stream_chat(
                     );
                 }
                 Err(e) => {
+                    stream_error = Some(e.error_type().to_string());
                     let payload = serde_json::json!({
                         "error": {"type": e.error_type(), "message": e.to_string()}
                     });
@@ -816,7 +836,7 @@ async fn stream_chat(
             auth_for_stream.savings_share_bp,
         );
 
-        let event = UsageEvent::new(
+        let mut event = UsageEvent::new(
             request_id,
             auth_for_stream.org_id,
             auth_for_stream.api_key_id,
@@ -831,10 +851,32 @@ async fn stream_chat(
             CacheOutcome::Skipped,
             routing_reason,
             complexity,
+            // The HTTP status genuinely was 200 — SSE has no way to change it mid-stream,
+            // and the client did receive a 200 response. `error_type` below is what
+            // records that the *stream itself* failed partway, which status_code alone
+            // cannot express.
             200,
         );
-        let _ = usage::emit(state_for_stream.store.as_ref(), &event).await;
-        state_for_stream.metrics.record_usage_event();
+        event.error_type = stream_error;
+
+        // Metering completeness must reflect whether the event was actually durable, not
+        // whether we attempted to make it durable. The prior version incremented this
+        // counter unconditionally after discarding emit()'s Result, which meant the one
+        // metric meant to catch "a request was served but never billed" could not detect
+        // it happening in the exact failure mode it exists to catch — a Redis XADD error
+        // at this line would have been invisible to both this metric and the nightly
+        // reconciliation job, which compares two counters that were equally blind to the
+        // drop. Found in the enterprise readiness audit.
+        match usage::emit(state_for_stream.store.as_ref(), &event).await {
+            Ok(_) => state_for_stream.metrics.record_usage_event(),
+            Err(e) => tracing::error!(
+                request_id = %request_id,
+                org_id = %auth_for_stream.org_id,
+                error = %e,
+                "usage event lost: streaming request was served and is billable, but \
+                 could not be persisted"
+            ),
+        }
         state_for_stream.metrics.record_request("/v1/chat/completions", 200);
         state_for_stream.metrics.record_savings(savings.gross_savings.as_i64());
     };
@@ -878,8 +920,11 @@ async fn record_rejection(
         error_type,
         0.0,
     );
-    let _ = usage::emit(state.store.as_ref(), &event).await;
-    state.metrics.record_usage_event();
+    // Same accounting fix as the two billable-event call sites above, applied here for
+    // consistency: the metric's meaning should not depend on which code path emitted it.
+    if usage::emit(state.store.as_ref(), &event).await.is_ok() {
+        state.metrics.record_usage_event();
+    }
     state.metrics.record_request(path, status);
 }
 

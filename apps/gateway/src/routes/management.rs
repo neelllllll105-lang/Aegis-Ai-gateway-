@@ -16,6 +16,7 @@ use crate::db::repo;
 use crate::error::{AegisError, Result};
 use crate::middleware::auth::{self, AuthContext};
 use crate::middleware::rate_limit;
+use crate::middleware::ssrf_guard;
 use crate::money::{savings_share_basis_points, MicroCents};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
@@ -880,6 +881,14 @@ pub async fn create_provider(
             return Err(AegisError::BadRequest(
                 "a custom provider requires a base_url".into(),
             ));
+        }
+        // Every adapter honours base_url as a literal override, which makes it a
+        // server-side-request-forgery vector against the gateway's own infrastructure —
+        // cloud metadata services, internal admin panels, anything reachable from where
+        // this process runs — for any org that can write a credential, which today means
+        // any organisation at all, free tier included. See middleware/ssrf_guard.rs.
+        if let Some(base_url) = request.base_url.as_deref() {
+            ssrf_guard::validate_base_url(base_url).await?;
         }
 
         let key = request.api_key.trim();

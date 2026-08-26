@@ -551,4 +551,109 @@ mod tests {
         let decision = check(&store, &context, None, None, None).await.unwrap();
         assert!(decision.allowed);
     }
+
+    // -----------------------------------------------------------------------------
+    // Adversarial: is budget enforcement actually race-safe under concurrency?
+    //
+    // The rate limiter (store.rs) is proven atomic — 50 racing callers against a limit
+    // of 10 admits exactly 10, via a single atomic Redis Lua script. Budget::check reads
+    // the current spend and compares it to the limit, but the spend counter itself is
+    // only incremented later, asynchronously, when usage::emit() runs after each
+    // request's own provider call finishes. That is a classic check-then-act gap: if
+    // many requests arrive while spend is just under the limit, every one of them can
+    // read "allowed" before any of them has recorded its own cost.
+    // -----------------------------------------------------------------------------
+
+    // `flavor = "multi_thread"` matters here, not just as a style choice: the default
+    // single-threaded `#[tokio::test]` runtime schedules spawned tasks cooperatively on
+    // one OS thread, and this test's own first attempt under that default did not
+    // reproduce the race even once in several runs — not because the check-then-act gap
+    // in `check()` isn't real (it plainly is, reading the function), but because
+    // cooperative single-threaded scheduling happened to let each task's check-then-spend
+    // sequence complete before the next task got a turn. Real production concurrency runs
+    // on genuinely parallel OS threads (`tokio::main`'s default multi-threaded runtime,
+    // same as `overhead_under_load.rs` uses), so the test needs to as well or it is
+    // testing a weaker property than the one that actually matters.
+    // #[ignore] rather than deleted or left to fail permanently: this documents a real,
+    // reproduced, currently-unfixed vulnerability (enterprise readiness audit, 2026-08-25)
+    // rather than a hypothetical one. Measured across 8 runs under genuine multi-thread
+    // parallelism: 2-5 of 20 concurrent requests admitted past a hard budget with only
+    // $0.05 of headroom, final spend $1.15-$1.45 against a $1.00 limit -- a 15-45%
+    // overshoot from concurrency alone, no application bug beyond the architecture. Run
+    // it directly with `cargo test -- --ignored concurrent_requests_can_overshoot`.
+    //
+    // Left failing-on-purpose rather than fixed alongside this audit because the honest
+    // fix is bigger than it looks: `check()` runs before the provider call, but the real
+    // cost isn't known until after it returns, so an atomic fix needs a reserve-an-estimate
+    // -then-true-up model (or an atomic increment-check-and-rollback applied to every one
+    // of the four budget scopes: key, team, region, org) -- a genuine redesign of how spend
+    // accounting relates to the request lifecycle, not a bounded validation-style fix like
+    // the SSRF and data-residency gaps this same audit closed directly. Remove #[ignore]
+    // once that redesign lands; this test is what should turn green to prove it worked.
+    #[ignore = "documents a real, reproduced budget-bypass race — see comment above; run \
+                explicitly with --ignored, do not delete"]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_requests_can_overshoot_a_hard_budget() {
+        let store = std::sync::Arc::new(MemoryStore::new());
+        let context = auth("pro");
+        let limit = 1_000_000; // $1.00 hard budget
+        let cost_per_request = 100_000; // $0.10 per request
+
+        // Prime spend to $0.95 — five cents of headroom, half a request's worth.
+        spend(&store, &context, 950_000).await;
+
+        // A barrier forces all 20 tasks to call check() at effectively the same instant,
+        // rather than relying on tokio::spawn's scheduling to happen to overlap them —
+        // the whole point is to remove luck from whether the race window is hit.
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(20));
+
+        // Fire 20 requests "concurrently": each checks the budget, and only AFTER being
+        // told it is allowed does it record its own spend — exactly the real pipeline's
+        // order (budget::check runs before the provider call; usage::emit runs after).
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let store = std::sync::Arc::clone(&store);
+            let context = context.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let decision = check(store.as_ref(), &context, Some(limit), None, None)
+                    .await
+                    .unwrap();
+                if decision.allowed {
+                    spend(store.as_ref(), &context, cost_per_request).await;
+                }
+                decision.allowed
+            }));
+        }
+
+        let mut admitted = 0;
+        for handle in handles {
+            if handle.await.unwrap() {
+                admitted += 1;
+            }
+        }
+
+        let final_spend = usage::current_spend(store.as_ref(), context.org_id).await;
+
+        println!(
+            "admitted: {admitted}, final spend: {} micro-cents (limit was {limit})",
+            final_spend.as_i64()
+        );
+
+        // With $0.05 of headroom and a hard $1.00 budget, at most one request should ever
+        // have been let through — spend should land at $1.05, never higher. This is
+        // expected to FAIL on the current implementation: budget::check has no atomic
+        // reservation, so every concurrent request reads the same pre-request spend
+        // figure and is admitted before any of them has recorded its own cost.
+        assert!(
+            final_spend.as_i64() <= limit + cost_per_request,
+            "BUDGET BYPASSED: {admitted} of 20 concurrent requests were admitted with only \
+             $0.05 of headroom against a $1.00 hard limit. Final spend {} micro-cents, \
+             {} micro-cents over the limit. budget::check() reads spend and compares it \
+             to the limit, but nothing reserves that spend atomically.",
+            final_spend.as_i64(),
+            final_spend.as_i64() - limit
+        );
+    }
 }

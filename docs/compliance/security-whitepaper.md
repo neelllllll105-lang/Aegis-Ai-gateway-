@@ -22,7 +22,7 @@ default it does not.
 
 | Class | Examples | Stored? | Encrypted at rest |
 |---|---|---|---|
-| Content | Prompts, completions, embeddings input | **No**, unless `content_capture` is explicitly enabled | Cache entries only |
+| Content | Prompts, completions, embeddings input | **Yes, in the exact-match cache, by default** — see below | **No** |
 | Credentials | Provider API keys | Yes | AES-256-GCM, per-tenant key |
 | Authenticators | Aegis API keys, passwords, TOTP secrets | Hash only | SHA-256 (keys), argon2id (passwords) |
 | Metadata | Token counts, costs, model names, latency, routing reasons | Yes | Database-level |
@@ -30,6 +30,32 @@ default it does not.
 
 Token counts and costs are metadata, not content. A usage record can tell you a request
 used 4,120 input tokens and cost $0.031; it cannot tell you what was asked.
+
+**Correction — an earlier version of this document claimed `content_capture` gates
+whether content is stored. That was wrong, and was caught by an internal audit rather
+than by a customer, which is not good enough but is the honest sequence of events.** The
+schema has two flags: `zero_retention` and `content_capture`. Only `zero_retention` gates
+anything at runtime — `cache/fingerprint.rs::cacheability()` checks it, and it alone,
+before allowing a request into the exact-match cache. `content_capture` is read and
+written by the API but consulted by no code path; the encrypted, per-tenant-keyed
+`captured_content` table its own migration comment describes is never written to by
+anything in the codebase today. Concretely:
+
+- The **exact-match cache** stores the full prompt and completion as **plaintext JSON in
+  Redis** (`cache/exact.rs`), with no application-level encryption — unlike provider
+  credentials, which are AES-256-GCM encrypted before they ever reach storage. This is
+  **on by default** for every organisation, for up to the configured TTL (24 hours by
+  default), for the sole purpose of serving a byte-identical repeat request without
+  paying a provider again.
+- Setting `zero_retention: true` on an organisation is what actually removes content from
+  this path — confirmed by `cache/fingerprint.rs`, not by the flag's name alone.
+- `content_capture` should be treated as **not implemented** until this is corrected in
+  code: either wire it to the table it was designed for, or remove the flag and the claim
+  entirely rather than leave a control in the schema that does nothing.
+
+Until the code is fixed, tell a customer the accurate thing: **content lives in Redis in
+plaintext for any organisation that has not set `zero_retention`, for up to the cache TTL.
+Set `zero_retention` if this is not acceptable.**
 
 ## 3. Authentication and authorisation
 

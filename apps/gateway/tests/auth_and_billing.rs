@@ -336,3 +336,120 @@ async fn audit_entries_are_written_and_readable() {
 
     cleanup(&pool, &fixture).await;
 }
+
+/// A session, built directly against the database rather than through the login
+/// endpoint. `create_provider` requires `require_writer`, and — this is deliberate,
+/// verified directly in `middleware/auth.rs::can_write` — an API key can *never* satisfy
+/// that check, only a session with an `owner`/`admin` role can. Exercising the actual
+/// exploit chain from the enterprise readiness audit means authenticating the way that
+/// chain does: as a freshly signed-up owner, not an API key.
+async fn owner_session_headers(
+    pool: &sqlx::PgPool,
+    fixture: &common::Fixture,
+) -> axum::http::HeaderMap {
+    use aegis_gateway::crypto;
+    use aegis_gateway::db::repo;
+
+    let generated = crypto::generate_session_token();
+    repo::create_session(
+        pool,
+        fixture.user_id,
+        &generated.hash,
+        chrono::Utc::now() + chrono::Duration::days(1),
+    )
+    .await
+    .expect("session creation");
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        axum::http::HeaderValue::from_str(&format!("aegis_session={}", generated.plaintext))
+            .unwrap(),
+    );
+    headers
+}
+
+/// The actual exploit chain from the enterprise readiness audit, run against the real
+/// handler with a real database: a freshly signed-up organisation — the same access any
+/// free-tier signup gets automatically, no plan gate, no review — attempts to register a
+/// BYOK "custom provider" pointed at the cloud metadata service. Before
+/// `middleware::ssrf_guard` existed, this call succeeded and the credential was stored;
+/// the very next step in the demonstrated chain (`POST /api/providers/{id}/test`) would
+/// then have made the gateway itself issue a server-side request against it.
+#[tokio::test]
+async fn a_freshly_signed_up_org_cannot_register_a_provider_pointed_at_cloud_metadata() {
+    use aegis_gateway::routes::management;
+    use axum::extract::{Json, State};
+
+    let Some((state, pool)) = setup().await else {
+        return skip(
+            "a_freshly_signed_up_org_cannot_register_a_provider_pointed_at_cloud_metadata",
+        );
+    };
+
+    let fixture = create_org(&pool, "ssrf-attacker").await;
+    let headers = owner_session_headers(&pool, &fixture).await;
+
+    let request = management::CreateCredentialRequest {
+        provider: "custom".to_string(),
+        api_key: "irrelevant-for-this-test".to_string(),
+        base_url: Some(
+            "http://169.254.169.254/latest/meta-data/iam/security-credentials/".to_string(),
+        ),
+        label: None,
+        is_default: Some(true),
+    };
+
+    let response = management::create_provider(State(state), headers, Json(request)).await;
+
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::BAD_REQUEST,
+        "a base_url pointed at the cloud metadata service must be rejected, not stored"
+    );
+
+    // Confirm it truly was never persisted, not just that this one response looked right.
+    let stored = repo::list_credentials(&pool, fixture.org_id)
+        .await
+        .expect("query");
+    assert!(
+        stored.is_empty(),
+        "the SSRF-targeting credential must never reach storage: {stored:?}"
+    );
+
+    cleanup(&pool, &fixture).await;
+}
+
+/// The same chain with an ordinary, legitimate custom endpoint must still work — the
+/// guard's job is to distinguish these two cases, not to break BYOK custom endpoints
+/// generally.
+#[tokio::test]
+async fn a_legitimate_custom_endpoint_is_still_accepted() {
+    use aegis_gateway::routes::management;
+    use axum::extract::{Json, State};
+
+    let Some((state, pool)) = setup().await else {
+        return skip("a_legitimate_custom_endpoint_is_still_accepted");
+    };
+
+    let fixture = create_org(&pool, "ssrf-legitimate").await;
+    let headers = owner_session_headers(&pool, &fixture).await;
+
+    let request = management::CreateCredentialRequest {
+        provider: "custom".to_string(),
+        api_key: "sk-test-key".to_string(),
+        base_url: Some("https://api.openai.com/v1".to_string()),
+        label: Some("legitimate proxy".to_string()),
+        is_default: Some(true),
+    };
+
+    let response = management::create_provider(State(state), headers, Json(request)).await;
+
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::CREATED,
+        "a genuine public endpoint must not be rejected by the SSRF guard"
+    );
+
+    cleanup(&pool, &fixture).await;
+}
