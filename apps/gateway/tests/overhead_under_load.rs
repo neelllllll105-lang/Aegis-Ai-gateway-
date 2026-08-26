@@ -82,6 +82,7 @@ fn load_test_state() -> AppState {
             context_window: 128_000,
             supports_tools: true,
             supports_vision: true,
+            supports_chat: true,
             is_active: true,
             source: "load test".into(),
             cache: Default::default(),

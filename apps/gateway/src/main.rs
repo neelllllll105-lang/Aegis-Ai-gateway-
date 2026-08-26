@@ -236,6 +236,7 @@ fn into_model(row: db::repo::PricingRow) -> aegis_gateway::metering::pricing::Mo
         context_window: row.context_window.max(0) as u32,
         supports_tools: row.supports_tools,
         supports_vision: row.supports_vision,
+        supports_chat: row.supports_chat,
         is_active: row.is_active,
         source: row.source,
         cache: aegis_gateway::metering::pricing::CachePricing {

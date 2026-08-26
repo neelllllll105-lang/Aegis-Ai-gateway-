@@ -482,6 +482,32 @@ pub async fn check_and_reserve(
     }))
 }
 
+/// How much of the tightest hard ceiling is left, in micro-cents.
+///
+/// Fed to the router so an organisation approaching its cap is steered toward cheaper
+/// capable models before the budget check starts refusing requests outright. `None` when no
+/// hard limit applies, which is the common case and means routing behaves exactly as it did.
+///
+/// Reads counters rather than reserving: this runs *after* the reservation, so the figures
+/// already include this request, and a second reservation would double-count it.
+pub async fn headroom_mc(
+    store: &dyn KvStore,
+    auth: &AuthContext,
+    limits: &BudgetLimits,
+    region: Option<&str>,
+) -> Option<i64> {
+    let mut tightest: Option<i64> = None;
+    for scope in scopes(auth, limits, region) {
+        let (Some(limit), true) = (scope.limit, scope.hard) else {
+            continue;
+        };
+        let spent = read_counter(store, &scope.key).await;
+        let remaining = (limit - spent).max(0);
+        tightest = Some(tightest.map_or(remaining, |current: i64| current.min(remaining)));
+    }
+    tightest
+}
+
 /// Every counter this request touches, innermost scope first.
 ///
 /// Order matters for the error message: a rejection should name the most specific limit

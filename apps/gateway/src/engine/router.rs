@@ -23,8 +23,9 @@
 //! 3. Classifier complexity band.
 //! 4. Passthrough.
 
+use crate::engine::bandit::RoutingBandit;
 use crate::engine::classifier::{Classification, Classifier};
-use crate::engine::fallback::ProviderHealth;
+use crate::engine::fallback::{HealthScore, ProviderHealth};
 use crate::engine::policy::{PolicyContext, RoutingPolicy};
 use crate::error::{AegisError, Result};
 use crate::metering::pricing::{PricingTable, Requirements};
@@ -43,6 +44,14 @@ pub struct RoutingDecision {
     pub complexity_score: Option<f32>,
     /// Number of cheaper candidates considered.
     pub candidates_considered: usize,
+    /// A human-readable account of *why*, in the customer's terms.
+    ///
+    /// Returned on `X-Aegis-Routing-Explanation` and stored on the usage record. A
+    /// six-value enum and a bare score cannot answer "why was my request downgraded" — the
+    /// question a customer actually asks — and the generator that could
+    /// ([`crate::engine::classifier::Features::explain`]) existed with no caller outside
+    /// its own test. Found in the enterprise readiness audit.
+    pub explanation: Vec<String>,
 }
 
 impl RoutingDecision {
@@ -68,6 +77,19 @@ pub struct RoutingInputs<'a> {
     pub allowed_models: Option<Vec<String>>,
     /// Hard tier ceiling from the org's plan (the free tier is capped at cheap models).
     pub plan_tier_ceiling: Option<ModelTier>,
+    /// Budget headroom left this period, in micro-cents, when a hard limit applies.
+    ///
+    /// Routing has always been blind to actual spend — it knew a plan's static tier
+    /// ceiling and nothing about whether the organisation was two dollars from its cap.
+    /// With this, an organisation running low is steered toward cheaper capable models
+    /// *before* the budget check starts returning 402s, which is a far better outcome than
+    /// a wall of rejections at 4pm on the last day of the month.
+    pub budget_headroom_mc: Option<i64>,
+    /// The bandit's learned preferences, when routing should consult them.
+    ///
+    /// `None` disables outcome-informed selection entirely — used by tests that need a
+    /// purely deterministic decision, and available as a kill switch.
+    pub bandit: Option<&'a RoutingBandit>,
 }
 
 /// The routing engine.
@@ -95,10 +117,25 @@ impl Router {
         health: &ProviderHealth,
         inputs: &RoutingInputs<'_>,
     ) -> Result<RoutingDecision> {
+        // The context a candidate must actually fit: the prompt *plus* whatever the caller
+        // asked the model to generate. Checking the prompt alone — which is what this did
+        // before — lets a 100k-token prompt with `max_tokens: 32000` route to a
+        // 128k-context model that will refuse it partway through generation, turning a
+        // routable request into a mid-stream failure. Found in the enterprise readiness
+        // audit.
+        let required_context = request
+            .estimated_input_tokens()
+            .saturating_add(request.max_tokens.map(u64::from).unwrap_or(0))
+            .min(u32::MAX as u64) as u32;
+
         let requirements = Requirements {
             tools: request.requires_tools(),
             vision: request.requires_vision(),
-            min_context: request.estimated_input_tokens().min(u32::MAX as u64) as u32,
+            min_context: required_context,
+            // A chat request needs a model that can hold a conversation. Without this,
+            // an embedding model wins the price sort for every simple request and answers
+            // none of them.
+            chat: true,
         };
 
         // An unknown model cannot be priced, so it cannot be compared, so it cannot be
@@ -111,6 +148,11 @@ impl Router {
                 reason: RoutingReason::Passthrough,
                 complexity_score: None,
                 candidates_considered: 0,
+                explanation: vec![format!(
+                    "{} is not in the pricing table, so it cannot be compared or \
+                     substituted; passed through unchanged",
+                    request.model
+                )],
             });
         };
 
@@ -149,6 +191,10 @@ impl Router {
                             reason: RoutingReason::Policy,
                             complexity_score: Some(classification.score),
                             candidates_considered: 0,
+                            explanation: vec![format!(
+                                "an organisation policy pins this request to {}",
+                                model.model_id
+                            )],
                         });
                     }
                     // A policy pinning a model we cannot price is a configuration error.
@@ -168,7 +214,7 @@ impl Router {
                         requirements,
                         inputs,
                         RoutingReason::Policy,
-                        Some(classification.score),
+                        Some(&classification),
                     ) {
                         return Ok(decision);
                     }
@@ -179,7 +225,9 @@ impl Router {
 
         // [3] Complexity-driven selection.
         let target_tier = match classification.complexity {
-            // Never downgrade a hard request. This is the line that protects quality.
+            // Never downgrade a hard request. This is the line that protects quality, and
+            // budget pressure does not move it: serving a worse answer to save money is
+            // the one trade this product must never make silently.
             Complexity::Complex => {
                 return Ok(self.passthrough_capped(
                     requested,
@@ -192,6 +240,18 @@ impl Router {
             }
             Complexity::Medium => ModelTier::Mid,
             Complexity::Simple => ModelTier::Cheap,
+        };
+
+        // Budget pressure tightens the ceiling for requests that were already going to be
+        // downgraded. An organisation two dollars from a hard cap gets steered toward
+        // cheaper capable models *before* the budget check starts refusing requests, which
+        // is a far better outcome than a wall of 402s at 4pm on the last day of the month.
+        //
+        // Deliberately only reachable for Medium and Simple: Complex returned above.
+        let target_tier = match budget_pressure(inputs, requested, request) {
+            BudgetPressure::Critical => ModelTier::Cheap,
+            BudgetPressure::Tight => target_tier.min(ModelTier::Mid),
+            BudgetPressure::Comfortable => target_tier,
         };
 
         let ceiling =
@@ -209,7 +269,7 @@ impl Router {
             requirements,
             inputs,
             RoutingReason::Complexity,
-            Some(classification.score),
+            Some(&classification),
         ) {
             return Ok(decision);
         }
@@ -241,6 +301,17 @@ impl Router {
             reason,
             complexity_score: None,
             candidates_considered: 0,
+            explanation: vec![match reason {
+                RoutingReason::UserOverride => {
+                    "the caller sent X-Aegis-Routing-Hint: passthrough, which overrides                      every other consideration"
+                        .to_string()
+                }
+                RoutingReason::Policy => {
+                    "an organisation policy requires this request to pass through                      unchanged"
+                        .to_string()
+                }
+                _ => "served on the requested model unchanged".to_string(),
+            }],
         }
     }
 
@@ -268,6 +339,10 @@ impl Router {
                 reason: RoutingReason::Passthrough,
                 complexity_score: score,
                 candidates_considered: 0,
+                explanation: vec![
+                    "no cheaper model could serve this request without a quality                      downgrade; served on the model you asked for"
+                        .to_string(),
+                ],
             };
         }
 
@@ -291,9 +366,20 @@ impl Router {
             Some(model) => RoutingDecision {
                 served_model: model.model_id.clone(),
                 provider: model.provider.clone(),
-                reason: RoutingReason::Policy,
+                // Substitution, not policy. Recording an outage-driven substitution as
+                // `policy` sent a support engineer looking for a policy that did not
+                // exist, and hid the real cause — which is the one thing an incident
+                // timeline most needs. Found in the enterprise readiness audit.
+                reason: substitution_reason(provider_up),
                 complexity_score: score,
                 candidates_considered: 1,
+                explanation: vec![substitution_explanation(
+                    requested,
+                    model,
+                    provider_up,
+                    allowed_by_plan,
+                    allowed_by_list,
+                )],
             },
             // Nothing at all is available. Passing through gives the provider a chance to
             // answer and the caller a real upstream error rather than one we invented.
@@ -303,12 +389,32 @@ impl Router {
                 reason: RoutingReason::Passthrough,
                 complexity_score: score,
                 candidates_considered: 0,
+                explanation: vec![
+                    "no permitted model is currently available; sent to the requested                      model so the provider's own error reaches you rather than one we                      invented"
+                        .to_string(),
+                ],
             },
         }
     }
 
-    /// Cheapest capable, available, permitted model at or below `tier`, strictly cheaper
-    /// than the requested model.
+    /// Best capable, available, permitted model at or below `tier`, strictly cheaper than
+    /// the requested model.
+    ///
+    /// "Best" is not simply "cheapest" any more. Three signals shape the order, each one
+    /// closing a gap the enterprise readiness audit found:
+    ///
+    /// * **Provider health**, graded rather than binary. A provider failing a third of its
+    ///   requests never trips its circuit — it never fails five times *in a row* — so
+    ///   before this it kept winning the price sort while quietly costing every caller a
+    ///   retry. Its effective price is now multiplied by a penalty derived from its recent
+    ///   success rate.
+    /// * **Latency**, which routing had no field for at all. A provider that is currently
+    ///   much slower than its peers is penalised, because on a gateway sold on overhead,
+    ///   silently routing to the slow option is a worse outcome than paying slightly more.
+    /// * **Outcomes**, via the bandit. It has always recorded every result and was never
+    ///   read back, which made "outcome-trained routing" a description of intent rather
+    ///   than behaviour. It now breaks ties among candidates the router has already
+    ///   decided are acceptable — it can reorder, never widen, the permitted set.
     #[allow(clippy::too_many_arguments)]
     fn select_at_tier(
         &self,
@@ -319,25 +425,222 @@ impl Router {
         requirements: Requirements,
         inputs: &RoutingInputs<'_>,
         reason: RoutingReason,
-        score: Option<f32>,
+        classification: Option<&Classification>,
     ) -> Option<RoutingDecision> {
-        let candidates: Vec<_> = pricing
+        let score = classification.map(|c| c.score);
+        let mut candidates: Vec<_> = pricing
             .cheaper_alternatives(&requested.model_id, requirements)
             .into_iter()
             .filter(|m| m.tier <= tier)
             .filter(|m| is_allowed(&m.model_id, inputs))
             .filter(|m| health.is_available(&m.provider))
+            .map(|model| {
+                let health_score = health.score(&model.provider);
+                (model, health_score)
+            })
             .collect();
 
         let considered = candidates.len();
-        candidates.first().map(|model| RoutingDecision {
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // Health-adjusted price. A degraded provider's price is multiplied by roughly the
+        // number of attempts a request there is expected to take, so "cheap but flaky"
+        // competes on its true cost rather than its advertised one.
+        let median_latency = median_latency_ms(&candidates);
+        candidates.sort_by(|(a, ah), (b, bh)| {
+            effective_price(a, ah, median_latency)
+                .partial_cmp(&effective_price(b, bh, median_latency))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                // Stable tie-break so routing stays deterministic and an incident is
+                // reproducible from a usage record.
+                .then_with(|| a.model_id.cmp(&b.model_id))
+        });
+
+        // The bandit reorders within what the router already permits. Deliberately not
+        // allowed to add a candidate: everything here has already passed capability,
+        // allowlist, tier, and availability filtering, and outcome data is not a reason to
+        // relax any of those.
+        let chosen = match (inputs.bandit, classification) {
+            (Some(bandit), Some(classification)) => {
+                let ids: Vec<&str> = candidates
+                    .iter()
+                    .map(|(m, _)| m.model_id.as_str())
+                    .collect();
+                bandit
+                    .select(classification.complexity, &ids)
+                    .and_then(|id| candidates.iter().find(|(m, _)| m.model_id == id))
+                    .unwrap_or(&candidates[0])
+            }
+            _ => &candidates[0],
+        };
+
+        let (model, model_health) = chosen;
+        let mut explanation = classification.map(|c| c.explain()).unwrap_or_default();
+        explanation.push(format!(
+            "routed to {} instead of {} ({} cheaper capable alternative{} considered)",
+            model.model_id,
+            requested.model_id,
+            considered,
+            if considered == 1 { "" } else { "s" }
+        ));
+        if model_health.is_degraded() {
+            explanation.push(format!(
+                "note: {} is currently degraded ({:.0}% recent success) but was still the \
+                 best value",
+                model.provider,
+                model_health.success_rate * 100.0
+            ));
+        }
+
+        Some(RoutingDecision {
             served_model: model.model_id.clone(),
             provider: model.provider.clone(),
             reason,
             complexity_score: score,
             candidates_considered: considered,
+            explanation,
         })
     }
+}
+
+/// How close an organisation is to running out of budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BudgetPressure {
+    /// Plenty of headroom, or no hard limit at all.
+    Comfortable,
+    /// Fewer than ten of this request left before the cap.
+    Tight,
+    /// Fewer than three left. Every remaining request should be as cheap as possible.
+    Critical,
+}
+
+/// Judge budget pressure in units of *this request*, not in dollars.
+///
+/// A fixed dollar threshold would be meaningless across customers — $5 of headroom is
+/// nothing to one organisation and a week to another. Measuring in "how many more requests
+/// like this one fit" is the same judgement a person would make.
+fn budget_pressure(
+    inputs: &RoutingInputs<'_>,
+    requested: &crate::metering::pricing::ModelPricing,
+    request: &NormalizedRequest,
+) -> BudgetPressure {
+    let Some(headroom) = inputs.budget_headroom_mc else {
+        return BudgetPressure::Comfortable;
+    };
+    if headroom <= 0 {
+        // Already at the cap. The budget check will refuse this request; routing has no
+        // useful opinion left, and pretending otherwise would just add noise.
+        return BudgetPressure::Critical;
+    }
+
+    let projected = requested
+        .cost(
+            request.estimated_input_tokens(),
+            request.max_tokens.map(u64::from).unwrap_or(512),
+        )
+        .as_i64();
+    if projected <= 0 {
+        return BudgetPressure::Comfortable;
+    }
+
+    match headroom / projected {
+        0..=2 => BudgetPressure::Critical,
+        3..=9 => BudgetPressure::Tight,
+        _ => BudgetPressure::Comfortable,
+    }
+}
+
+/// Why a substitution happened, in a form an operator can act on.
+///
+/// Previously every one of these was recorded as `Policy`, including outages — so an
+/// engineer investigating "why did this customer get a different model" went looking for a
+/// policy that did not exist, and the actual cause (a provider being down) never reached
+/// the usage record at all.
+fn substitution_reason(provider_up: bool) -> RoutingReason {
+    // Only two causes reach here: the provider being down, or the plan/allowlist
+    // forbidding the requested model. Both of the latter are policy-shaped — a
+    // configuration decision, not an incident — so only availability gets its own reason.
+    if provider_up {
+        RoutingReason::Policy
+    } else {
+        RoutingReason::ProviderUnavailable
+    }
+}
+
+/// The customer-facing sentence explaining a substitution.
+fn substitution_explanation(
+    requested: &crate::metering::pricing::ModelPricing,
+    served: &crate::metering::pricing::ModelPricing,
+    provider_up: bool,
+    allowed_by_plan: bool,
+    allowed_by_list: bool,
+) -> String {
+    if !provider_up {
+        return format!(
+            "{} was unavailable ({} circuit is open), so this request was served by the \
+             closest available model, {}. This substitution was not a cost optimisation \
+             and may cost more than the model you asked for — compare x-aegis-cost against \
+             x-aegis-baseline-cost.",
+            requested.model_id, requested.provider, served.model_id
+        );
+    }
+    if !allowed_by_plan {
+        return format!(
+            "{} is above your plan's model tier, so this request was served by the best \
+             model your plan allows, {}.",
+            requested.model_id, served.model_id
+        );
+    }
+    if !allowed_by_list {
+        return format!(
+            "{} is not on your organisation's allowed-model list, so this request was \
+             served by {} instead.",
+            requested.model_id, served.model_id
+        );
+    }
+    format!(
+        "served by {} instead of {}",
+        served.model_id, requested.model_id
+    )
+}
+
+/// Median smoothed latency across candidates, used as the yardstick for "slow".
+///
+/// A relative measure rather than an absolute threshold: what counts as slow for a small
+/// fast model is very different from a frontier reasoning model, and a fixed millisecond
+/// cutoff would either never fire or always fire depending on the tier.
+fn median_latency_ms(candidates: &[(&crate::metering::pricing::ModelPricing, HealthScore)]) -> f64 {
+    let mut observed: Vec<f64> = candidates
+        .iter()
+        .map(|(_, h)| h.latency_ms)
+        .filter(|ms| *ms > 0.0)
+        .collect();
+    if observed.is_empty() {
+        return 0.0;
+    }
+    observed.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    observed[observed.len() / 2]
+}
+
+/// How much a candidate really costs, once reliability and speed are priced in.
+fn effective_price(
+    model: &crate::metering::pricing::ModelPricing,
+    health: &HealthScore,
+    median_latency_ms: f64,
+) -> f64 {
+    let base = model.blended_per_mtok().as_i64() as f64;
+    let mut price = base * health.price_penalty();
+
+    // Latency penalty, capped. A provider at twice the median pays a 20% premium in the
+    // comparison — enough to lose a close race, not enough to override a genuinely large
+    // price difference, because the customer is paying for cost optimization first.
+    if median_latency_ms > 0.0 && health.latency_ms > median_latency_ms {
+        let ratio = (health.latency_ms / median_latency_ms).min(4.0);
+        price *= 1.0 + (ratio - 1.0) * 0.2;
+    }
+    price
 }
 
 /// The stricter (lower) of two optional tier ceilings.
@@ -405,6 +708,344 @@ mod tests {
         )
     }
 
+    // ---------------------------------------------------------------------------
+    // Signals the router was blind to before the enterprise readiness audit.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn a_degraded_provider_loses_to_a_healthy_one_when_the_penalty_outweighs_the_price_gap() {
+        // The gap that mattered most: a provider failing most of its requests never
+        // reaches five *consecutive* failures, so its circuit stays closed and it kept
+        // winning the price sort indefinitely. Routing could only ask "is it open".
+        //
+        // groq/llama-3.1-8b-instant is the cheapest chat-capable seed model (blended
+        // ~$0.0575/Mtok) by a wide margin over the next candidate,
+        // openai/gpt-5-nano (~$0.1375/Mtok) — about 2.4x. A price gap that size is
+        // deliberately not overturned by a mild penalty; it takes real, sustained
+        // degradation, which is exactly what is applied here.
+        let pricing = pricing();
+        let health = ProviderHealth::new();
+
+        let baseline = Router::new()
+            .route(
+                &simple_request(),
+                &pricing,
+                &health,
+                &RoutingInputs::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            baseline.served_model, "groq/llama-3.1-8b-instant",
+            "this test is calibrated against the seed table's actual cheapest model"
+        );
+
+        // 16 failures against 4 successes: a 20% recent success rate, never five losses in
+        // a row (the success in each group of five resets the consecutive counter), so the
+        // circuit stays closed throughout — this is "degraded", not "dead".
+        for _ in 0..4 {
+            for _ in 0..4 {
+                health.record_failure("groq");
+            }
+            health.record_success("groq");
+        }
+        assert!(
+            health.is_available("groq"),
+            "the circuit must still be closed — that is the whole point"
+        );
+        let score = health.score("groq");
+        assert!(score.is_degraded(), "20% success must read as degraded");
+        assert!(
+            score.price_penalty() > 2.4,
+            "the penalty must be large enough to overcome a 2.4x price gap, got {}",
+            score.price_penalty()
+        );
+
+        let degraded = Router::new()
+            .route(
+                &simple_request(),
+                &pricing,
+                &health,
+                &RoutingInputs::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            degraded.served_model, "openai/gpt-5-nano",
+            "a sufficiently degraded provider must lose to the next cheapest healthy one"
+        );
+    }
+
+    #[test]
+    fn a_mildly_degraded_provider_keeps_a_large_enough_price_lead() {
+        // The complement: routing must not be so reactive that any blip reshuffles
+        // selection. A provider that is still winning 90% of its requests should keep a
+        // 2.4x price lead over the next candidate.
+        let pricing = pricing();
+        let health = ProviderHealth::new();
+        for _ in 0..9 {
+            health.record_success("groq");
+        }
+        health.record_failure("groq");
+
+        let decision = Router::new()
+            .route(
+                &simple_request(),
+                &pricing,
+                &health,
+                &RoutingInputs::default(),
+            )
+            .unwrap();
+        assert_eq!(decision.served_model, "groq/llama-3.1-8b-instant");
+    }
+
+    #[test]
+    fn a_healthy_provider_is_not_penalised_on_a_tiny_sample() {
+        // One failure out of one attempt is not a 0% success rate, it is no information.
+        // Without a minimum sample, a single blip would exile a healthy provider.
+        let health = ProviderHealth::new();
+        health.record_failure("openai");
+        assert!(!health.score("openai").is_degraded());
+        assert_eq!(health.score("openai").price_penalty(), 1.0);
+    }
+
+    #[test]
+    fn max_tokens_counts_toward_the_context_a_candidate_must_fit() {
+        // A 100k prompt asking for 32k of output needs 132k of context. Checking the
+        // prompt alone routes it to a 128k model that will fail partway through
+        // generation — a routable request turned into a mid-stream failure.
+        let long_prompt = "word ".repeat(30_000); // ~37k tokens
+        let request = NormalizedRequest {
+            max_tokens: Some(100_000),
+            ..NormalizedRequest::simple("gpt-4o", &long_prompt)
+        };
+
+        let decision = Router::new()
+            .route(&request, &pricing(), &healthy(), &RoutingInputs::default())
+            .unwrap();
+
+        let served = pricing().get(&decision.served_model).cloned();
+        if let Some(model) = served {
+            assert!(
+                model.context_window as u64 >= request.estimated_input_tokens() + 100_000,
+                "{} has a {}-token window, too small for prompt + max_tokens",
+                model.model_id,
+                model.context_window
+            );
+        }
+    }
+
+    #[test]
+    fn budget_pressure_tightens_the_tier_for_downgradable_requests() {
+        // An organisation two dollars from a hard cap should be steered cheaper *before*
+        // the budget check starts refusing requests outright.
+        let pricing = pricing();
+        let request = NormalizedRequest::simple("openai/gpt-4o", "Summarise this in a line.");
+
+        let comfortable = Router::new()
+            .route(&request, &pricing, &healthy(), &RoutingInputs::default())
+            .unwrap();
+        let critical = Router::new()
+            .route(
+                &request,
+                &pricing,
+                &healthy(),
+                &RoutingInputs {
+                    // Barely enough for one more request.
+                    budget_headroom_mc: Some(200),
+                    ..RoutingInputs::default()
+                },
+            )
+            .unwrap();
+
+        let tier_of = |id: &str| pricing.get(id).map(|m| m.tier);
+        assert!(
+            tier_of(&critical.served_model) <= tier_of(&comfortable.served_model),
+            "budget pressure must not route *up*"
+        );
+    }
+
+    #[test]
+    fn budget_pressure_never_downgrades_a_complex_request() {
+        // The quality guarantee outranks budget pressure. Serving a worse answer to save
+        // money is the one trade this product must never make silently.
+        let decision = Router::new()
+            .route(
+                &complex_request(),
+                &pricing(),
+                &healthy(),
+                &RoutingInputs {
+                    budget_headroom_mc: Some(1),
+                    ..RoutingInputs::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(decision.served_model, "openai/gpt-4o");
+    }
+
+    #[test]
+    fn a_routing_decision_explains_itself_in_the_customers_terms() {
+        let decision = Router::new()
+            .route(
+                &simple_request(),
+                &pricing(),
+                &healthy(),
+                &RoutingInputs::default(),
+            )
+            .unwrap();
+
+        assert!(
+            !decision.explanation.is_empty(),
+            "every decision must be explainable"
+        );
+        let joined = decision.explanation.join(" ");
+        assert!(
+            joined.contains("classified"),
+            "the explanation should name the classification: {joined}"
+        );
+        assert!(
+            joined.contains(&decision.served_model),
+            "the explanation should name the model that served it: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_provider_outage_substitution_is_not_labelled_policy() {
+        // Recording an outage as `policy` sent support looking for a policy that did not
+        // exist, and hid the real cause from the incident timeline.
+        let pricing = pricing();
+        let health = ProviderHealth::new();
+        for _ in 0..crate::engine::fallback::FAILURE_THRESHOLD {
+            health.record_failure("openai");
+        }
+        assert!(!health.is_available("openai"));
+
+        let decision = Router::new()
+            .route(
+                &complex_request(),
+                &pricing,
+                &health,
+                &RoutingInputs::default(),
+            )
+            .unwrap();
+
+        assert_eq!(decision.reason, RoutingReason::ProviderUnavailable);
+        let joined = decision.explanation.join(" ");
+        assert!(
+            joined.contains("unavailable"),
+            "the explanation must say the provider was down: {joined}"
+        );
+        assert!(
+            joined.contains("may cost more"),
+            "an outage substitution picks the best available model, which can cost more \
+             than the one requested — the customer must be told: {joined}"
+        );
+    }
+
+    #[test]
+    fn the_bandit_can_reorder_candidates_but_never_widen_them() {
+        // The bandit's job is to break ties among models the router already accepts.
+        // Letting it add one would let outcome data override capability, allowlist, tier,
+        // and availability filtering — every guarantee the router exists to enforce.
+        let pricing = pricing();
+        let bandit = RoutingBandit::new();
+
+        let without = Router::new()
+            .route(
+                &simple_request(),
+                &pricing,
+                &healthy(),
+                &RoutingInputs::default(),
+            )
+            .unwrap();
+
+        // Teach the bandit that a *different* cheap model performs well.
+        let alternative = pricing
+            .cheaper_alternatives(
+                "openai/gpt-4o",
+                Requirements {
+                    min_context: 0,
+                    ..Requirements::default()
+                },
+            )
+            .into_iter()
+            .find(|m| m.model_id != without.served_model)
+            .map(|m| m.model_id.clone())
+            .expect("the seed table has several cheaper models");
+
+        for _ in 0..50 {
+            bandit.record(
+                Complexity::Simple,
+                &alternative,
+                true,
+                crate::money::MicroCents(10_000),
+                crate::money::MicroCents(100),
+            );
+            bandit.record(
+                Complexity::Simple,
+                &without.served_model,
+                false,
+                crate::money::MicroCents(0),
+                crate::money::MicroCents(100),
+            );
+        }
+
+        let with = Router::new()
+            .route(
+                &simple_request(),
+                &pricing,
+                &healthy(),
+                &RoutingInputs {
+                    bandit: Some(&bandit),
+                    ..RoutingInputs::default()
+                },
+            )
+            .unwrap();
+
+        // Whatever it picks, it must be one the router itself would have permitted.
+        let permitted: Vec<String> = pricing
+            .cheaper_alternatives(
+                "openai/gpt-4o",
+                Requirements {
+                    min_context: simple_request().estimated_input_tokens() as u32,
+                    ..Requirements::default()
+                },
+            )
+            .into_iter()
+            .map(|m| m.model_id.clone())
+            .collect();
+        assert!(
+            permitted.contains(&with.served_model),
+            "{} was not in the router's own candidate set",
+            with.served_model
+        );
+    }
+
+    #[test]
+    fn routing_is_deterministic_without_a_bandit() {
+        // Reproducibility from a usage record depends on this. Two identical requests with
+        // identical inputs must produce identical decisions.
+        let pricing = pricing();
+        let health = healthy();
+        let first = Router::new()
+            .route(
+                &simple_request(),
+                &pricing,
+                &health,
+                &RoutingInputs::default(),
+            )
+            .unwrap();
+        for _ in 0..20 {
+            let again = Router::new()
+                .route(
+                    &simple_request(),
+                    &pricing,
+                    &health,
+                    &RoutingInputs::default(),
+                )
+                .unwrap();
+            assert_eq!(first.served_model, again.served_model);
+        }
+    }
+
     #[test]
     fn simple_requests_route_to_a_cheaper_model() {
         let decision = Router::new()
@@ -418,6 +1059,64 @@ mod tests {
         assert_ne!(decision.served_model, "openai/gpt-4o");
         assert_eq!(decision.reason, RoutingReason::Complexity);
         assert!(decision.candidates_considered > 0);
+    }
+
+    #[test]
+    fn a_chat_request_is_never_routed_to_an_embedding_model() {
+        // The single most severe bug this file has had. `text-embedding-3-small` prices
+        // at $0.02/Mtok input and $0.00 output — the cheapest row in the entire seed
+        // table by a wide margin — and, before `Requirements::chat` existed, reported
+        // `supports_tools: false` and `supports_vision: false`, which satisfied every
+        // filter a plain chat request imposed. Every simple chat request was being routed
+        // to a model that cannot answer one. A prior version of this exact test asserted
+        // only `served_model != requested_model` and passed throughout, which is why this
+        // needs its own explicit, unambiguous assertion rather than living inside a
+        // broader one.
+        let decision = Router::new()
+            .route(
+                &simple_request(),
+                &pricing(),
+                &healthy(),
+                &RoutingInputs::default(),
+            )
+            .unwrap();
+        assert!(
+            !decision.served_model.contains("embedding"),
+            "routed a chat request to {}",
+            decision.served_model
+        );
+
+        let cheap_request = NormalizedRequest::simple("openai/gpt-4o-mini", "hi");
+        let decision = Router::new()
+            .route(
+                &cheap_request,
+                &pricing(),
+                &healthy(),
+                &RoutingInputs::default(),
+            )
+            .unwrap();
+        assert!(!decision.served_model.contains("embedding"));
+    }
+
+    #[test]
+    fn embedding_models_are_excluded_from_every_capability_filter() {
+        // The property that actually closes the bug, checked directly against the
+        // pricing table rather than through one routing decision: no embedding model may
+        // ever satisfy a `chat: true` requirement, regardless of context window or price.
+        for model in pricing().all() {
+            if model.model_id.contains("embedding") {
+                assert!(
+                    !model.supports_chat,
+                    "{} must not claim chat support",
+                    model.model_id
+                );
+                assert!(
+                    !PricingTable::satisfies(model, Requirements::default()),
+                    "{} satisfied the default (chat-required) requirements",
+                    model.model_id
+                );
+            }
+        }
     }
 
     #[test]

@@ -405,6 +405,33 @@ pub struct Classification {
     pub version: ClassifierVersion,
 }
 
+impl Classification {
+    /// Plain-language reasons this request scored the way it did.
+    ///
+    /// The customer-facing half of a routing decision. `Features::explain` has produced
+    /// these since the classifier was written and had no caller outside its own test, so
+    /// the only explanation a customer could see was a six-value enum and a bare score —
+    /// which cannot answer "why was my request downgraded". Found in the enterprise
+    /// readiness audit.
+    pub fn explain(&self) -> Vec<String> {
+        let mut reasons: Vec<String> = self
+            .features
+            .explain()
+            .into_iter()
+            .map(|r| r.to_string())
+            .collect();
+        reasons.insert(
+            0,
+            format!(
+                "classified {} (score {:.2})",
+                self.complexity.as_str(),
+                self.score
+            ),
+        );
+        reasons
+    }
+}
+
 /// The complexity classifier.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Classifier {

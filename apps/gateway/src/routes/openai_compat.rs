@@ -63,6 +63,12 @@ pub struct PipelineOutcome {
     pub gateway_overhead_ms: f64,
     pub total_latency_ms: u32,
     pub tokens_saved_by_compression: u64,
+    /// Plain-language reasons this request was routed the way it was.
+    ///
+    /// Returned on `x-aegis-routing-explanation`. `routing_reason` is a six-value enum,
+    /// which tells a customer that their request was downgraded "for complexity" and
+    /// nothing about why — the question they actually ask support.
+    pub explanation: Vec<String>,
 }
 
 impl PipelineOutcome {
@@ -92,6 +98,24 @@ impl PipelineOutcome {
         );
         push("x-aegis-cache", self.cache.as_str().to_string());
         push("x-aegis-routing", self.routing_reason.as_str().to_string());
+        if !self.explanation.is_empty() {
+            // Header values must be printable ASCII on one line, so the reasons are joined
+            // with a separator and anything else is dropped rather than producing a header
+            // the client's HTTP library will reject outright.
+            let joined: String = self
+                .explanation
+                .join("; ")
+                .chars()
+                .map(|c| {
+                    if c.is_ascii() && !c.is_ascii_control() {
+                        c
+                    } else {
+                        ' '
+                    }
+                })
+                .collect();
+            push("x-aegis-routing-explanation", joined);
+        }
         push(
             "x-aegis-latency",
             format!(
@@ -181,8 +205,24 @@ impl OverheadClock {
 pub async fn execute(
     state: &AppState,
     auth: &AuthContext,
+    request: NormalizedRequest,
+    hint: RoutingHint,
+) -> Result<PipelineOutcome> {
+    execute_with_headroom(state, auth, request, hint, None).await
+}
+
+/// As [`execute`], told how much budget the organisation has left.
+///
+/// The headroom steers routing toward cheaper models as a hard cap approaches, so a
+/// customer running low degrades gracefully instead of hitting a wall of 402s. Split from
+/// `execute` rather than added to it so the many call sites that have no budget context —
+/// tests, the embeddings path — stay unchanged.
+pub async fn execute_with_headroom(
+    state: &AppState,
+    auth: &AuthContext,
     mut request: NormalizedRequest,
     hint: RoutingHint,
+    budget_headroom_mc: Option<i64>,
 ) -> Result<PipelineOutcome> {
     let mut clock = OverheadClock::start();
     let request_id = Uuid::new_v4();
@@ -239,6 +279,9 @@ pub async fn execute(
             gateway_overhead_ms: clock.overhead_ms(),
             total_latency_ms: clock.total_ms(),
             tokens_saved_by_compression: 0,
+            explanation: vec![format!(
+                "served from Aegis's exact-match cache — an identical request was answered                  within the cache window, so no provider was called and this request cost                  nothing"
+            )],
         });
     }
     state.metrics.record_cache(if auth.zero_retention {
@@ -264,6 +307,12 @@ pub async fn execute(
         team: None,
         allowed_models: auth.allowed_models.clone(),
         plan_tier_ceiling: plan_tier_ceiling(&auth.plan),
+        budget_headroom_mc,
+        // Outcome-informed selection. The bandit has recorded every routing result since
+        // it was written and was never read back, which made "outcome-trained routing" a
+        // description of intent rather than behaviour. It reorders candidates the router
+        // has already accepted; it can never widen the set.
+        bandit: Some(state.bandit.as_ref()),
     };
 
     let router = Router::with_classifier(Classifier::new());
@@ -343,6 +392,13 @@ pub async fn execute(
         decision.reason
     };
 
+    let mut explanation = decision.explanation.clone();
+    if used_fallback {
+        explanation.push(format!(
+            "the routed provider failed, so this request was served by {provider_id} instead"
+        ));
+    }
+
     // Recorded after failover has resolved, not at selection time. Previously this ran
     // immediately after `router.route()` and before `execute_with_fallback`, so the reason
     // label was always the *intended* one — meaning the one aggregate an SRE would alert on
@@ -367,6 +423,7 @@ pub async fn execute(
         gateway_overhead_ms: clock.overhead_ms(),
         total_latency_ms: clock.total_ms(),
         tokens_saved_by_compression: compression.tokens_saved(),
+        explanation,
     })
 }
 
@@ -400,6 +457,11 @@ async fn execute_with_fallback(
             }
         };
 
+        // Timed here rather than inside `call_with_retries` so the measurement covers what
+        // the caller actually waited for, retries and backoff included. A provider whose
+        // first attempt always fails and second always succeeds is slow *in practice*, and
+        // routing should see it that way.
+        let attempt_started = Instant::now();
         match call_with_retries(
             state,
             provider.as_ref(),
@@ -410,7 +472,22 @@ async fn execute_with_fallback(
         .await
         {
             Ok(response) => {
-                state.health.record_success(provider.id());
+                let elapsed_ms = attempt_started.elapsed().as_secs_f64() * 1_000.0;
+                // Feeds both the graded health the router now reads and the per-provider
+                // latency series the Grafana panel always promised but could not deliver.
+                state
+                    .health
+                    .record_success_with_latency(provider.id(), elapsed_ms);
+                state.metrics.record_provider_latency_ms(
+                    provider.id(),
+                    &attempt.model_id,
+                    elapsed_ms,
+                );
+                if index > 0 {
+                    state
+                        .metrics
+                        .record_fallback(&chain.attempts[0].provider, provider.id());
+                }
                 return Ok((
                     response,
                     attempt.model_id.clone(),
@@ -519,6 +596,7 @@ async fn open_stream_with_fallback(
         };
 
         let mut tries = 0;
+        let opened_at = Instant::now();
         loop {
             match provider
                 .chat_stream(
@@ -531,7 +609,22 @@ async fn open_stream_with_fallback(
                 .await
             {
                 Ok(upstream) => {
-                    state.health.record_success(provider.id());
+                    let elapsed_ms = opened_at.elapsed().as_secs_f64() * 1_000.0;
+                    state
+                        .health
+                        .record_success_with_latency(provider.id(), elapsed_ms);
+                    // For a stream, time-to-open *is* time-to-first-token from the
+                    // client's point of view — the number a streaming client experiences
+                    // as responsiveness, which total latency cannot express because a long
+                    // answer and a slow start look identical end to end.
+                    state
+                        .metrics
+                        .record_ttft_ms(provider.id(), &attempt.model_id, elapsed_ms);
+                    if index > 0 {
+                        state
+                            .metrics
+                            .record_fallback(&chain.attempts[0].provider, provider.id());
+                    }
                     return Ok(StreamAttempt {
                         upstream,
                         model_id: attempt.model_id.clone(),
@@ -608,6 +701,7 @@ fn alternates_for(
         tools: request.requires_tools(),
         vision: request.requires_vision(),
         min_context: request.estimated_input_tokens().min(u32::MAX as u64) as u32,
+        chat: true,
     };
 
     let mut candidates: Vec<&crate::metering::pricing::ModelPricing> = state
@@ -839,9 +933,9 @@ async fn handle_chat(
     }
 
     // ---- [3] Budget --------------------------------------------------------------
-    let reservation =
+    let (reservation, headroom) =
         match reserve_budget(state, &auth_context, &request, "/v1/chat/completions").await? {
-            Ok(reservation) => reservation,
+            Ok(granted) => granted,
             Err(error) => return Err(error),
         };
 
@@ -856,7 +950,7 @@ async fn handle_chat(
     }
 
     // ---- [5]-[9] Pipeline --------------------------------------------------------
-    let outcome = match execute(state, &auth_context, request, hint).await {
+    let outcome = match execute_with_headroom(state, &auth_context, request, hint, headroom).await {
         Ok(outcome) => outcome,
         Err(e) => {
             // The request never produced a billable response, so give the projection back
@@ -948,6 +1042,8 @@ async fn stream_chat(
         team: None,
         allowed_models: auth_context.allowed_models.clone(),
         plan_tier_ceiling: plan_tier_ceiling(&auth_context.plan),
+        budget_headroom_mc: None,
+        bandit: Some(state.bandit.as_ref()),
     };
     let router = Router::with_classifier(Classifier::new());
     let decision = router.route(&request, &state.pricing, &state.health, &inputs)?;
@@ -1184,7 +1280,7 @@ pub(crate) async fn reserve_budget(
     auth: &AuthContext,
     request: &NormalizedRequest,
     path: &str,
-) -> Result<std::result::Result<budget::Reservation, AegisError>> {
+) -> Result<std::result::Result<(budget::Reservation, Option<i64>), AegisError>> {
     let region = Some(state.config.region.as_str());
     let limits = budget::load_limits(state.store.as_ref(), state.db.as_ref(), auth, region).await;
     let projected = budget::project_cost(request, &state.pricing);
@@ -1198,7 +1294,13 @@ pub(crate) async fn reserve_budget(
     )
     .await?
     {
-        budget::BudgetOutcome::Allowed(reservation) => Ok(Ok(reservation)),
+        budget::BudgetOutcome::Allowed(reservation) => {
+            // Read after reserving, so the figure the router sees already accounts for
+            // this request. `None` when no hard limit applies, which leaves routing
+            // behaving exactly as it did before budgets could influence it.
+            let headroom = budget::headroom_mc(state.store.as_ref(), auth, &limits, region).await;
+            Ok(Ok((reservation, headroom)))
+        }
         budget::BudgetOutcome::Denied(decision) => {
             state.metrics.record_budget_blocked(decision.scope);
             tracing::info!(
@@ -1497,6 +1599,7 @@ mod tests {
             context_window: 128_000,
             supports_tools: true,
             supports_vision: true,
+            supports_chat: true,
             is_active: true,
             source: "test".into(),
             cache: Default::default(),
@@ -1512,6 +1615,7 @@ mod tests {
             context_window: 128_000,
             supports_tools: true,
             supports_vision: true,
+            supports_chat: true,
             is_active: true,
             source: "test".into(),
             cache: Default::default(),
@@ -1979,6 +2083,7 @@ mod tests {
             gateway_overhead_ms: 0.4,
             total_latency_ms: 120,
             tokens_saved_by_compression: 0,
+            explanation: Vec::new(),
         };
 
         let body = to_openai_response(&outcome);
@@ -2013,6 +2118,7 @@ mod tests {
             gateway_overhead_ms: 0.1,
             total_latency_ms: 5,
             tokens_saved_by_compression: 0,
+            explanation: Vec::new(),
         };
         outcome.response.raw = Some(serde_json::json!({"system_fingerprint": "fp_x"}));
         assert_eq!(to_openai_response(&outcome)["system_fingerprint"], "fp_x");

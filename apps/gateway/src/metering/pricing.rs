@@ -40,6 +40,20 @@ pub struct ModelPricing {
     pub context_window: u32,
     pub supports_tools: bool,
     pub supports_vision: bool,
+    /// Whether this model can serve a chat completion at all.
+    ///
+    /// **False for embedding models**, and that distinction is load-bearing rather than
+    /// cosmetic. An embedding model is the cheapest thing in the table by a wide margin
+    /// ($0.02/Mtok input, $0.00 output), reports `supports_tools: false` and
+    /// `supports_vision: false`, and therefore satisfied every capability filter a plain
+    /// chat request imposed — so it won the price sort and *every simple chat request was
+    /// being routed to it*. It cannot answer a chat request at all; the provider would
+    /// have returned an error or an embedding vector.
+    ///
+    /// The router's own test did not catch this because it asserted only that the served
+    /// model was not the requested one. Capability filtering has to include "can it do the
+    /// kind of work being asked", not just "does it have the features being used".
+    pub supports_chat: bool,
     pub is_active: bool,
     /// Where this price came from and when it was checked.
     pub source: String,
@@ -182,12 +196,29 @@ impl ModelPricing {
 
 /// What a request needs a model to be able to do. Used to filter routing candidates so
 /// we never downgrade into a model that cannot serve the request at all.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Requirements {
     pub tools: bool,
     pub vision: bool,
     /// Minimum usable context window in tokens.
     pub min_context: u32,
+    /// Whether the candidate must be able to serve a chat completion.
+    ///
+    /// Defaults to **true**, because that is what the overwhelming majority of traffic
+    /// needs and because the failure mode of getting this wrong — routing a chat request
+    /// to an embedding model — is far worse than the failure mode of being too strict.
+    pub chat: bool,
+}
+
+impl Default for Requirements {
+    fn default() -> Requirements {
+        Requirements {
+            tools: false,
+            vision: false,
+            min_context: 0,
+            chat: true,
+        }
+    }
 }
 
 /// An indexed, immutable pricing table.
@@ -307,7 +338,8 @@ impl PricingTable {
 
     /// True when a model can satisfy the given requirements.
     pub fn satisfies(model: &ModelPricing, requirements: Requirements) -> bool {
-        (!requirements.tools || model.supports_tools)
+        (!requirements.chat || model.supports_chat)
+            && (!requirements.tools || model.supports_tools)
             && (!requirements.vision || model.supports_vision)
             && model.context_window >= requirements.min_context
     }
@@ -363,7 +395,7 @@ impl PricingTable {
     /// The cheapest embedding model, used by the semantic cache.
     pub fn cheapest_embedding_model(&self) -> Option<&ModelPricing> {
         self.all()
-            .filter(|m| m.model_id.contains("embedding"))
+            .filter(|m| !m.supports_chat)
             .min_by_key(|m| m.input_per_mtok)
     }
 
@@ -1070,6 +1102,10 @@ fn m(
         context_window,
         supports_tools,
         supports_vision,
+        // Every seeded model serves chat except the embedding models, which are corrected
+        // below. Detecting by name is what `cheapest_embedding_model` already does; the
+        // field makes the property explicit rather than re-deriving it at every call site.
+        supports_chat: !id.contains("embedding"),
         is_active: true,
         source,
         // Conservative by default: no prompt-cache discount unless a row opts in below.

@@ -16,7 +16,7 @@ use crate::error::{AegisError, Result};
 use crate::metering::usage;
 use crate::middleware::auth;
 use crate::middleware::rate_limit;
-use crate::routes::openai_compat::{execute, PipelineOutcome};
+use crate::routes::openai_compat::PipelineOutcome;
 use crate::types::{Content, Message, NormalizedRequest, Role, RoutingHint};
 use crate::AppState;
 use axum::extract::State;
@@ -255,7 +255,7 @@ async fn handle_messages(
     // [3] Budget. Atomically reserves this request's projected cost against every ceiling
     // that applies, exactly as the OpenAI-compatible endpoint does. Both endpoints share
     // one implementation so neither can drift into being the lenient one.
-    let reservation = match crate::routes::openai_compat::reserve_budget(
+    let (reservation, headroom) = match crate::routes::openai_compat::reserve_budget(
         state,
         &auth_context,
         &request,
@@ -263,7 +263,7 @@ async fn handle_messages(
     )
     .await?
     {
-        Ok(reservation) => reservation,
+        Ok(granted) => granted,
         Err(error) => return Err(error),
     };
 
@@ -278,7 +278,15 @@ async fn handle_messages(
     }
 
     // [5]-[9] The same pipeline as the OpenAI endpoint.
-    let outcome = match execute(state, &auth_context, request, hint).await {
+    let outcome = match crate::routes::openai_compat::execute_with_headroom(
+        state,
+        &auth_context,
+        request,
+        hint,
+        headroom,
+    )
+    .await
+    {
         Ok(outcome) => outcome,
         Err(e) => {
             reservation.release(state.store.as_ref()).await;
@@ -380,6 +388,8 @@ async fn stream_messages(
         team: None,
         allowed_models: auth_context.allowed_models.clone(),
         plan_tier_ceiling: crate::routes::openai_compat::plan_tier_ceiling(&auth_context.plan),
+        budget_headroom_mc: None,
+        bandit: Some(state.bandit.as_ref()),
     };
     let router = Router::with_classifier(Classifier::new());
     let decision = router.route(&request, &state.pricing, &state.health, &inputs)?;
@@ -966,6 +976,7 @@ mod tests {
             gateway_overhead_ms: 0.4,
             total_latency_ms: 200,
             tokens_saved_by_compression: 0,
+            explanation: Vec::new(),
         }
     }
 

@@ -60,7 +60,80 @@ struct BreakerEntry {
     opened_at: Option<Instant>,
     /// A probe is in flight, so no other request should also probe.
     probing: bool,
+    /// Rolling counts over the recent window, for graded health.
+    recent_successes: u32,
+    recent_failures: u32,
+    /// Exponentially-weighted mean latency, in milliseconds.
+    ///
+    /// A single number rather than a histogram: routing needs "is this provider slower
+    /// than usual right now", not a distribution, and this costs one multiply-add per
+    /// request instead of a bucket search.
+    ewma_latency_ms: f64,
+    window_started: Option<Instant>,
 }
+
+/// How much weight a new latency observation carries. 0.2 means roughly the last five
+/// requests dominate, which is short enough to notice a provider degrading within seconds
+/// and long enough not to react to one slow response.
+const LATENCY_SMOOTHING: f64 = 0.2;
+
+/// How long a rolling success/failure window lasts before it resets.
+///
+/// Two minutes: long enough to accumulate a meaningful sample at any real traffic level,
+/// short enough that a provider which recovered ten minutes ago is not still being
+/// penalised for it.
+const HEALTH_WINDOW: Duration = Duration::from_secs(120);
+
+/// A provider's health as a single comparable number.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HealthScore {
+    /// Proportion of recent attempts that succeeded, 0.0 to 1.0. `1.0` with no data.
+    pub success_rate: f64,
+    /// Smoothed recent latency in milliseconds. `0.0` with no data.
+    pub latency_ms: f64,
+    /// Whether the circuit is closed enough to send traffic.
+    pub available: bool,
+}
+
+impl HealthScore {
+    /// Whether a provider is degraded without being dead.
+    ///
+    /// This is the state the router was structurally blind to: a provider failing a third
+    /// of its requests never reaches five *consecutive* failures, so its circuit stays
+    /// closed and it keeps winning the price sort. "Failing but not tripped" is the most
+    /// expensive provider state there is, and before this it was invisible.
+    pub fn is_degraded(&self) -> bool {
+        self.available && self.success_rate < DEGRADED_SUCCESS_RATE
+    }
+
+    /// A penalty multiplier applied to a candidate's effective price during routing.
+    ///
+    /// `1.0` for a healthy provider, rising as reliability falls. Expressed as a price
+    /// penalty rather than a hard exclusion so a cheap-but-shaky provider can still win
+    /// when it is *much* cheaper — which is the honest trade, since a retry costs latency
+    /// but a failover costs latency too.
+    pub fn price_penalty(&self) -> f64 {
+        if self.success_rate >= DEGRADED_SUCCESS_RATE {
+            return 1.0;
+        }
+        // At a 50% success rate every request costs about two attempts, so the effective
+        // price is about double. This states that directly rather than inventing a curve.
+        (1.0 / self.success_rate.max(0.05)).min(MAX_PRICE_PENALTY)
+    }
+}
+
+/// Below this recent success rate a provider counts as degraded.
+pub const DEGRADED_SUCCESS_RATE: f64 = 0.9;
+
+/// Ceiling on the price penalty, so one catastrophic minute cannot permanently exile a
+/// provider that the circuit breaker has not actually tripped.
+const MAX_PRICE_PENALTY: f64 = 8.0;
+
+/// Minimum recent attempts before a success rate is trusted.
+///
+/// Without this, one failure against one attempt reads as a 0% success rate and exiles a
+/// perfectly healthy provider on a sample size of one.
+const MIN_SAMPLE: u32 = 5;
 
 /// Per-provider circuit breakers.
 ///
@@ -95,9 +168,32 @@ impl ProviderHealth {
     }
 
     /// Record a successful call, closing the circuit.
+    ///
+    /// Clears the consecutive-failure count and the open timer, but **preserves** the
+    /// rolling window and latency estimate. Wiping them would mean a provider alternating
+    /// success and failure looked permanently healthy — which is exactly the "degraded but
+    /// not dead" state the router most needs to see.
     pub fn record_success(&self, provider: &str) {
-        self.breakers
-            .insert(provider.to_string(), BreakerEntry::default());
+        let mut entry = self.breakers.entry(provider.to_string()).or_default();
+        roll_window(&mut entry);
+        entry.consecutive_failures = 0;
+        entry.opened_at = None;
+        entry.probing = false;
+        entry.recent_successes = entry.recent_successes.saturating_add(1);
+    }
+
+    /// Record a successful call along with how long it took.
+    pub fn record_success_with_latency(&self, provider: &str, latency_ms: f64) {
+        self.record_success(provider);
+        if latency_ms <= 0.0 {
+            return;
+        }
+        let mut entry = self.breakers.entry(provider.to_string()).or_default();
+        entry.ewma_latency_ms = if entry.ewma_latency_ms == 0.0 {
+            latency_ms
+        } else {
+            LATENCY_SMOOTHING * latency_ms + (1.0 - LATENCY_SMOOTHING) * entry.ewma_latency_ms
+        };
     }
 
     /// Record a failed call, opening the circuit once the threshold is reached.
@@ -106,7 +202,9 @@ impl ProviderHealth {
     pub fn record_failure(&self, provider: &str) -> CircuitState {
         let mut entry = self.breakers.entry(provider.to_string()).or_default();
 
+        roll_window(&mut entry);
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+        entry.recent_failures = entry.recent_failures.saturating_add(1);
         entry.probing = false;
 
         if entry.consecutive_failures >= FAILURE_THRESHOLD {
@@ -117,6 +215,41 @@ impl ProviderHealth {
             return CircuitState::Open;
         }
         CircuitState::Closed
+    }
+
+    /// Graded health for a provider, rather than the binary the circuit breaker gives.
+    ///
+    /// The router reads this. Before it existed, routing could only ask "is the circuit
+    /// open", so a provider failing a third of its requests — never five in a row, never
+    /// tripped — kept winning the price sort indefinitely.
+    pub fn score(&self, provider: &str) -> HealthScore {
+        let available = self.is_available(provider);
+        let Some(entry) = self.breakers.get(provider) else {
+            return HealthScore {
+                success_rate: 1.0,
+                latency_ms: 0.0,
+                available,
+            };
+        };
+
+        // An expired window is stale evidence, not evidence of health. Treat it as no
+        // data — the same as a provider we have never called.
+        let window_live = entry
+            .window_started
+            .is_some_and(|started| started.elapsed() < HEALTH_WINDOW);
+        let attempts = entry.recent_successes + entry.recent_failures;
+
+        let success_rate = if !window_live || attempts < MIN_SAMPLE {
+            1.0
+        } else {
+            entry.recent_successes as f64 / attempts as f64
+        };
+
+        HealthScore {
+            success_rate,
+            latency_ms: entry.ewma_latency_ms,
+            available,
+        }
     }
 
     /// Claim the single probe slot for a half-open circuit.
@@ -158,6 +291,22 @@ impl ProviderHealth {
     /// Force a circuit closed. For the admin console and for tests.
     pub fn reset(&self, provider: &str) {
         self.breakers.remove(provider);
+    }
+}
+
+/// Start a fresh rolling window if the current one has expired.
+///
+/// Called before every recording, so the window is bounded by time rather than by request
+/// count — which matters because a provider that served ten requests an hour ago and none
+/// since should read as "no recent data", not as its hour-old success rate.
+fn roll_window(entry: &mut BreakerEntry) {
+    let expired = entry
+        .window_started
+        .is_none_or(|started| started.elapsed() >= HEALTH_WINDOW);
+    if expired {
+        entry.window_started = Some(Instant::now());
+        entry.recent_successes = 0;
+        entry.recent_failures = 0;
     }
 }
 
@@ -320,6 +469,7 @@ mod tests {
                 // Opened long enough ago to be half-open now.
                 opened_at: Some(Instant::now() - OPEN_DURATION - Duration::from_secs(1)),
                 probing: false,
+                ..Default::default()
             },
         );
         assert_eq!(health.state("openai"), CircuitState::HalfOpen);
@@ -349,6 +499,7 @@ mod tests {
                 consecutive_failures: FAILURE_THRESHOLD,
                 opened_at: Some(Instant::now() - OPEN_DURATION - Duration::from_secs(1)),
                 probing: false,
+                ..Default::default()
             },
         );
         assert!(health.is_available("openai"));
@@ -363,6 +514,7 @@ mod tests {
                 consecutive_failures: FAILURE_THRESHOLD,
                 opened_at: Some(Instant::now() - OPEN_DURATION - Duration::from_secs(1)),
                 probing: true,
+                ..Default::default()
             },
         );
         assert_eq!(health.state("openai"), CircuitState::HalfOpen);

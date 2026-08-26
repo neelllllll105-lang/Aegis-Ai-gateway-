@@ -1434,6 +1434,9 @@ pub struct PricingRow {
     pub context_window: i32,
     pub supports_tools: bool,
     pub supports_vision: bool,
+    /// Whether the model can serve a chat completion. False for embedding models.
+    #[sqlx(default)]
+    pub supports_chat: bool,
     pub is_active: bool,
     pub source: String,
     /// Cache-read rate in basis points of the input rate. 10,000 = no discount.
@@ -1463,6 +1466,7 @@ impl Default for PricingRow {
             context_window: 0,
             supports_tools: false,
             supports_vision: false,
+            supports_chat: true,
             is_active: true,
             source: String::new(),
             // 10,000 bp is 100% of the input rate: no discount, no premium. The

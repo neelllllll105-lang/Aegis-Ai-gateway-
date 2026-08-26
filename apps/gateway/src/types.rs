@@ -388,6 +388,15 @@ pub enum RoutingReason {
     Complexity,
     /// The primary choice failed and we fell back.
     Fallback,
+    /// The requested model's provider was unavailable, so the closest available model
+    /// served the request instead.
+    ///
+    /// Distinct from `Policy`, which is what this used to be recorded as. An outage and a
+    /// deliberate policy decision look identical on a usage record labelled `policy`, and
+    /// the difference is exactly what an incident timeline needs. Note this substitution
+    /// picks the *best available* model rather than the cheapest, so it can cost more than
+    /// the requested one — see `x-aegis-cost` against `x-aegis-baseline-cost`.
+    ProviderUnavailable,
     /// Served from cache.
     Cache,
     /// Sent to the requested model unchanged.
@@ -403,6 +412,7 @@ impl RoutingReason {
             RoutingReason::Policy => "policy",
             RoutingReason::Complexity => "complexity",
             RoutingReason::Fallback => "fallback",
+            RoutingReason::ProviderUnavailable => "provider_unavailable",
             RoutingReason::Cache => "cache",
             RoutingReason::Passthrough => "passthrough",
             RoutingReason::UserOverride => "user_override",
