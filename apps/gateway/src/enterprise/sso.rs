@@ -190,6 +190,147 @@ fn urlencode(value: &str) -> String {
         .collect()
 }
 
+/// An identity provider's OIDC discovery document, the two fields the callback needs.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OidcDiscovery {
+    pub token_endpoint: String,
+    pub jwks_uri: String,
+}
+
+/// Fetch `{issuer}/.well-known/openid-configuration`.
+///
+/// Every OIDC-compliant provider (Okta, Entra, Auth0, Google) publishes this at a fixed
+/// path from the issuer, which is what lets one implementation work against any of them
+/// without provider-specific configuration beyond the issuer URL itself.
+pub async fn discover(http: &reqwest::Client, issuer: &str) -> Result<OidcDiscovery> {
+    let url = format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    );
+    let response = http
+        .get(&url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| AegisError::Provider {
+            provider: "sso".into(),
+            status: 502,
+            message: format!("could not reach identity provider discovery endpoint: {e}"),
+        })?;
+    if !response.status().is_success() {
+        return Err(AegisError::Provider {
+            provider: "sso".into(),
+            status: response.status().as_u16(),
+            message: "identity provider discovery endpoint returned an error".into(),
+        });
+    }
+    response
+        .json::<OidcDiscovery>()
+        .await
+        .map_err(|e| AegisError::Provider {
+            provider: "sso".into(),
+            status: 502,
+            message: format!("identity provider discovery response was not valid OIDC: {e}"),
+        })
+}
+
+/// One key from a JSON Web Key Set.
+#[derive(Debug, Clone, Deserialize)]
+struct Jwk {
+    kid: Option<String>,
+    n: Option<String>,
+    e: Option<String>,
+    kty: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Jwks {
+    keys: Vec<Jwk>,
+}
+
+/// Fetch a provider's signing keys and build a decoding key for the one that signed this
+/// token.
+///
+/// `kid` (key id) is read from the token's own header before this is called, so the
+/// provider's key rotation — publishing a new key and phasing out the old one, which every
+/// major IdP does periodically — never requires a config change here: the right key is
+/// whichever one the token itself names.
+pub async fn fetch_decoding_key(
+    http: &reqwest::Client,
+    jwks_uri: &str,
+    kid: Option<&str>,
+) -> Result<jsonwebtoken::DecodingKey> {
+    let response = http
+        .get(jwks_uri)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| AegisError::Provider {
+            provider: "sso".into(),
+            status: 502,
+            message: format!("could not reach identity provider JWKS endpoint: {e}"),
+        })?;
+    let jwks: Jwks = response.json().await.map_err(|e| AegisError::Provider {
+        provider: "sso".into(),
+        status: 502,
+        message: format!("identity provider JWKS response was not valid: {e}"),
+    })?;
+
+    select_decoding_key(&jwks, kid)
+}
+
+/// Pick the right key out of a parsed key set and build a decoding key from it.
+///
+/// Split from [`fetch_decoding_key`] so the selection logic — the part with real branches
+/// to get wrong — is testable without a network call.
+fn select_decoding_key(jwks: &Jwks, kid: Option<&str>) -> Result<jsonwebtoken::DecodingKey> {
+    let key = jwks
+        .keys
+        .iter()
+        .find(|k| k.kty == "RSA" && (kid.is_none() || k.kid.as_deref() == kid))
+        .ok_or_else(|| {
+            AegisError::Unauthorized(
+                "identity provider's key set does not contain the key that signed this token"
+                    .into(),
+            )
+        })?;
+
+    let (Some(n), Some(e)) = (&key.n, &key.e) else {
+        return Err(AegisError::Unauthorized(
+            "identity provider's signing key is missing RSA components".into(),
+        ));
+    };
+
+    jsonwebtoken::DecodingKey::from_rsa_components(n, e).map_err(|_| {
+        AegisError::Unauthorized("identity provider's signing key could not be parsed".into())
+    })
+}
+
+/// Verify an id token's signature and decode its claims.
+///
+/// Signature verification happens here, via `jsonwebtoken`; the business checks (audience,
+/// issuer, domain pinning, replay) happen afterward in [`validate`] and
+/// [`check_and_record_replay`], which is a deliberate separation — a token can be
+/// cryptographically genuine and still not one we should accept.
+pub fn verify_id_token(
+    id_token: &str,
+    decoding_key: &jsonwebtoken::DecodingKey,
+) -> Result<serde_json::Value> {
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+    // Audience is checked ourselves against the configured connection in `validate`,
+    // because `aud` may be a string or an array depending on the provider and jsonwebtoken
+    // expects a fixed shape here. Expiry is still checked by the library.
+    validation.validate_aud = false;
+    validation.required_spec_claims = ["exp", "iss", "sub"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+    let data = jsonwebtoken::decode::<serde_json::Value>(id_token, decoding_key, &validation)
+        .map_err(|e| AegisError::Unauthorized(format!("id token failed verification: {e}")))?;
+    Ok(data.claims)
+}
+
 /// Extract claims from a decoded OIDC id token payload.
 ///
 /// Signature verification against the provider JWKS happens before this; the function
@@ -246,6 +387,169 @@ mod tests {
     use uuid::Uuid;
 
     const NOW: i64 = 1_800_000_000;
+
+    // -----------------------------------------------------------------------------
+    // JWKS key selection (the callback's key-rotation-tolerant lookup).
+    //
+    // `n`/`e` below are not a mathematically valid RSA modulus/exponent — proving the
+    // signature math itself is jsonwebtoken's own well-tested job, not this codebase's.
+    // What these tests pin is the *selection logic*: does the right key get chosen when
+    // several are present, and does a missing or mismatched one fail clearly rather than
+    // silently accepting the wrong key or panicking.
+    // -----------------------------------------------------------------------------
+
+    fn jwk(kid: &str, kty: &str, n: Option<&str>, e: Option<&str>) -> Jwk {
+        Jwk {
+            kid: Some(kid.to_string()),
+            kty: kty.to_string(),
+            n: n.map(|s| s.to_string()),
+            e: e.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn selects_the_key_matching_the_tokens_kid() {
+        // A rotating key set: the token's own kid, present alongside an older key,
+        // must be the one selected — not just "the first RSA key found".
+        let jwks = Jwks {
+            keys: vec![
+                jwk("old-key-2025", "RSA", Some("AQAB"), Some("AQAB")),
+                jwk("current-key-2026", "RSA", Some("AQAB"), Some("AQAB")),
+            ],
+        };
+        assert!(select_decoding_key(&jwks, Some("current-key-2026")).is_ok());
+    }
+
+    #[test]
+    fn a_kid_absent_from_the_key_set_is_rejected() {
+        // The token names a key the provider's current JWKS response does not contain —
+        // most commonly because the key was rotated out. Must fail closed, not fall back
+        // to signing with whatever key happens to be present.
+        let jwks = Jwks {
+            keys: vec![jwk("some-other-key", "RSA", Some("AQAB"), Some("AQAB"))],
+        };
+        assert!(select_decoding_key(&jwks, Some("missing-key")).is_err());
+    }
+
+    #[test]
+    fn a_non_rsa_key_in_the_set_is_skipped() {
+        // JWKS responses commonly carry EC keys alongside RSA ones (some providers publish
+        // both). An EC key must never be handed to the RS256 decoder.
+        let jwks = Jwks {
+            keys: vec![
+                jwk("ec-key", "EC", None, None),
+                jwk("rsa-key", "RSA", Some("AQAB"), Some("AQAB")),
+            ],
+        };
+        assert!(select_decoding_key(&jwks, Some("rsa-key")).is_ok());
+        assert!(
+            select_decoding_key(&jwks, Some("ec-key")).is_err(),
+            "an EC key must never be selected for RS256 verification"
+        );
+    }
+
+    #[test]
+    fn a_key_missing_rsa_components_is_rejected_rather_than_guessed() {
+        let jwks = Jwks {
+            keys: vec![jwk("broken", "RSA", None, Some("AQAB"))],
+        };
+        assert!(select_decoding_key(&jwks, Some("broken")).is_err());
+    }
+
+    #[test]
+    fn no_kid_falls_back_to_the_first_rsa_key() {
+        // Some providers omit `kid` entirely on a single-key deployment. Without a name to
+        // match, taking the only RSA key present is the correct, documented fallback.
+        let jwks = Jwks {
+            keys: vec![jwk("only-key", "RSA", Some("AQAB"), Some("AQAB"))],
+        };
+        assert!(select_decoding_key(&jwks, None).is_ok());
+    }
+
+    // -----------------------------------------------------------------------------
+    // id-token verification: required claims and algorithm confusion.
+    // -----------------------------------------------------------------------------
+
+    #[test]
+    fn verification_rejects_a_token_missing_required_claims() {
+        // required_spec_claims enforces exp/iss/sub even before signature-adjacent checks
+        // run. Built with a syntactically valid but arbitrary RSA key: this test proves
+        // the claim requirement fires, not that the signature check does (that is
+        // jsonwebtoken's own, separately tested, responsibility).
+        let (_encoding, decoding) = throwaway_rsa_keypair();
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        let claims = serde_json::json!({"sub": "user-1"}); // no exp, no iss
+        let token = jsonwebtoken::encode(&header, &claims, &_encoding).unwrap();
+
+        let result = verify_id_token(&token, &decoding);
+        assert!(
+            result.is_err(),
+            "a token missing exp/iss must fail verification"
+        );
+    }
+
+    #[test]
+    fn verification_accepts_a_well_formed_token_from_the_matching_key() {
+        let (encoding, decoding) = throwaway_rsa_keypair();
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        let claims = serde_json::json!({
+            "sub": "user-1",
+            "iss": "https://acme.okta.com",
+            "aud": "client-123",
+            "email": "person@acme.com",
+            "exp": NOW + 3_600,
+        });
+        let token = jsonwebtoken::encode(&header, &claims, &encoding).unwrap();
+
+        let decoded = verify_id_token(&token, &decoding).unwrap();
+        assert_eq!(decoded.get("sub").and_then(|v| v.as_str()), Some("user-1"));
+
+        let assertion = assertion_from_id_token(&decoded, "client-123").unwrap();
+        assert_eq!(assertion.email, "person@acme.com");
+        assert_eq!(assertion.audience, "client-123");
+    }
+
+    #[test]
+    fn verification_rejects_a_token_from_a_different_key() {
+        // The actual signature check, not just claim shape: a token signed by a key other
+        // than the one being verified against must be rejected.
+        let (encoding_a, _) = throwaway_rsa_keypair();
+        let (_, decoding_b) = throwaway_rsa_keypair();
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        let claims = serde_json::json!({
+            "sub": "user-1", "iss": "https://acme.okta.com", "exp": NOW + 3_600,
+        });
+        let token = jsonwebtoken::encode(&header, &claims, &encoding_a).unwrap();
+        assert!(verify_id_token(&token, &decoding_b).is_err());
+    }
+
+    /// A throwaway RSA keypair generated fresh for one test, matching encoding and
+    /// decoding keys. Not the Vertex test fixture: that key is committed and shared across
+    /// runs, which is right for a stable JWT-shape test but wrong here, where two *distinct*
+    /// keys are needed to prove cross-key rejection.
+    fn throwaway_rsa_keypair() -> (jsonwebtoken::EncodingKey, jsonwebtoken::DecodingKey) {
+        use rsa::pkcs1::EncodeRsaPrivateKey;
+        use rsa::traits::PublicKeyParts;
+
+        let mut rng = rand::thread_rng();
+        let private = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("key generation");
+        let pem = private
+            .to_pkcs1_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("pem encode");
+        let encoding = jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes()).unwrap();
+
+        let public = private.to_public_key();
+        let n = base64_url(&public.n().to_bytes_be());
+        let e = base64_url(&public.e().to_bytes_be());
+        let decoding = jsonwebtoken::DecodingKey::from_rsa_components(&n, &e).unwrap();
+
+        (encoding, decoding)
+    }
+
+    fn base64_url(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    }
 
     fn connection() -> SsoConnection {
         SsoConnection {

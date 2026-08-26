@@ -76,6 +76,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+# Generates throwaway RSA keypairs for the SSO id-token verification tests. Already
+# present transitively via sqlx-mysql (a feature we do not enable); pinned as a direct
+# dev-only dependency here so a change to sqlx's own dependency tree cannot silently
+# remove it and break these tests.
+rsa = "0.9"
 
 [lib]
 name = "aegis_gateway"

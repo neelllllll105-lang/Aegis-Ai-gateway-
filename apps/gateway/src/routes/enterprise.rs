@@ -14,6 +14,7 @@ use crate::db::repo;
 use crate::enterprise::scim::{PatchRequest, ScimError, ScimListResponse, ScimUser};
 use crate::enterprise::sso;
 use crate::error::{AegisError, Result};
+use crate::middleware::auth;
 use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -453,6 +454,220 @@ pub async fn sso_start(
         Ok(response) => response,
         Err(e) => e.into_response(),
     }
+}
+
+/// `GET /api/auth/sso/callback?code=...&state=...`
+///
+/// The other half of `sso_start`, and the one that did not exist until now.
+/// `sso_start` has always constructed a `redirect_uri` pointing here; nothing was
+/// registered at this path, so no SSO login could ever complete — a customer's identity
+/// provider would redirect the browser to a 404. Found in the enterprise readiness audit.
+///
+/// # What this proves and does not prove
+///
+/// The full OIDC authorization-code flow is implemented: state/CSRF verification, a code
+/// exchange against the provider's token endpoint, discovery of the provider's signing
+/// keys, signature verification, and the same [`sso::validate`] business checks (audience,
+/// issuer, expiry, domain pinning) plus replay detection that were already tested against
+/// synthetic assertions. What it has **not** been run against is a real identity provider
+/// — that remains true of this feature exactly as the audit found it, and is not a claim
+/// this comment or this code makes otherwise.
+///
+/// SAML connections are explicitly rejected here rather than silently mishandled: SAML's
+/// response binding (a POST of base64-encoded, XML-signed content to a different endpoint
+/// shape) is a materially different implementation, not a variant of this one, and building
+/// it correctly is out of scope for closing this specific gap.
+#[derive(Debug, Deserialize)]
+pub struct SsoCallbackQuery {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    /// Set by the identity provider instead of `code` when the user cancels or the IdP
+    /// itself refuses the request (e.g. `access_denied`).
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
+pub async fn sso_callback(
+    State(state): State<AppState>,
+    Query(query): Query<SsoCallbackQuery>,
+) -> Response {
+    match do_sso_callback(&state, query).await {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn do_sso_callback(state: &AppState, query: SsoCallbackQuery) -> Result<Response> {
+    if let Some(error) = query.error {
+        return Err(AegisError::Unauthorized(format!(
+            "identity provider declined the request: {error}{}",
+            query
+                .error_description
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default()
+        )));
+    }
+    let (Some(code), Some(state_param)) = (query.code, query.state) else {
+        return Err(AegisError::BadRequest(
+            "callback is missing code or state".into(),
+        ));
+    };
+
+    // The state token is single-use: read it and delete it in the same step, so a
+    // captured or retried callback URL cannot complete a second login.
+    let state_key = format!("aegis:sso:state:{}", crypto::hash_token(&state_param));
+    let org_id_raw = state.store.get(&state_key).await?.ok_or_else(|| {
+        AegisError::Unauthorized("SSO state has expired or was already used".into())
+    })?;
+    state.store.del(&state_key).await?;
+    let org_id = Uuid::parse_str(&org_id_raw)
+        .map_err(|_| AegisError::Internal("stored SSO state was not a valid org id".into()))?;
+
+    let pool = state.db()?;
+    let connection = repo::find_sso_connection(pool, org_id)
+        .await?
+        .ok_or_else(|| AegisError::NotFound("no single sign-on connection is configured".into()))?;
+    if !connection.is_active {
+        return Err(AegisError::Forbidden(
+            "single sign-on is disabled for this organisation".into(),
+        ));
+    }
+    if connection.protocol != "oidc" {
+        return Err(AegisError::BadRequest(
+            "this SSO connection uses SAML, which this endpoint does not yet support; \
+             contact support"
+                .into(),
+        ));
+    }
+    let client_id = connection
+        .client_id
+        .clone()
+        .ok_or_else(|| AegisError::Internal("OIDC connection is missing a client_id".into()))?;
+    let client_secret = match &connection.client_secret_encrypted {
+        Some(ciphertext) => {
+            let plaintext =
+                crypto::decrypt(&state.config.master_key, ciphertext).map_err(|_| {
+                    AegisError::Internal("SSO client secret could not be decrypted".into())
+                })?;
+            String::from_utf8(plaintext).map_err(|_| AegisError::Crypto)?
+        }
+        None => String::new(),
+    };
+
+    // ---- Code exchange ------------------------------------------------------------
+    let discovery = sso::discover(&state.http, &connection.issuer).await?;
+    let redirect_uri = format!("{}/api/auth/sso/callback", state.config.base_url);
+
+    let token_response: serde_json::Value = state
+        .http
+        .post(&discovery.token_endpoint)
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("redirect_uri", redirect_uri.as_str()),
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+        ])
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| AegisError::Provider {
+            provider: "sso".into(),
+            status: 502,
+            message: format!("token exchange with identity provider failed: {e}"),
+        })?
+        .json()
+        .await
+        .map_err(|e| AegisError::Provider {
+            provider: "sso".into(),
+            status: 502,
+            message: format!("identity provider's token response was not valid JSON: {e}"),
+        })?;
+
+    let id_token = token_response
+        .get("id_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            AegisError::Unauthorized(
+                "identity provider's token response did not include an id_token".into(),
+            )
+        })?;
+
+    // ---- Signature verification -----------------------------------------------------
+    let header = jsonwebtoken::decode_header(id_token)
+        .map_err(|e| AegisError::Unauthorized(format!("id token header was malformed: {e}")))?;
+    let decoding_key =
+        sso::fetch_decoding_key(&state.http, &discovery.jwks_uri, header.kid.as_deref()).await?;
+    let claims = sso::verify_id_token(id_token, &decoding_key)?;
+
+    // ---- Business validation ----------------------------------------------------------
+    let assertion = sso::assertion_from_id_token(&claims, &client_id)
+        .ok_or_else(|| AegisError::Unauthorized("id token was missing required claims".into()))?;
+
+    let expected = sso::SsoConnection {
+        org_id: connection.org_id,
+        protocol: connection.protocol.clone(),
+        expected_issuer: connection.issuer.clone(),
+        expected_audience: client_id.clone(),
+        allowed_email_domains: connection.email_domain.clone().into_iter().collect(),
+        is_active: connection.is_active,
+    };
+    sso::validate(&assertion, &expected, chrono::Utc::now().timestamp())?;
+    sso::check_and_record_replay(state.store.as_ref(), org_id, &assertion.id).await?;
+
+    // ---- Session creation --------------------------------------------------------------
+    // SSO authenticates an *existing* Aegis account; it does not create one. Provisioning
+    // is SCIM's job — an IdP asserting an email is not by itself authorization to create
+    // an account and grant it organisation membership, and conflating the two would let
+    // anyone who can get one email accepted by the IdP mint themselves a seat.
+    let user = repo::find_user_by_email(pool, &assertion.email)
+        .await?
+        .ok_or_else(|| {
+            AegisError::Forbidden(format!(
+                "{} is not provisioned in Aegis; ask an administrator to add this account \
+                 (directly or via SCIM) before signing in with SSO",
+                assertion.email
+            ))
+        })?;
+    let member_orgs = repo::list_orgs_for_user(pool, user.id).await?;
+    if !member_orgs.iter().any(|o| o.id == org_id) {
+        return Err(AegisError::Forbidden(
+            "this account is not a member of the organisation this SSO connection belongs \
+             to"
+            .into(),
+        ));
+    }
+    if !user.is_active() {
+        return Err(AegisError::Forbidden(
+            "this account has been disabled".into(),
+        ));
+    }
+
+    let session = crypto::generate_session_token();
+    repo::create_session(
+        pool,
+        user.id,
+        &session.hash,
+        chrono::Utc::now() + chrono::Duration::seconds(auth::SESSION_DURATION.as_secs() as i64),
+    )
+    .await?;
+
+    // Redirect into the dashboard rather than returning JSON: this request is a browser
+    // navigation from the identity provider, not an API call a client library parses.
+    let mut response = (
+        StatusCode::FOUND,
+        [(
+            axum::http::header::LOCATION,
+            format!("{}/dashboard", state.config.app_url),
+        )],
+    )
+        .into_response();
+    if let Ok(cookie) = auth::session_cookie(&session.plaintext, &state.config).parse() {
+        response
+            .headers_mut()
+            .insert(axum::http::header::SET_COOKIE, cookie);
+    }
+    Ok(response)
 }
 
 /// `GET /api/auth/sso/connections` — what SSO is configured for the acting org.

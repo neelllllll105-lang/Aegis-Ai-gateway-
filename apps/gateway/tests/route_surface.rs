@@ -131,8 +131,13 @@ fn advertised_routes() -> Vec<(&'static str, &'static str)> {
             "DELETE",
             "/scim/v2/Users/00000000-0000-0000-0000-000000000000",
         ),
-        ("POST", "/api/sso/start"),
-        ("GET", "/api/sso/connections"),
+        // The old paths here ("/api/sso/start", POST) matched neither the route table nor
+        // what sso_start's own doc comment and redirect_uri construction assumed — this
+        // test asserted the bug's shape rather than catching it. Corrected alongside
+        // registering /api/auth/sso/callback, which did not exist at all.
+        ("GET", "/api/auth/sso/start"),
+        ("GET", "/api/auth/sso/callback"),
+        ("GET", "/api/auth/sso/connections"),
     ]
 }
 

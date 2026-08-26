@@ -111,8 +111,19 @@ pub fn build_router(state: AppState) -> Router {
         .route("/scim/v2/Users/{id}", patch(enterprise::scim_patch_user))
         .route("/scim/v2/Users/{id}", put(enterprise::scim_patch_user))
         .route("/scim/v2/Users/{id}", delete(enterprise::scim_delete_user))
-        .route("/api/sso/start", post(enterprise::sso_start))
-        .route("/api/sso/connections", get(enterprise::sso_connections));
+        // Registered at /api/auth/sso/..., matching what sso_start itself constructs as
+        // the OAuth redirect_uri and what sso_connections' own doc comment always claimed.
+        // Previously registered at /api/sso/start — a path nothing else in the codebase
+        // referenced — so the route existed but not at the URL any client or identity
+        // provider would actually reach. Compounding the callback route's total absence
+        // (see sso_callback's doc comment): together, no SSO login could ever complete.
+        // Found in the enterprise readiness audit.
+        .route("/api/auth/sso/start", get(enterprise::sso_start))
+        .route("/api/auth/sso/callback", get(enterprise::sso_callback))
+        .route(
+            "/api/auth/sso/connections",
+            get(enterprise::sso_connections),
+        );
 
     let admin_routes = Router::new()
         .route("/api/admin/metrics", get(admin::system_metrics))
