@@ -349,6 +349,7 @@ mod tests {
             supports_tools: true,
             is_active: true,
             source: "test".into(),
+            ..Default::default()
         }
     }
 

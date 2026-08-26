@@ -84,6 +84,8 @@ fn load_test_state() -> AppState {
             supports_vision: true,
             is_active: true,
             source: "load test".into(),
+            cache: Default::default(),
+            long_context: None,
         });
     }
 

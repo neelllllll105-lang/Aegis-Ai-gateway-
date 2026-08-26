@@ -222,6 +222,7 @@ impl Provider for MockProvider {
                     input_tokens,
                     output_tokens,
                     estimated: false,
+                    ..Default::default()
                 },
                 raw: None,
             }),
@@ -270,6 +271,7 @@ impl Provider for MockProvider {
                         input_tokens,
                         output_tokens,
                         estimated: false,
+                        ..Default::default()
                     }),
                     raw: None,
                 }));

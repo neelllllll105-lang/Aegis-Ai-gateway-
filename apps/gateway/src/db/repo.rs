@@ -1218,9 +1218,9 @@ pub async fn insert_usage_record(
              input_tokens, output_tokens, tokens_estimated, baseline_cost_mc, actual_cost_mc,
              gross_savings_mc, aegis_fee_mc, latency_ms, gateway_overhead_us, cache_hit,
              cache_type, routing_reason, complexity_score_milli, tokens_saved_by_compression,
-             status_code, error_type, created_at)
+             status_code, error_type, created_at, cached_input_tokens, cache_write_tokens)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                 $17, $18, $19, $20, $21, $22, $23, $24)
+                 $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
          ON CONFLICT (request_id, created_at) DO NOTHING",
     )
     .bind(event.request_id)
@@ -1247,6 +1247,8 @@ pub async fn insert_usage_record(
     .bind(event.status_code as i32)
     .bind(event.error_type.as_deref())
     .bind(event.created_at)
+    .bind(event.cached_input_tokens as i64)
+    .bind(event.cache_write_tokens as i64)
     .execute(pool)
     .await
     .map_err(AegisError::Database)?;
@@ -1434,18 +1436,58 @@ pub struct PricingRow {
     pub supports_vision: bool,
     pub is_active: bool,
     pub source: String,
+    /// Cache-read rate in basis points of the input rate. 10,000 = no discount.
+    #[sqlx(default)]
+    pub cache_read_bp: i32,
+    /// Cache-write rate in basis points of the input rate. 10,000 = no premium.
+    #[sqlx(default)]
+    pub cache_write_bp: i32,
+    /// Prompt size at which the long-context rates below take over, if any.
+    #[sqlx(default)]
+    pub long_context_threshold_tokens: Option<i64>,
+    #[sqlx(default)]
+    pub long_context_input_per_mtok_mc: Option<i64>,
+    #[sqlx(default)]
+    pub long_context_output_per_mtok_mc: Option<i64>,
+}
+
+impl Default for PricingRow {
+    fn default() -> PricingRow {
+        PricingRow {
+            model_id: String::new(),
+            provider: String::new(),
+            display_name: String::new(),
+            tier: "mid".to_string(),
+            input_cost_per_mtok_mc: 0,
+            output_cost_per_mtok_mc: 0,
+            context_window: 0,
+            supports_tools: false,
+            supports_vision: false,
+            is_active: true,
+            source: String::new(),
+            // 10,000 bp is 100% of the input rate: no discount, no premium. The
+            // conservative default, matching the column defaults in migration 0003.
+            cache_read_bp: 10_000,
+            cache_write_bp: 10_000,
+            long_context_threshold_tokens: None,
+            long_context_input_per_mtok_mc: None,
+            long_context_output_per_mtok_mc: None,
+        }
+    }
 }
 
 /// Load the current pricing table.
 pub async fn load_pricing(pool: &PgPool) -> Result<Vec<PricingRow>> {
-    sqlx::query_as::<_, PricingRow>(
-        "SELECT model_id, provider, display_name, tier, input_cost_per_mtok_mc,
-                output_cost_per_mtok_mc, context_window, supports_tools, supports_vision,
-                is_active, source
-         FROM model_pricing
-         WHERE effective_to IS NULL AND is_active
-         ORDER BY model_id",
-    )
+    sqlx::query_as::<_, PricingRow>(concat!(
+        "SELECT model_id, provider, display_name, tier, input_cost_per_mtok_mc, ",
+        "       output_cost_per_mtok_mc, context_window, supports_tools, ",
+        "       supports_vision, is_active, source, cache_read_bp, cache_write_bp, ",
+        "       long_context_threshold_tokens, long_context_input_per_mtok_mc, ",
+        "       long_context_output_per_mtok_mc ",
+        "FROM model_pricing ",
+        "WHERE effective_to IS NULL AND is_active ",
+        "ORDER BY model_id",
+    ))
     .fetch_all(pool)
     .await
     .map_err(AegisError::Database)

@@ -48,6 +48,17 @@ pub struct UsageEvent {
 
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Input tokens served from the provider's own prompt cache, billed at a discount.
+    ///
+    /// Distinct from `cache_hit`, which means Aegis served the whole response without
+    /// calling a provider at all. This is the provider's cache, inside a request we did
+    /// make. Recorded so an invoice can explain why two identical-looking requests to the
+    /// same model cost different amounts.
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+    /// Input tokens written into the provider's prompt cache on this request.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
     /// True when token counts were estimated rather than reported by the provider.
     pub tokens_estimated: bool,
 
@@ -127,6 +138,8 @@ impl UsageEvent {
             provider,
             input_tokens: tokens.input_tokens,
             output_tokens: tokens.output_tokens,
+            cached_input_tokens: tokens.cached_input_tokens,
+            cache_write_tokens: tokens.cache_write_tokens,
             tokens_estimated: tokens.estimated,
             baseline_cost_mc: savings.baseline_cost.as_i64(),
             actual_cost_mc: savings.actual_cost.as_i64(),
@@ -170,6 +183,8 @@ impl UsageEvent {
             provider: "none".to_string(),
             input_tokens: 0,
             output_tokens: 0,
+            cached_input_tokens: 0,
+            cache_write_tokens: 0,
             tokens_estimated: false,
             baseline_cost_mc: 0,
             actual_cost_mc: 0,
@@ -195,9 +210,9 @@ impl UsageEvent {
         self.actual_cost_mc > 0 || self.cache_hit
     }
 
-    /// Total tokens.
+    /// Total tokens, across every input class and output.
     pub fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens
+        self.input_tokens + self.cached_input_tokens + self.cache_write_tokens + self.output_tokens
     }
 }
 
@@ -405,6 +420,7 @@ mod tests {
                 input_tokens: 1_000,
                 output_tokens: 500,
                 estimated: false,
+                ..Default::default()
             },
             SavingsBreakdown::compute(MicroCents(7_500), MicroCents(450), 2_000),
             842,

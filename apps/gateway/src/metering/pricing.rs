@@ -43,13 +43,122 @@ pub struct ModelPricing {
     pub is_active: bool,
     /// Where this price came from and when it was checked.
     pub source: String,
+    /// How this model prices prompt-cache reads and writes.
+    ///
+    /// Defaults to [`CachePricing::none`], which bills cached tokens at the full input
+    /// rate — the correct behaviour for a model with no prompt cache, and a deliberately
+    /// conservative default for one whose cache rates have not been verified.
+    pub cache: CachePricing,
+    /// A higher rate that applies once a prompt passes a token threshold.
+    ///
+    /// `None` for the flat-priced majority. Gemini 2.5 Pro doubles its input rate and
+    /// raises its output rate by half past 200,000 tokens, against a context window of
+    /// 1,048,576 — so a flat price under-bills any long-context request by a wide margin
+    /// on a model explicitly sold for long context. Found in the enterprise readiness
+    /// audit.
+    pub long_context: Option<LongContextTier>,
+}
+
+/// Prompt-cache rates, as a proportion of the model's own input rate.
+///
+/// Stored as basis points rather than a float, for the same reason every other money
+/// figure here is an integer: a rate that drifts by a rounding error produces invoices
+/// that do not reconcile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachePricing {
+    /// Rate for a cache *read*, in basis points of the input rate. 1,000 bp = 10%.
+    pub read_bp: u32,
+    /// Rate for a cache *write*, in basis points of the input rate. 12,500 bp = 125%.
+    pub write_bp: u32,
+}
+
+impl CachePricing {
+    /// No prompt cache: reads and writes both bill at the ordinary input rate.
+    pub const fn none() -> CachePricing {
+        CachePricing {
+            read_bp: 10_000,
+            write_bp: 10_000,
+        }
+    }
+
+    /// OpenAI and Google: cache reads at 25% of input, no separate write charge.
+    pub const fn quarter_read() -> CachePricing {
+        CachePricing {
+            read_bp: 2_500,
+            write_bp: 10_000,
+        }
+    }
+
+    /// Anthropic: reads at 10% of input, writes at 125% (a five-minute cache entry).
+    pub const fn anthropic() -> CachePricing {
+        CachePricing {
+            read_bp: 1_000,
+            write_bp: 12_500,
+        }
+    }
+
+    /// Apply a basis-point rate to a per-million-token price.
+    fn scale(rate: MicroCents, bp: u32) -> MicroCents {
+        MicroCents(rate.0.saturating_mul(bp as i64) / 10_000)
+    }
+}
+
+impl Default for CachePricing {
+    fn default() -> CachePricing {
+        CachePricing::none()
+    }
+}
+
+/// A second, higher price that applies to prompts past a threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LongContextTier {
+    /// Total input tokens at or above which the higher rates apply.
+    pub threshold_tokens: u64,
+    pub input_per_mtok: MicroCents,
+    pub output_per_mtok: MicroCents,
 }
 
 impl ModelPricing {
     /// Cost of serving a request with these token counts.
+    ///
+    /// Kept for the many callers that only have two figures — a projection, a baseline
+    /// comparison, a test. Requests actually served go through [`ModelPricing::cost_of`],
+    /// which prices cached tokens at their real rate.
     pub fn cost(&self, input_tokens: u64, output_tokens: u64) -> MicroCents {
-        MicroCents::cost_for_tokens(self.input_per_mtok, input_tokens)
-            + MicroCents::cost_for_tokens(self.output_per_mtok, output_tokens)
+        self.cost_of(&crate::types::TokenUsage {
+            input_tokens,
+            output_tokens,
+            ..Default::default()
+        })
+    }
+
+    /// Cost of serving a request, across every token class this model prices separately.
+    ///
+    /// The rates used depend on total prompt size when the model has a long-context tier,
+    /// which is why this takes the whole usage rather than one figure at a time.
+    pub fn cost_of(&self, usage: &crate::types::TokenUsage) -> MicroCents {
+        let (input_rate, output_rate) = self.rates_for(usage.total_input());
+
+        MicroCents::cost_for_tokens(input_rate, usage.input_tokens)
+            + MicroCents::cost_for_tokens(output_rate, usage.output_tokens)
+            + MicroCents::cost_for_tokens(
+                CachePricing::scale(input_rate, self.cache.read_bp),
+                usage.cached_input_tokens,
+            )
+            + MicroCents::cost_for_tokens(
+                CachePricing::scale(input_rate, self.cache.write_bp),
+                usage.cache_write_tokens,
+            )
+    }
+
+    /// The input and output rates that apply to a prompt of this size.
+    pub fn rates_for(&self, input_tokens: u64) -> (MicroCents, MicroCents) {
+        match self.long_context {
+            Some(tier) if input_tokens >= tier.threshold_tokens => {
+                (tier.input_per_mtok, tier.output_per_mtok)
+            }
+            _ => (self.input_per_mtok, self.output_per_mtok),
+        }
     }
 
     /// A single comparable price per million tokens, blending input and output 3:1.
@@ -156,6 +265,29 @@ impl PricingTable {
     /// than guessing — an invented price is worse than an absent one.
     pub fn cost(&self, model: &str, input_tokens: u64, output_tokens: u64) -> Option<MicroCents> {
         self.get(model).map(|m| m.cost(input_tokens, output_tokens))
+    }
+
+    /// Cost of serving a request, honouring cached tokens and long-context tiers.
+    ///
+    /// The form the request path uses. [`PricingTable::cost`] remains for callers that
+    /// genuinely only have two token counts — a pre-flight projection, a test — but every
+    /// figure that reaches an invoice goes through this one.
+    pub fn cost_of(&self, model: &str, usage: &crate::types::TokenUsage) -> Option<MicroCents> {
+        self.get(model).map(|m| m.cost_of(usage))
+    }
+
+    /// What this request *would* have cost on the model the caller asked for.
+    ///
+    /// The savings baseline. Uses the same token counts, which is the honest comparison:
+    /// the question is "what would the same work have cost there", not "what would a
+    /// differently-cached version of it have cost".
+    pub fn baseline_of(
+        &self,
+        requested_model: &str,
+        usage: &crate::types::TokenUsage,
+        fallback: MicroCents,
+    ) -> MicroCents {
+        self.cost_of(requested_model, usage).unwrap_or(fallback)
     }
 
     /// Every active model.
@@ -771,6 +903,52 @@ impl PricingTable {
             ),
         ];
 
+        // ---- Prompt-cache and long-context rates ------------------------------------
+        //
+        // Applied here rather than as ten more positional arguments on `m()`, which is
+        // already at the limit of what a reader can follow. Every model from a provider
+        // with a prompt cache gets that provider's rates; everything else keeps the
+        // conservative default of no discount.
+        //
+        // These are *proportions* of each model's own input rate, not absolute prices,
+        // which is why one line covers a whole provider and why a base-rate change cannot
+        // leave the cache rate stale behind it.
+        let models: Vec<ModelPricing> = models
+            .into_iter()
+            .map(|model| {
+                let cache = match model.provider.as_str() {
+                    // Anthropic: cache reads at 10% of input, writes at 125% (the cost of
+                    // populating a five-minute cache entry). Verified against Anthropic's
+                    // prompt-caching pricing, 2026-08-26.
+                    "anthropic" => CachePricing::anthropic(),
+                    // OpenAI, Google AI Studio, and Vertex all discount a cache read to
+                    // roughly a quarter of the input rate and do not charge per write.
+                    // Verified 2026-08-26.
+                    "openai" | "google" | "vertex" => CachePricing::quarter_read(),
+                    // Everything else: no known prompt cache, or rates not verified. The
+                    // default bills cached tokens at full price, which can only over-state
+                    // our own cost estimate, never under-state a customer's bill.
+                    _ => CachePricing::none(),
+                };
+                // An embedding model has no prompt cache regardless of provider.
+                if model.model_id.contains("embedding") {
+                    return with_cache(model, CachePricing::none());
+                }
+                with_cache(model, cache)
+            })
+            .map(|model| {
+                // Gemini 2.5 Pro is the one model in this table with a genuine second
+                // pricing tier: past 200,000 input tokens the input rate doubles and the
+                // output rate rises by half, against a 1,048,576-token context window.
+                // A flat price under-bills every long-context request on a model sold
+                // specifically for long context. Verified 2026-08-26.
+                if model.model_id.ends_with("/gemini-2.5-pro") {
+                    return with_long_context(model, 200_000, 2.50, 15.00);
+                }
+                model
+            })
+            .collect();
+
         let mut table = PricingTable::from_models(models);
 
         // Retired and deprecated models. Retained but INACTIVE, so a historical usage
@@ -894,6 +1072,33 @@ fn m(
         supports_vision,
         is_active: true,
         source,
+        // Conservative by default: no prompt-cache discount unless a row opts in below.
+        // Getting this wrong in the generous direction under-bills silently, so the
+        // default is the one that cannot.
+        cache: CachePricing::none(),
+        long_context: None,
+    }
+}
+
+/// Attach prompt-cache rates to a seed row.
+fn with_cache(model: ModelPricing, cache: CachePricing) -> ModelPricing {
+    ModelPricing { cache, ..model }
+}
+
+/// Attach a long-context tier to a seed row.
+fn with_long_context(
+    model: ModelPricing,
+    threshold_tokens: u64,
+    input_usd_per_mtok: f64,
+    output_usd_per_mtok: f64,
+) -> ModelPricing {
+    ModelPricing {
+        long_context: Some(LongContextTier {
+            threshold_tokens,
+            input_per_mtok: MicroCents::from_usd_per_mtok(input_usd_per_mtok),
+            output_per_mtok: MicroCents::from_usd_per_mtok(output_usd_per_mtok),
+        }),
+        ..model
     }
 }
 
@@ -925,6 +1130,209 @@ mod tests {
 
     fn table() -> PricingTable {
         PricingTable::with_seed_data()
+    }
+
+    // ---------------------------------------------------------------------------
+    // Prompt-cache and long-context pricing.
+    //
+    // The gap these close was the largest metering-accuracy finding of the enterprise
+    // readiness audit, and it was invisible in both directions at once: Anthropic reports
+    // cache tokens additively (so reading only `input_tokens` under-counted) while OpenAI
+    // folds them into `prompt_tokens` (so reading it whole over-counted). Every test below
+    // pins one half of that.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn an_anthropic_cache_read_costs_a_tenth_of_full_input() {
+        let t = table();
+        let model = t.get("anthropic/claude-sonnet-5").expect("seeded");
+
+        let all_fresh = crate::types::TokenUsage {
+            input_tokens: 10_000,
+            output_tokens: 0,
+            ..Default::default()
+        };
+        let all_cached = crate::types::TokenUsage {
+            input_tokens: 0,
+            cached_input_tokens: 10_000,
+            output_tokens: 0,
+            ..Default::default()
+        };
+
+        let fresh = model.cost_of(&all_fresh).as_i64();
+        let cached = model.cost_of(&all_cached).as_i64();
+        assert_eq!(
+            cached * 10,
+            fresh,
+            "a cache read bills at 10% of the input rate"
+        );
+    }
+
+    #[test]
+    fn an_anthropic_cache_write_costs_a_premium() {
+        // Writing to the cache is *more* expensive than a fresh token, not less. Treating
+        // a cache write as ordinary input under-bills by 25% of the write.
+        let t = table();
+        let model = t.get("anthropic/claude-sonnet-5").expect("seeded");
+
+        let fresh = model
+            .cost_of(&crate::types::TokenUsage {
+                input_tokens: 10_000,
+                ..Default::default()
+            })
+            .as_i64();
+        let written = model
+            .cost_of(&crate::types::TokenUsage {
+                cache_write_tokens: 10_000,
+                ..Default::default()
+            })
+            .as_i64();
+
+        assert!(written > fresh, "a cache write costs more than fresh input");
+        assert_eq!(written * 100, fresh * 125);
+    }
+
+    #[test]
+    fn an_openai_cache_read_costs_a_quarter_of_full_input() {
+        let t = table();
+        let model = t.get("openai/gpt-4o").expect("seeded");
+
+        let fresh = model
+            .cost_of(&crate::types::TokenUsage {
+                input_tokens: 10_000,
+                ..Default::default()
+            })
+            .as_i64();
+        let cached = model
+            .cost_of(&crate::types::TokenUsage {
+                cached_input_tokens: 10_000,
+                ..Default::default()
+            })
+            .as_i64();
+
+        assert_eq!(cached * 4, fresh);
+    }
+
+    #[test]
+    fn a_model_with_no_prompt_cache_bills_cached_tokens_at_full_rate() {
+        // The conservative default. A provider whose cache rates nobody has verified must
+        // not silently receive a discount — that direction under-bills, which is the one
+        // that loses money without anyone noticing.
+        let t = table();
+        let model = t.get("mistral/mistral-large-latest").expect("seeded");
+
+        let fresh = model
+            .cost_of(&crate::types::TokenUsage {
+                input_tokens: 10_000,
+                ..Default::default()
+            })
+            .as_i64();
+        let cached = model
+            .cost_of(&crate::types::TokenUsage {
+                cached_input_tokens: 10_000,
+                ..Default::default()
+            })
+            .as_i64();
+
+        assert_eq!(cached, fresh);
+    }
+
+    #[test]
+    fn gemini_two_five_pro_charges_more_past_two_hundred_thousand_tokens() {
+        // The tier that did not exist. Gemini 2.5 Pro doubles its input rate past 200k
+        // against a 1,048,576-token window, so a flat price under-bills exactly the
+        // long-context requests the model is sold for.
+        let t = table();
+        let model = t.get("google/gemini-2.5-pro").expect("seeded");
+
+        let per_token_below = model
+            .cost_of(&crate::types::TokenUsage {
+                input_tokens: 199_999,
+                ..Default::default()
+            })
+            .as_i64() as f64
+            / 199_999.0;
+        let per_token_above = model
+            .cost_of(&crate::types::TokenUsage {
+                input_tokens: 200_000,
+                ..Default::default()
+            })
+            .as_i64() as f64
+            / 200_000.0;
+
+        assert!(
+            per_token_above > per_token_below * 1.9,
+            "past the threshold the input rate roughly doubles: {per_token_below} -> \
+             {per_token_above}"
+        );
+    }
+
+    #[test]
+    fn the_long_context_threshold_counts_every_input_class() {
+        // A prompt that is 190k cached plus 20k fresh is a 210k prompt. Counting only the
+        // fresh tokens would let a heavily-cached long-context request slip under the
+        // threshold and be billed at the base rate.
+        let t = table();
+        let model = t.get("google/gemini-2.5-pro").expect("seeded");
+
+        let (base_in, _) = model.rates_for(100_000);
+        let (tiered_in, _) = model.rates_for(210_000);
+        assert!(tiered_in > base_in);
+
+        let usage = crate::types::TokenUsage {
+            input_tokens: 20_000,
+            cached_input_tokens: 190_000,
+            ..Default::default()
+        };
+        let (applied, _) = model.rates_for(usage.total_input());
+        assert_eq!(applied, tiered_in, "210k total input is past the threshold");
+    }
+
+    #[test]
+    fn a_flat_priced_model_has_no_second_tier() {
+        let t = table();
+        let model = t.get("openai/gpt-4o").expect("seeded");
+        let (small_in, small_out) = model.rates_for(1_000);
+        let (huge_in, huge_out) = model.rates_for(10_000_000);
+        assert_eq!((small_in, small_out), (huge_in, huge_out));
+    }
+
+    #[test]
+    fn cost_and_cost_of_agree_when_nothing_is_cached() {
+        // `cost` is the two-argument form many callers still use. It must remain exactly
+        // equivalent to `cost_of` for a request with no cached tokens, or the projection
+        // used by the budget check would disagree with the figure that reaches the invoice.
+        let t = table();
+        for model in t.all() {
+            let via_cost = model.cost(1_234, 567);
+            let via_cost_of = model.cost_of(&crate::types::TokenUsage {
+                input_tokens: 1_234,
+                output_tokens: 567,
+                ..Default::default()
+            });
+            assert_eq!(via_cost, via_cost_of, "{} disagrees", model.model_id);
+        }
+    }
+
+    #[test]
+    fn no_seeded_model_gives_a_cache_discount_it_cannot_justify() {
+        // A guard against a future edit adding a discount to a provider that has no
+        // prompt cache. Only the three provider families with verified rates may deviate
+        // from full price.
+        for model in table().all() {
+            let discounted = model.cache != CachePricing::none();
+            if discounted {
+                assert!(
+                    matches!(
+                        model.provider.as_str(),
+                        "anthropic" | "openai" | "google" | "vertex"
+                    ),
+                    "{} discounts cached tokens but its provider has no verified cache \
+                     rates",
+                    model.model_id
+                );
+            }
+        }
     }
 
     #[test]

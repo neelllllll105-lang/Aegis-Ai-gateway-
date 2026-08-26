@@ -213,15 +213,14 @@ pub async fn execute(
     {
         state.metrics.record_cache("exact");
 
-        // A cache hit costs nothing, so the entire baseline is a saving.
-        let baseline = state
-            .pricing
-            .cost(
-                &requested_model,
-                hit.response.usage.input_tokens,
-                hit.response.usage.output_tokens,
-            )
-            .unwrap_or(MicroCents::ZERO);
+        // A cache hit costs nothing, so the entire baseline is a saving. Priced through
+        // `cost_of` so a cached response whose original request used the *provider's*
+        // prompt cache reports the saving the customer actually avoided, not an inflated
+        // full-rate figure.
+        let baseline =
+            state
+                .pricing
+                .baseline_of(&requested_model, &hit.response.usage, MicroCents::ZERO);
         let savings = SavingsBreakdown::cache_hit(baseline, auth.savings_share_bp);
 
         state.metrics.record_savings(savings.gross_savings.as_i64());
@@ -296,11 +295,11 @@ pub async fn execute(
 
     let actual_cost = state
         .pricing
-        .cost(&served_model, tokens.input_tokens, tokens.output_tokens)
+        .cost_of(&served_model, &tokens)
         .unwrap_or(MicroCents::ZERO);
     let baseline_cost = state
         .pricing
-        .cost(&requested_model, tokens.input_tokens, tokens.output_tokens)
+        .cost_of(&requested_model, &tokens)
         .unwrap_or(actual_cost);
 
     let savings = SavingsBreakdown::compute(baseline_cost, actual_cost, auth.savings_share_bp);
@@ -717,6 +716,9 @@ fn resolve_usage(response: &NormalizedResponse, request: &NormalizedRequest) -> 
         // Four characters per token, the same approximation used for input.
         output_tokens: (response.content.chars().count() as u64 / 4).max(1),
         estimated: true,
+        // An estimate cannot know what the provider's cache did, and inventing a discount
+        // would under-bill. Estimated requests are priced entirely at the full input rate.
+        ..Default::default()
     }
 }
 
@@ -1050,15 +1052,16 @@ async fn stream_chat(
             input_tokens: estimated_input,
             output_tokens: (output_chars / 4).max(1),
             estimated: true,
+            ..Default::default()
         });
 
         let actual_cost = state_for_stream
             .pricing
-            .cost(&served_model, tokens.input_tokens, tokens.output_tokens)
+            .cost_of(&served_model, &tokens)
             .unwrap_or(MicroCents::ZERO);
         let baseline_cost = state_for_stream
             .pricing
-            .cost(&requested_model, tokens.input_tokens, tokens.output_tokens)
+            .cost_of(&requested_model, &tokens)
             .unwrap_or(actual_cost);
         let savings = SavingsBreakdown::compute(
             baseline_cost,
@@ -1496,6 +1499,8 @@ mod tests {
             supports_vision: true,
             is_active: true,
             source: "test".into(),
+            cache: Default::default(),
+            long_context: None,
         });
         pricing.insert(crate::metering::pricing::ModelPricing {
             model_id: "mock/mock-cheap".into(),
@@ -1509,6 +1514,8 @@ mod tests {
             supports_vision: true,
             is_active: true,
             source: "test".into(),
+            cache: Default::default(),
+            long_context: None,
         });
 
         AppState {
@@ -1905,6 +1912,7 @@ mod tests {
                 input_tokens: 42,
                 output_tokens: 7,
                 estimated: false,
+                ..Default::default()
             },
             raw: None,
         };
@@ -1927,6 +1935,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 estimated: true,
+                ..Default::default()
             },
             raw: None,
         };
@@ -1950,6 +1959,7 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 1,
                     estimated: false,
+                    ..Default::default()
                 },
                 raw: None,
             },
@@ -1964,6 +1974,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 1,
                 estimated: false,
+                ..Default::default()
             },
             gateway_overhead_ms: 0.4,
             total_latency_ms: 120,

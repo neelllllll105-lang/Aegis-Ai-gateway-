@@ -97,6 +97,7 @@ async fn usage_records_are_written_idempotently() {
             input_tokens: 1_000,
             output_tokens: 500,
             estimated: false,
+            ..Default::default()
         },
         SavingsBreakdown::compute(MicroCents(7_500), MicroCents(450), 2_000),
         842,

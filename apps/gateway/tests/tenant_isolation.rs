@@ -141,6 +141,7 @@ async fn usage_records_are_never_visible_across_tenants() {
             input_tokens: 1_000,
             output_tokens: 500,
             estimated: false,
+            ..Default::default()
         },
         SavingsBreakdown::compute(MicroCents(7_500), MicroCents(450), 2_000),
         200,

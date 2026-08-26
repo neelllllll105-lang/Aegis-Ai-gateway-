@@ -629,6 +629,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 10,
                 estimated: false,
+                ..Default::default()
             },
             SavingsBreakdown::compute(MicroCents(cost), MicroCents(cost), 2_000),
             10,
@@ -658,6 +659,7 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 10,
                     estimated: false,
+                    ..Default::default()
                 },
                 SavingsBreakdown::compute(MicroCents(cost), MicroCents(cost), 2_000),
                 10,
@@ -889,6 +891,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 10,
                 estimated: false,
+                ..Default::default()
             },
             SavingsBreakdown::compute(MicroCents(cost), MicroCents(cost), 2_000),
             10,
@@ -1268,6 +1271,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 10,
                 estimated: false,
+                ..Default::default()
             },
             SavingsBreakdown::compute(MicroCents(400_000), MicroCents(400_000), 2_000),
             10,

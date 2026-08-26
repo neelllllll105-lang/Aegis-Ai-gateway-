@@ -535,15 +535,16 @@ async fn stream_messages(
             input_tokens: if input_tokens > 0 { input_tokens } else { estimated_input },
             output_tokens: final_output,
             estimated: input_tokens == 0 || output_tokens == 0,
+            ..Default::default()
         };
 
         let actual_cost = state_for_stream
             .pricing
-            .cost(&served_model, tokens.input_tokens, tokens.output_tokens)
+            .cost_of(&served_model, &tokens)
             .unwrap_or(MicroCents::ZERO);
         let baseline_cost = state_for_stream
             .pricing
-            .cost(&requested_model, tokens.input_tokens, tokens.output_tokens)
+            .cost_of(&requested_model, &tokens)
             .unwrap_or(actual_cost);
         let savings = SavingsBreakdown::compute(
             baseline_cost,
@@ -945,6 +946,7 @@ mod tests {
                     input_tokens: 12,
                     output_tokens: 3,
                     estimated: false,
+                    ..Default::default()
                 },
                 raw: None,
             },
@@ -959,6 +961,7 @@ mod tests {
                 input_tokens: 12,
                 output_tokens: 3,
                 estimated: false,
+                ..Default::default()
             },
             gateway_overhead_ms: 0.4,
             total_latency_ms: 200,

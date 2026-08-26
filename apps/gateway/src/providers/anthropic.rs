@@ -124,6 +124,27 @@ fn translate_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
         })
         .collect()
 }
+/// Read Anthropic's usage block into normalised token counts.
+///
+/// Anthropic reports cache tokens as **separate, additive** fields:
+/// `input_tokens` counts only the uncached remainder, and
+/// `cache_read_input_tokens` / `cache_creation_input_tokens` sit alongside it. A request
+/// with an 8,000-token cached prefix and 50 new tokens reports `input_tokens: 50`.
+///
+/// Reading only `input_tokens` — which is what this adapter did before the enterprise
+/// readiness audit — therefore **under-counts** such a request by 8,000 tokens, and
+/// under-counting is the direction that quietly loses money on a product whose entire
+/// claim is that its cost figures reconcile against the provider's own bill.
+fn parse_usage(u: &serde_json::Value) -> TokenUsage {
+    let field = |name: &str| u.get(name).and_then(|v| v.as_u64()).unwrap_or(0);
+    TokenUsage {
+        input_tokens: field("input_tokens"),
+        output_tokens: field("output_tokens"),
+        cached_input_tokens: field("cache_read_input_tokens"),
+        cache_write_tokens: field("cache_creation_input_tokens"),
+        estimated: false,
+    }
+}
 
 /// Parse an Anthropic Messages response.
 pub fn parse_response(body: &serde_json::Value) -> Result<NormalizedResponse> {
@@ -154,18 +175,10 @@ pub fn parse_response(body: &serde_json::Value) -> Result<NormalizedResponse> {
             )
         });
 
-    let usage = body
-        .get("usage")
-        .map(|u| TokenUsage {
-            input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            estimated: false,
-        })
-        .unwrap_or(TokenUsage {
-            input_tokens: 0,
-            output_tokens: 0,
-            estimated: true,
-        });
+    let usage = body.get("usage").map(parse_usage).unwrap_or(TokenUsage {
+        estimated: true,
+        ..Default::default()
+    });
 
     Ok(NormalizedResponse {
         id: body
@@ -223,20 +236,14 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
                 .pointer("/delta/stop_reason")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            usage: json.get("usage").map(|u| TokenUsage {
-                input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                estimated: false,
-            }),
+            usage: json.get("usage").map(parse_usage),
             raw: Some(data.to_string()),
         })),
         Some("message_start") => {
             // Input tokens are only ever reported here.
-            let usage = json.pointer("/message/usage").map(|u| TokenUsage {
-                input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                estimated: false,
-            });
+            // Input and cache token counts are only ever reported here, so a stream that
+            // misses this event can never learn them.
+            let usage = json.pointer("/message/usage").map(parse_usage);
             Ok(usage.map(|usage| StreamChunk {
                 delta: String::new(),
                 finish_reason: None,
@@ -332,6 +339,49 @@ impl Provider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_tokens_are_additive_and_all_captured() {
+        // Anthropic reports cache tokens as *separate* fields: `input_tokens` counts only
+        // the uncached remainder. Reading it alone -- which this adapter did before the
+        // enterprise readiness audit -- silently under-counts a heavily-cached request by
+        // the entire cached prefix, which for a long system prompt is most of the request.
+        let body = serde_json::json!({
+            "id": "msg_1",
+            "model": "claude-sonnet-5",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": 50,
+                "output_tokens": 10,
+                "cache_read_input_tokens": 8_000,
+                "cache_creation_input_tokens": 1_200
+            }
+        });
+
+        let usage = parse_response(&body).unwrap().usage;
+        assert_eq!(usage.input_tokens, 50, "the uncached remainder only");
+        assert_eq!(usage.cached_input_tokens, 8_000);
+        assert_eq!(usage.cache_write_tokens, 1_200);
+        assert_eq!(
+            usage.total_input(),
+            9_250,
+            "every input token the model saw, at whatever rate"
+        );
+    }
+
+    #[test]
+    fn a_response_without_cache_fields_reports_no_cached_tokens() {
+        let body = serde_json::json!({
+            "id": "msg_1",
+            "model": "claude-sonnet-5",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {"input_tokens": 100, "output_tokens": 10}
+        });
+        let usage = parse_response(&body).unwrap().usage;
+        assert_eq!(usage.cached_input_tokens, 0);
+        assert_eq!(usage.cache_write_tokens, 0);
+        assert_eq!(usage.total_input(), 100);
+    }
     use crate::types::{Message, Role};
 
     fn request_with_system() -> NormalizedRequest {

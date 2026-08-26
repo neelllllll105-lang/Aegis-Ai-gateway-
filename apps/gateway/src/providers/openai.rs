@@ -67,6 +67,38 @@ pub fn build_body(request: &NormalizedRequest, model: &str) -> serde_json::Value
 
     body
 }
+/// Read OpenAI's usage block into normalised token counts.
+///
+/// OpenAI reports `prompt_tokens` with the cached portion **already inside it**, and
+/// breaks the cached count out under `prompt_tokens_details.cached_tokens`. So the
+/// uncached remainder is the difference, and treating `prompt_tokens` as full-rate input —
+/// which is what this adapter did before the enterprise readiness audit — **over-counts**,
+/// because OpenAI bills the cached portion at roughly a quarter of the input rate.
+///
+/// Note this is the exact opposite direction of Anthropic's error in the same code. Two
+/// providers, two opposite biases, both invisible; normalising here is what makes a single
+/// pricing rule correct for both.
+///
+/// `saturating_sub` rather than a subtraction: a provider reporting a cached count larger
+/// than the prompt would otherwise wrap into an enormous token figure and an enormous bill.
+fn parse_usage(u: &serde_json::Value) -> TokenUsage {
+    let field = |name: &str| u.get(name).and_then(|v| v.as_u64()).unwrap_or(0);
+    let prompt_tokens = field("prompt_tokens");
+    let cached = u
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        .min(prompt_tokens);
+
+    TokenUsage {
+        input_tokens: prompt_tokens.saturating_sub(cached),
+        output_tokens: field("completion_tokens"),
+        cached_input_tokens: cached,
+        // OpenAI populates its cache automatically and does not charge separately for it.
+        cache_write_tokens: 0,
+        estimated: false,
+    }
+}
 
 /// Parse an OpenAI-format chat completion response.
 pub fn parse_response(body: &serde_json::Value) -> Result<NormalizedResponse> {
@@ -84,21 +116,10 @@ pub fn parse_response(body: &serde_json::Value) -> Result<NormalizedResponse> {
 
     // Usage may be absent (some compatible providers omit it). The caller estimates in
     // that case and marks the record `estimated`, so an invoice can always be explained.
-    let usage = body
-        .get("usage")
-        .map(|u| TokenUsage {
-            input_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            output_tokens: u
-                .get("completion_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-            estimated: false,
-        })
-        .unwrap_or(TokenUsage {
-            input_tokens: 0,
-            output_tokens: 0,
-            estimated: true,
-        });
+    let usage = body.get("usage").map(parse_usage).unwrap_or(TokenUsage {
+        estimated: true,
+        ..Default::default()
+    });
 
     Ok(NormalizedResponse {
         id: body
@@ -146,17 +167,7 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let usage = json
-        .get("usage")
-        .filter(|u| !u.is_null())
-        .map(|u| TokenUsage {
-            input_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            output_tokens: u
-                .get("completion_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-            estimated: false,
-        });
+    let usage = json.get("usage").filter(|u| !u.is_null()).map(parse_usage);
 
     // A chunk with no delta, no finish reason, and no usage carries nothing.
     if delta.is_empty() && finish_reason.is_none() && usage.is_none() {
@@ -332,6 +343,62 @@ impl Provider for OpenAiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_tokens_are_subtracted_from_the_prompt_total() {
+        // OpenAI reports `prompt_tokens` with the cached portion already inside it. Billing
+        // the whole figure at the full input rate -- which this adapter did before the
+        // enterprise readiness audit -- over-charges, because OpenAI discounts the cached
+        // part to roughly a quarter. Note this is the exact opposite of Anthropic's bias
+        // in the same code, which is why normalising here rather than in the pricing layer
+        // is what makes one pricing rule correct for both.
+        let body = serde_json::json!({
+            "id": "chatcmpl-1",
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"},
+                         "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 10_000,
+                "completion_tokens": 20,
+                "prompt_tokens_details": {"cached_tokens": 9_000}
+            }
+        });
+
+        let usage = parse_response(&body).unwrap().usage;
+        assert_eq!(usage.input_tokens, 1_000, "the uncached remainder");
+        assert_eq!(usage.cached_input_tokens, 9_000);
+        assert_eq!(
+            usage.total_input(),
+            10_000,
+            "the parts must still sum to what the provider reported"
+        );
+    }
+
+    #[test]
+    fn a_cached_count_larger_than_the_prompt_cannot_wrap() {
+        // Defensive: an OpenAI-compatible provider reporting nonsense must not produce an
+        // enormous token count through unsigned wraparound, which would produce an
+        // enormous invoice line from a single malformed response.
+        let body = serde_json::json!({
+            "id": "chatcmpl-1",
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"},
+                         "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 999_999}
+            }
+        });
+
+        let usage = parse_response(&body).unwrap().usage;
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(
+            usage.cached_input_tokens, 100,
+            "clamped to the prompt total"
+        );
+        assert_eq!(usage.total_input(), 100);
+    }
     use crate::types::{Message, Role};
 
     fn request() -> NormalizedRequest {

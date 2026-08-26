@@ -201,6 +201,7 @@ mod tests {
                 input_tokens: 100,
                 output_tokens: 50,
                 estimated: false,
+                ..Default::default()
             },
             SavingsBreakdown::compute(MicroCents(7_500), MicroCents(450), 2_000),
             200,

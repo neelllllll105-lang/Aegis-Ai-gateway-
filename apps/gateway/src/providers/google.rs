@@ -94,6 +94,25 @@ pub fn build_body(request: &NormalizedRequest, _model: &str) -> serde_json::Valu
 
     body
 }
+/// Read Google's `usageMetadata` into normalised token counts.
+///
+/// Google follows OpenAI's convention: `promptTokenCount` **includes** the cached portion,
+/// which is reported separately as `cachedContentTokenCount`. Same subtraction, same
+/// reasoning, same `min` guard as the OpenAI adapter.
+fn parse_usage(u: &serde_json::Value) -> TokenUsage {
+    let field = |name: &str| u.get(name).and_then(|v| v.as_u64()).unwrap_or(0);
+    let prompt_tokens = field("promptTokenCount");
+    let cached = field("cachedContentTokenCount").min(prompt_tokens);
+
+    TokenUsage {
+        input_tokens: prompt_tokens.saturating_sub(cached),
+        output_tokens: field("candidatesTokenCount"),
+        cached_input_tokens: cached,
+        // Context caching on Gemini is billed by storage duration, not per write.
+        cache_write_tokens: 0,
+        estimated: false,
+    }
+}
 
 /// Parse a Gemini response.
 pub fn parse_response(body: &serde_json::Value) -> Result<NormalizedResponse> {
@@ -115,21 +134,10 @@ pub fn parse_response(body: &serde_json::Value) -> Result<NormalizedResponse> {
 
     let usage = body
         .get("usageMetadata")
-        .map(|u| TokenUsage {
-            input_tokens: u
-                .get("promptTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-            output_tokens: u
-                .get("candidatesTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-            estimated: false,
-        })
+        .map(parse_usage)
         .unwrap_or(TokenUsage {
-            input_tokens: 0,
-            output_tokens: 0,
             estimated: true,
+            ..Default::default()
         });
 
     Ok(NormalizedResponse {
@@ -205,17 +213,7 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
         .and_then(|v| v.as_str())
         .map(normalize_finish_reason);
 
-    let usage = json.get("usageMetadata").map(|u| TokenUsage {
-        input_tokens: u
-            .get("promptTokenCount")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
-        output_tokens: u
-            .get("candidatesTokenCount")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
-        estimated: false,
-    });
+    let usage = json.get("usageMetadata").map(parse_usage);
 
     if delta.is_empty() && finish_reason.is_none() && usage.is_none() {
         return Ok(None);
@@ -312,6 +310,27 @@ impl Provider for GoogleProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_content_tokens_are_subtracted_from_the_prompt_total() {
+        // Google follows OpenAI's convention: promptTokenCount includes the cached part.
+        let body = serde_json::json!({
+            "candidates": [{
+                "content": {"parts": [{"text": "hi"}]},
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 5_000,
+                "candidatesTokenCount": 20,
+                "cachedContentTokenCount": 4_500
+            }
+        });
+
+        let usage = parse_response(&body).unwrap().usage;
+        assert_eq!(usage.input_tokens, 500);
+        assert_eq!(usage.cached_input_tokens, 4_500);
+        assert_eq!(usage.total_input(), 5_000);
+    }
     use crate::types::{Message, Role};
 
     fn request() -> NormalizedRequest {

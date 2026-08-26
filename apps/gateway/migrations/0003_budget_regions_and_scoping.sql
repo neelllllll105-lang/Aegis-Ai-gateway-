@@ -43,3 +43,86 @@ ALTER TABLE budgets
 
 CREATE INDEX idx_budgets_org_monthly ON budgets (org_id)
     WHERE period = 'monthly';
+
+-- ---------------------------------------------------------------------------
+-- Prompt-cache and long-context pricing.
+--
+-- Two dimensions the pricing table could not express, both found by the enterprise
+-- readiness audit and both producing wrong invoices rather than missing features:
+--
+-- 1. **Cached tokens.** Every major provider bills a cache read at a fraction of the input
+--    rate and, on Anthropic, a cache write at a premium. With no columns for them, the
+--    application priced cached tokens at the full input rate -- and because Anthropic
+--    reports cache tokens additively while OpenAI folds them into prompt_tokens, the same
+--    missing dimension produced an *under*-count on one provider and an *over*-count on
+--    the other. Both invisible.
+--
+-- 2. **Long-context tiers.** Gemini 2.5 Pro bills prompts past 200,000 tokens at
+--    $2.50/$15.00 instead of $1.25/$10.00, against a context window of 1,048,576. A flat
+--    price under-bills every long-context request on a model sold specifically for long
+--    context.
+--
+-- Defaults reproduce today's behaviour exactly: 10,000 basis points is 100% of the input
+-- rate, and a NULL threshold means no second tier. An existing row keeps pricing as it did
+-- until someone verifies and sets real values, which is the safe direction -- the defaults
+-- can only over-bill relative to the truth, never under-bill.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE model_pricing
+    ADD COLUMN cache_read_bp  INTEGER NOT NULL DEFAULT 10000
+        CHECK (cache_read_bp BETWEEN 0 AND 20000),
+    ADD COLUMN cache_write_bp INTEGER NOT NULL DEFAULT 10000
+        CHECK (cache_write_bp BETWEEN 0 AND 20000),
+    ADD COLUMN long_context_threshold_tokens   BIGINT
+        CHECK (long_context_threshold_tokens IS NULL OR long_context_threshold_tokens > 0),
+    ADD COLUMN long_context_input_per_mtok_mc  BIGINT
+        CHECK (long_context_input_per_mtok_mc IS NULL OR long_context_input_per_mtok_mc >= 0),
+    ADD COLUMN long_context_output_per_mtok_mc BIGINT
+        CHECK (long_context_output_per_mtok_mc IS NULL OR long_context_output_per_mtok_mc >= 0);
+
+COMMENT ON COLUMN model_pricing.cache_read_bp IS
+    'Cache-read rate in basis points of the input rate. 10000 = full price (no discount), '
+    '2500 = OpenAI/Google, 1000 = Anthropic.';
+COMMENT ON COLUMN model_pricing.cache_write_bp IS
+    'Cache-write rate in basis points of the input rate. 10000 = no separate charge, '
+    '12500 = Anthropic five-minute cache write premium.';
+
+-- A long-context tier is all three columns or none of them. A threshold with no rates
+-- would silently price long prompts at zero.
+ALTER TABLE model_pricing
+    ADD CONSTRAINT model_pricing_long_context_is_complete
+    CHECK (
+        (long_context_threshold_tokens IS NULL
+         AND long_context_input_per_mtok_mc IS NULL
+         AND long_context_output_per_mtok_mc IS NULL)
+     OR (long_context_threshold_tokens IS NOT NULL
+         AND long_context_input_per_mtok_mc IS NOT NULL
+         AND long_context_output_per_mtok_mc IS NOT NULL)
+    );
+
+-- The long-context tier must be more expensive than the base tier, or it is not a tier --
+-- it is a bug that quietly discounts the largest requests.
+ALTER TABLE model_pricing
+    ADD CONSTRAINT model_pricing_long_context_costs_more
+    CHECK (
+        long_context_input_per_mtok_mc IS NULL
+        OR (long_context_input_per_mtok_mc >= input_cost_per_mtok_mc
+            AND long_context_output_per_mtok_mc >= output_cost_per_mtok_mc)
+    );
+
+-- Cached-token columns on the usage record.
+--
+-- Without these, an invoice can show that two identical-looking requests to the same
+-- model cost different amounts and give the customer no way to see why. Prompt caching is
+-- the most common reason for exactly that, so the counts belong on the record next to the
+-- tokens they explain.
+ALTER TABLE usage_records
+    ADD COLUMN cached_input_tokens BIGINT NOT NULL DEFAULT 0
+        CHECK (cached_input_tokens >= 0),
+    ADD COLUMN cache_write_tokens  BIGINT NOT NULL DEFAULT 0
+        CHECK (cache_write_tokens >= 0);
+
+COMMENT ON COLUMN usage_records.cached_input_tokens IS
+    'Input tokens served from the provider''s own prompt cache, billed at a discount. '
+    'Distinct from a cache_hit, which means Aegis served the whole response without '
+    'calling a provider at all.';

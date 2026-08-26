@@ -145,6 +145,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 estimated: false,
+                ..Default::default()
             },
             raw: None,
         }

@@ -238,6 +238,27 @@ fn into_model(row: db::repo::PricingRow) -> aegis_gateway::metering::pricing::Mo
         supports_vision: row.supports_vision,
         is_active: row.is_active,
         source: row.source,
+        cache: aegis_gateway::metering::pricing::CachePricing {
+            read_bp: row.cache_read_bp.max(0) as u32,
+            write_bp: row.cache_write_bp.max(0) as u32,
+        },
+        // All three columns or none — the database CHECK enforces it, and this mirrors
+        // that so a partially-populated row degrades to flat pricing rather than to a
+        // tier priced at zero.
+        long_context: match (
+            row.long_context_threshold_tokens,
+            row.long_context_input_per_mtok_mc,
+            row.long_context_output_per_mtok_mc,
+        ) {
+            (Some(threshold), Some(input), Some(output)) if threshold > 0 => {
+                Some(aegis_gateway::metering::pricing::LongContextTier {
+                    threshold_tokens: threshold as u64,
+                    input_per_mtok: aegis_gateway::money::MicroCents(input),
+                    output_per_mtok: aegis_gateway::money::MicroCents(output),
+                })
+            }
+            _ => None,
+        },
     }
 }
 

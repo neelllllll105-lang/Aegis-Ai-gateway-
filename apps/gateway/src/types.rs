@@ -224,8 +224,32 @@ impl NormalizedRequest {
 /// Token counts for one request.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
+    /// Input tokens billed at the model's full input rate.
+    ///
+    /// **Excludes** cached tokens. Providers disagree about this, so the adapters
+    /// normalise: OpenAI reports `prompt_tokens` with the cached portion already inside
+    /// it, so its adapter subtracts; Anthropic reports cache tokens as separate additive
+    /// fields, so its adapter leaves this alone. Both end up meaning the same thing here,
+    /// which is the entire point of normalising.
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Input tokens served from the provider's own prompt cache, billed at a discount.
+    ///
+    /// Every major provider bills these at a fraction of the full input rate (OpenAI and
+    /// Google around 25%, Anthropic 10% on a read). Folding them into `input_tokens`
+    /// over-bills; ignoring them entirely under-bills. Before this field existed Aegis did
+    /// both, in opposite directions on different providers, and neither was visible — the
+    /// single largest metering-accuracy gap found in the enterprise readiness audit.
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+    /// Input tokens written *into* the provider's prompt cache on this request.
+    ///
+    /// Anthropic charges a **premium** for these (125% of the input rate) — the cost of
+    /// populating a cache that makes later requests cheaper. Counting them as ordinary
+    /// input tokens under-bills by 25% of the write. Providers that do not charge
+    /// separately for cache writes report zero here.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
     /// True when the provider did not report usage and we estimated it. Surfaced in the
     /// usage record so a customer disputing an invoice can see which figures were exact.
     #[serde(default)]
@@ -233,9 +257,27 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
-    /// Total tokens across input and output.
+    /// Total tokens across every input class and output.
+    ///
+    /// Cached and cache-write tokens are real tokens the model processed — a request whose
+    /// prompt was 99% cache hit still sent that prompt. Excluding them would make a
+    /// context-window check pass for a request that cannot fit.
     pub fn total(&self) -> u64 {
-        self.input_tokens + self.output_tokens
+        self.input_tokens + self.cached_input_tokens + self.cache_write_tokens + self.output_tokens
+    }
+
+    /// Every input token the model saw, at any rate.
+    pub fn total_input(&self) -> u64 {
+        self.input_tokens + self.cached_input_tokens + self.cache_write_tokens
+    }
+
+    /// Whether any part of this request touched the provider's prompt cache.
+    ///
+    /// Surfaced on the usage record so a customer can see *why* two identical-looking
+    /// requests cost different amounts, which is otherwise the most confusing line on an
+    /// invoice.
+    pub fn used_prompt_cache(&self) -> bool {
+        self.cached_input_tokens > 0 || self.cache_write_tokens > 0
     }
 }
 
