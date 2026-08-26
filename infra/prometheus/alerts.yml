@@ -1,0 +1,169 @@
+# Prometheus alerting rules for the Aegis gateway.
+#
+# Found missing entirely by the enterprise readiness audit: metrics existed, the Grafana
+# dashboard rendered them, and nothing paged anyone when any of them went wrong. A metric
+# nobody is alerted on is a chart, not observability -- every finding in this audit that
+# was "invisible until someone went looking" would have stayed invisible with this file
+# absent, no matter how many panels existed to show it in hindsight.
+#
+# # How to use this
+#
+# Point a real Prometheus at the gateway's `/metrics` endpoint (see
+# `infra/grafana/aegis-gateway.json` for the matching dashboard), load this file as a
+# rule file, and point Prometheus's `alertmanager_config` at wherever alerts should route
+# (PagerDuty, Opsgenie, a Slack webhook -- this repository does not choose that for you,
+# because it is an operational decision specific to whoever runs this in production). No
+# Prometheus or Alertmanager service is added to `infra/docker-compose*.yml` by this
+# change; deploying the alerting stack itself is a deployment decision, not a code change.
+#
+# Every rule below cites the exact metric it fires on and the file:line where that metric
+# is emitted, so a future edit that renames or removes a metric has something concrete to
+# grep for.
+
+groups:
+  - name: aegis-billing-integrity
+    rules:
+      # apps/gateway/src/metrics.rs: record_usage_event_lost / aegis_usage_events_lost_total.
+      # Added this session alongside the fix for the metering-completeness metric that
+      # could not detect metering incompleteness -- this is the alert that metric exists
+      # to drive. Any sustained rate here means requests are being served and billed for
+      # but the usage record is not reaching Postgres.
+      - alert: AegisUsageEventsBeingLost
+        expr: rate(aegis_usage_events_lost_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Usage events are being lost ({{ $value | humanize }}/s)"
+          description: >-
+            aegis_usage_events_lost_total is increasing. A request was served and is
+            billable, but its usage record could not be persisted. Check Redis
+            reachability first (aegis_dependency_up{dependency="store"}), then the usage
+            writer worker's own logs for the specific error.
+
+      # apps/gateway/src/workers/reconciliation.rs: record_reconciliation /
+      # aegis_reconciliation_orgs_over_threshold. This worker was implemented and never
+      # spawned before this session; now that it runs, this is the alert on what it finds
+      # -- Redis spend counters drifting from the Postgres records they are supposed to
+      # mirror, in either direction.
+      - alert: AegisBillingDriftDetected
+        expr: aegis_reconciliation_orgs_over_threshold > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} organisation(s) have billing drift over threshold"
+          description: >-
+            The nightly reconciliation job found at least one organisation whose Redis
+            spend counter disagrees with its Postgres usage_records total by more than
+            one cent. Check the reconciliation worker's own log line for org_id,
+            drift_mc, and direction (counter_ahead means a customer may be over-blocked;
+            records_ahead means requests were served that budgets never saw).
+
+  - name: aegis-availability
+    rules:
+      # apps/gateway/src/workers/health_probe.rs: record_dependency_up /
+      # aegis_dependency_up. This worker did not exist before this session; there was no
+      # way to alert on a dependency outage without polling /health and parsing JSON.
+      - alert: AegisStoreUnreachable
+        expr: aegis_dependency_up{dependency="store"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Aegis cannot reach its Redis-compatible store"
+          description: >-
+            Rate limiting and budget enforcement fail open during this outage by
+            design -- traffic keeps flowing, but neither control is actually being
+            enforced. Bounded by outage duration; the longer this fires, the larger the
+            reconciliation exposure once it recovers.
+
+      - alert: AegisDatabaseUnreachable
+        expr: aegis_dependency_up{dependency="database"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Aegis cannot reach PostgreSQL"
+          description: >-
+            Usage events cannot be persisted, management endpoints will return errors,
+            and the gateway is running on whatever pricing table it last loaded into
+            memory.
+
+      # apps/gateway/src/engine/fallback.rs: record_circuit_change /
+      # aegis_circuit_state_changes_total. A circuit opening is not itself an incident --
+      # that is the resilience machinery doing its job -- but a provider that cannot
+      # recover within a reasonable window is.
+      - alert: AegisProviderCircuitOpenSustained
+        expr: >-
+          max_over_time(
+            (aegis_circuit_state_changes_total{state="open"} > 0)[15m:1m]
+          ) == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A provider circuit has been open for 15+ minutes"
+          description: >-
+            {{ $labels.provider }}'s circuit opened and has not closed. Every request
+            that would have routed there is failing over to whatever the fallback chain
+            resolves to, or failing outright if nothing is available.
+
+  - name: aegis-cost-and-abuse
+    rules:
+      # apps/gateway/src/routes/openai_compat.rs: record_budget_blocked (via
+      # middleware/budget.rs's check_and_reserve) / aegis_budget_blocked_total. A single
+      # 402 is a customer at their limit, which is the control working. A sustained,
+      # organisation-wide wall of them is usually a customer who did not expect to hit
+      # their cap and is now down, which is a support-priority event even though nothing
+      # is technically broken.
+      - alert: AegisSustainedBudgetRejections
+        expr: rate(aegis_budget_blocked_total[10m]) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained budget rejections ({{ $value | humanize }}/s)"
+          description: >-
+            A high, sustained rate of 402s. Check whether this is one organisation
+            (likely an unexpectedly-hit cap worth a proactive support reach-out) or
+            spread across many (worth checking whether a pricing change or routing
+            regression made requests newly cross budget thresholds).
+
+      # apps/gateway/src/routes/openai_compat.rs (call_with_retries / execute_with_fallback):
+      # record_provider_error / aegis_provider_errors_total. A spike here independent of
+      # a circuit opening (which requires 5 *consecutive* failures) is exactly the
+      # "degraded but not dead" state the routing engine was blind to before this
+      # session's graded-health change -- worth an operator's attention even when nothing
+      # has tripped.
+      - alert: AegisElevatedProviderErrorRate
+        expr: rate(aegis_provider_errors_total[10m]) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated provider error rate: {{ $labels.provider }} ({{ $labels.kind }})"
+          description: >-
+            {{ $labels.provider }} is returning errors of kind {{ $labels.kind }} at an
+            elevated rate. May not be severe enough to open the circuit breaker (five
+            *consecutive* failures) while still meaningfully degrading customers routed
+            there -- graded health now prices this into routing, but a human should
+            still know.
+
+  - name: aegis-latency
+    rules:
+      # apps/gateway/src/metrics.rs: OVERHEAD_BUCKETS_MS / aegis_gateway_overhead_ms.
+      # Principle 1's own budget is sub-millisecond P99; this alert fires an order of
+      # magnitude above that, matching the reasoning in
+      # tests/overhead_under_load.rs's own threshold (a regression detector, not a
+      # marketing-number certifier).
+      - alert: AegisGatewayOverheadRegression
+        expr: histogram_quantile(0.99, rate(aegis_gateway_overhead_ms_bucket[10m])) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway self-overhead P99 is {{ $value | humanize }}ms, an order of magnitude over budget"
+          description: >-
+            aegis_gateway_overhead_ms excludes provider wait time by design -- this is
+            genuinely our own code getting slow, not an upstream provider.
