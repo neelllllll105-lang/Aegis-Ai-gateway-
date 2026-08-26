@@ -1231,6 +1231,9 @@ pub async fn test_provider(
                 model,
                 &live,
                 std::time::Duration::from_secs(15),
+                // A one-shot connectivity probe, never retried — nothing here can double
+                // charge, so no key is needed.
+                None,
             )
             .await;
 

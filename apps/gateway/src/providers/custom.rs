@@ -86,6 +86,7 @@ impl Provider for CustomProvider {
         model: &str,
         credential: &Credential,
         timeout: Duration,
+        idempotency_key: Option<&str>,
     ) -> Result<NormalizedResponse> {
         // Verify the base URL before building anything, so the failure message names the
         // real problem rather than surfacing as a connection error later.
@@ -96,7 +97,9 @@ impl Provider for CustomProvider {
             .post(&url)
             .timeout(timeout)
             .json(&self.build_body(request, model));
-        for (name, value) in self.auth_headers(credential) {
+        for (name, value) in
+            super::with_idempotency_key(self.auth_headers(credential), idempotency_key)
+        {
             builder = builder.header(name, value);
         }
 
@@ -138,6 +141,7 @@ impl Provider for CustomProvider {
         model: &str,
         credential: &Credential,
         timeout: Duration,
+        idempotency_key: Option<&str>,
     ) -> Result<ChunkStream> {
         let base = CustomProvider::base_url(credential)?;
         let url = format!("{}{}", base.trim_end_matches('/'), self.chat_path(model));
@@ -149,7 +153,7 @@ impl Provider for CustomProvider {
             http,
             &url,
             body,
-            self.auth_headers(credential),
+            super::with_idempotency_key(self.auth_headers(credential), idempotency_key),
             "custom",
             timeout,
             super::openai::parse_stream_chunk,

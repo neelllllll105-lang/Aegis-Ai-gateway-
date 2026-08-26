@@ -313,6 +313,7 @@ impl Provider for AnthropicProvider {
         model: &str,
         credential: &Credential,
         timeout: Duration,
+        idempotency_key: Option<&str>,
     ) -> Result<ChunkStream> {
         let base = credential
             .base_url
@@ -327,7 +328,7 @@ impl Provider for AnthropicProvider {
             http,
             &url,
             body,
-            self.auth_headers(credential),
+            super::with_idempotency_key(self.auth_headers(credential), idempotency_key),
             "anthropic",
             timeout,
             parse_stream_chunk,

@@ -86,6 +86,7 @@ macro_rules! openai_compatible_provider {
                 model: &str,
                 credential: &$crate::providers::Credential,
                 timeout: ::std::time::Duration,
+                idempotency_key: Option<&str>,
             ) -> $crate::error::Result<$crate::providers::ChunkStream> {
                 let base = credential
                     .base_url
@@ -100,7 +101,10 @@ macro_rules! openai_compatible_provider {
                     http,
                     &url,
                     body,
-                    self.auth_headers(credential),
+                    $crate::providers::with_idempotency_key(
+                        self.auth_headers(credential),
+                        idempotency_key,
+                    ),
                     $id,
                     timeout,
                     $crate::providers::openai::parse_stream_chunk,

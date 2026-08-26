@@ -595,6 +595,10 @@ async fn open_stream_with_fallback(
             state.config.provider_timeout
         };
 
+        // One key per fallback-chain attempt, stable across its internal retries — the
+        // same reasoning as `call_with_retries`'s idempotency key, applied to opening a
+        // stream instead of a non-streaming call.
+        let idempotency_key = format!("aegis-{}", uuid::Uuid::new_v4());
         let mut tries = 0;
         let opened_at = Instant::now();
         loop {
@@ -605,6 +609,7 @@ async fn open_stream_with_fallback(
                     &attempt.model_id,
                     &credential,
                     timeout,
+                    Some(&idempotency_key),
                 )
                 .await
             {
@@ -741,10 +746,23 @@ async fn call_with_retries(
         state.config.provider_timeout
     };
 
+    // One key for every retry of this attempt. A timeout on our side after the provider
+    // actually finished processing the request would otherwise have no way to be
+    // recognised as a duplicate, and the retry below bills the same logical request twice
+    // against our own account — invisible to the customer, real against our own COGS.
+    let idempotency_key = format!("aegis-{}", uuid::Uuid::new_v4());
+
     let mut attempt = 0;
     loop {
         match provider
-            .chat(&state.http, request, model, credential, timeout)
+            .chat(
+                &state.http,
+                request,
+                model,
+                credential,
+                timeout,
+                Some(&idempotency_key),
+            )
             .await
         {
             Ok(response) => return Ok(response),

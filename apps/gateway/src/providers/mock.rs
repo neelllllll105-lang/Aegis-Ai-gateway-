@@ -49,6 +49,10 @@ pub struct RecordedCall {
     /// The model the router actually selected — the thing most routing tests assert on.
     pub model: String,
     pub streamed: bool,
+    /// The idempotency key this call carried, if any — recorded so a test can prove the
+    /// same key is reused across retries of one logical request rather than a fresh one
+    /// being minted per attempt (which would defeat the whole point).
+    pub idempotency_key: Option<String>,
 }
 
 /// Scriptable in-process provider.
@@ -126,12 +130,13 @@ impl MockProvider {
         self.call_count.store(0, Ordering::SeqCst);
     }
 
-    fn record(&self, model: &str, streamed: bool) {
+    fn record(&self, model: &str, streamed: bool, idempotency_key: Option<&str>) {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut calls) = self.calls.lock() {
             calls.push(RecordedCall {
                 model: model.to_string(),
                 streamed,
+                idempotency_key: idempotency_key.map(|k| k.to_string()),
             });
         }
     }
@@ -205,8 +210,9 @@ impl Provider for MockProvider {
         model: &str,
         _credential: &Credential,
         _timeout: Duration,
+        idempotency_key: Option<&str>,
     ) -> Result<NormalizedResponse> {
-        self.record(model, false);
+        self.record(model, false, idempotency_key);
         match self.next_outcome() {
             MockBehavior::Succeed {
                 content,
@@ -243,8 +249,9 @@ impl Provider for MockProvider {
         model: &str,
         _credential: &Credential,
         _timeout: Duration,
+        idempotency_key: Option<&str>,
     ) -> Result<ChunkStream> {
-        self.record(model, true);
+        self.record(model, true, idempotency_key);
         match self.next_outcome() {
             MockBehavior::Succeed {
                 content,
@@ -307,6 +314,7 @@ mod tests {
             "gpt-4o-mini",
             &Credential::new(""),
             Duration::from_secs(1),
+            None,
         )
         .await
         .unwrap();
@@ -314,6 +322,25 @@ mod tests {
         assert_eq!(mock.call_count(), 1);
         assert_eq!(mock.last_model().as_deref(), Some("gpt-4o-mini"));
         assert!(!mock.calls()[0].streamed);
+    }
+
+    #[tokio::test]
+    async fn the_idempotency_key_reaches_the_provider_call() {
+        let mock = MockProvider::new();
+        mock.chat(
+            &http(),
+            &NormalizedRequest::simple("m", "q"),
+            "mock-model",
+            &Credential::new(""),
+            Duration::from_secs(1),
+            Some("aegis-fixed-key-123"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            mock.calls()[0].idempotency_key.as_deref(),
+            Some("aegis-fixed-key-123")
+        );
     }
 
     #[tokio::test]
@@ -326,6 +353,7 @@ mod tests {
                 "mock-model",
                 &Credential::new(""),
                 Duration::from_secs(1),
+                None,
             )
             .await
             .unwrap();
@@ -344,6 +372,7 @@ mod tests {
                 "mock-model",
                 &Credential::new(""),
                 Duration::from_secs(1),
+                None,
             )
             .await
             .unwrap_err();
@@ -364,6 +393,7 @@ mod tests {
                     "mock-model",
                     &Credential::new(""),
                     Duration::from_secs(1),
+                    None,
                 )
                 .await;
             assert!(result.is_err(), "attempt {attempt} should have failed");
@@ -375,11 +405,58 @@ mod tests {
                 "mock-model",
                 &Credential::new(""),
                 Duration::from_secs(1),
+                None,
             )
             .await
             .unwrap();
         assert_eq!(recovered.content, "recovered");
         assert_eq!(mock.call_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_retried_request_reuses_the_same_idempotency_key() {
+        // The property that actually matters: `call_with_retries` in openai_compat.rs
+        // generates one key and reuses it across every retry of the same attempt. Proven
+        // here end to end against a provider that genuinely fails twice before
+        // succeeding -- the exact shape of the timeout-then-retry scenario that would
+        // otherwise double-bill a provider account.
+        let mock = MockProvider::failing_then_succeeding(2);
+        let request = NormalizedRequest::simple("m", "q");
+        let key = "aegis-retry-proof-key";
+
+        for _ in 0..2 {
+            let _ = mock
+                .chat(
+                    &http(),
+                    &request,
+                    "mock-model",
+                    &Credential::new(""),
+                    Duration::from_secs(1),
+                    Some(key),
+                )
+                .await;
+        }
+        mock.chat(
+            &http(),
+            &request,
+            "mock-model",
+            &Credential::new(""),
+            Duration::from_secs(1),
+            Some(key),
+        )
+        .await
+        .unwrap();
+
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 3);
+        for call in &calls {
+            assert_eq!(
+                call.idempotency_key.as_deref(),
+                Some(key),
+                "every retry of the same logical request must carry the same key, or the \
+                 provider cannot recognise them as one request"
+            );
+        }
     }
 
     #[tokio::test]
@@ -392,6 +469,7 @@ mod tests {
                 "mock-model",
                 &Credential::new(""),
                 Duration::from_secs(1),
+                None,
             )
             .await
             .unwrap();
@@ -419,6 +497,7 @@ mod tests {
             "mock-model",
             &Credential::new(""),
             Duration::from_secs(1),
+            None,
         )
         .await
         .unwrap();

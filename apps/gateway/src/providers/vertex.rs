@@ -331,29 +331,34 @@ impl Provider for VertexProvider {
         model: &str,
         credential: &Credential,
         timeout: Duration,
+        idempotency_key: Option<&str>,
     ) -> Result<NormalizedResponse> {
         let sa = Self::parse_credential(credential)?;
         let token = self.get_access_token(http, &sa).await?;
         let url = Self::url(credential, &sa, model, false);
 
-        let response = http
+        let mut request_builder = http
             .post(&url)
             .timeout(timeout)
             .bearer_auth(&token)
-            .json(&self.build_body(request, model))
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    AegisError::ProviderTimeout(timeout.as_secs())
-                } else {
-                    AegisError::Provider {
-                        provider: "vertex".to_string(),
-                        status: 502,
-                        message: e.to_string(),
-                    }
+            .json(&self.build_body(request, model));
+        // Vertex's generateContent has no documented idempotency mechanism, unlike
+        // OpenAI/Anthropic — sent anyway for uniformity across adapters and in case
+        // Google adds support; an unrecognised header is harmless.
+        if let Some(key) = idempotency_key {
+            request_builder = request_builder.header("Idempotency-Key", key);
+        }
+        let response = request_builder.send().await.map_err(|e| {
+            if e.is_timeout() {
+                AegisError::ProviderTimeout(timeout.as_secs())
+            } else {
+                AegisError::Provider {
+                    provider: "vertex".to_string(),
+                    status: 502,
+                    message: e.to_string(),
                 }
-            })?;
+            }
+        })?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
@@ -383,6 +388,7 @@ impl Provider for VertexProvider {
         model: &str,
         credential: &Credential,
         timeout: Duration,
+        idempotency_key: Option<&str>,
     ) -> Result<ChunkStream> {
         let sa = Self::parse_credential(credential)?;
         let token = self.get_access_token(http, &sa).await?;
@@ -392,7 +398,10 @@ impl Provider for VertexProvider {
             http,
             &url,
             self.build_body(request, model),
-            vec![("Authorization".to_string(), format!("Bearer {token}"))],
+            super::with_idempotency_key(
+                vec![("Authorization".to_string(), format!("Bearer {token}"))],
+                idempotency_key,
+            ),
             "vertex",
             timeout,
             parse_stream_chunk_free,

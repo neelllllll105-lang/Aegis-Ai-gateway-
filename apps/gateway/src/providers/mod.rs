@@ -115,6 +115,18 @@ pub trait Provider: Send + Sync {
     }
 
     /// Execute a non-streaming chat completion.
+    ///
+    /// `idempotency_key`, when the caller supplies one, is sent as an `Idempotency-Key`
+    /// header. OpenAI and Anthropic both honour it server-side: a retried request that
+    /// carries the same key as a prior attempt returns the prior attempt's result instead
+    /// of executing again. Without it, a request that times out on our side *after* the
+    /// provider actually finished has no way to be recognised as a duplicate, and the
+    /// automatic retry above this call bills the same logical request twice against our
+    /// own provider account — invisible to any customer, real against our own COGS.
+    /// Providers with no such mechanism (Gemini, most OpenAI-compatible aggregators)
+    /// simply receive and ignore an unrecognised header, so this is safe to send
+    /// unconditionally rather than gated per provider. Found in the enterprise readiness
+    /// audit.
     async fn chat(
         &self,
         http: &reqwest::Client,
@@ -122,6 +134,7 @@ pub trait Provider: Send + Sync {
         model: &str,
         credential: &Credential,
         timeout: Duration,
+        idempotency_key: Option<&str>,
     ) -> Result<NormalizedResponse> {
         let base = credential
             .base_url
@@ -133,7 +146,7 @@ pub trait Provider: Send + Sync {
             .post(&url)
             .timeout(timeout)
             .json(&self.build_body(request, model));
-        for (name, value) in self.auth_headers(credential) {
+        for (name, value) in with_idempotency_key(self.auth_headers(credential), idempotency_key) {
             builder = builder.header(name, value);
         }
 
@@ -172,6 +185,11 @@ pub trait Provider: Send + Sync {
     }
 
     /// Execute a streaming chat completion.
+    ///
+    /// See [`Provider::chat`]'s doc comment for what `idempotency_key` is for. It applies
+    /// here too: `open_stream_with_fallback` retries opening a stream exactly like
+    /// `call_with_retries` retries a non-streaming call, so the same double-billing risk
+    /// exists on this path.
     async fn chat_stream(
         &self,
         http: &reqwest::Client,
@@ -179,7 +197,23 @@ pub trait Provider: Send + Sync {
         model: &str,
         credential: &Credential,
         timeout: Duration,
+        idempotency_key: Option<&str>,
     ) -> Result<ChunkStream>;
+}
+
+/// Append an `Idempotency-Key` header when the caller supplied one.
+///
+/// One place for this rather than repeating the `if let Some` in every adapter's
+/// `chat_stream`, all of which build their headers the same way before calling
+/// [`openai::open_stream`].
+pub fn with_idempotency_key(
+    mut headers: Vec<(String, String)>,
+    idempotency_key: Option<&str>,
+) -> Vec<(String, String)> {
+    if let Some(key) = idempotency_key {
+        headers.push(("Idempotency-Key".to_string(), key.to_string()));
+    }
+    headers
 }
 
 /// Pull a human-readable message out of a provider error body.

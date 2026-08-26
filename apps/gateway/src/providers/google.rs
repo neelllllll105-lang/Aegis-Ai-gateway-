@@ -284,6 +284,7 @@ impl Provider for GoogleProvider {
         model: &str,
         credential: &Credential,
         timeout: Duration,
+        idempotency_key: Option<&str>,
     ) -> Result<ChunkStream> {
         let base = credential
             .base_url
@@ -298,7 +299,7 @@ impl Provider for GoogleProvider {
             http,
             &url,
             self.build_body(request, model),
-            self.auth_headers(credential),
+            super::with_idempotency_key(self.auth_headers(credential), idempotency_key),
             "google",
             timeout,
             parse_stream_chunk,

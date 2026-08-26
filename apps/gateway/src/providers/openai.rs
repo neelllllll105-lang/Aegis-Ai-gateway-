@@ -317,6 +317,7 @@ impl Provider for OpenAiProvider {
         model: &str,
         credential: &Credential,
         timeout: Duration,
+        idempotency_key: Option<&str>,
     ) -> Result<ChunkStream> {
         let base = credential
             .base_url
@@ -331,7 +332,7 @@ impl Provider for OpenAiProvider {
             http,
             &url,
             body,
-            self.auth_headers(credential),
+            super::with_idempotency_key(self.auth_headers(credential), idempotency_key),
             "openai",
             timeout,
             parse_stream_chunk,
