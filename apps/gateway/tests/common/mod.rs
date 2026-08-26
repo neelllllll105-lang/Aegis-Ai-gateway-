@@ -18,6 +18,7 @@
 #![allow(dead_code)]
 
 use aegis_gateway::db::pool;
+use aegis_gateway::store::RedisStore;
 use aegis_gateway::AppState;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -47,6 +48,34 @@ pub async fn test_pool() -> Option<PgPool> {
         .expect("usage partitions must exist");
 
     Some(pool)
+}
+
+/// Connect to a real Redis instance, or return `None` when one is not configured.
+///
+/// The counterpart to [`test_pool`] for exactly the gap the enterprise readiness audit
+/// found: CI has provisioned a real Redis service container and set
+/// `AEGIS_TEST_REDIS_URL` since this project's CI was written, and until this helper
+/// existed, no test anywhere read that variable — every "atomic under concurrency" proof
+/// (the rate limiter, the scheduler's distributed claim, the budget reservation) had only
+/// ever run against `MemoryStore`, whose atomicity comes from a single in-process mutex
+/// and says nothing about whether the equivalent Lua scripts and `INCRBY` calls are
+/// genuinely atomic against a real Redis server.
+pub async fn test_redis_store() -> Option<RedisStore> {
+    let url = std::env::var("AEGIS_TEST_REDIS_URL").ok()?;
+    match RedisStore::connect(&url).await {
+        Ok(store) => Some(store),
+        // A configured-but-unreachable Redis is a real failure, not a skip — mirrors
+        // test_pool's identical reasoning for AEGIS_TEST_DATABASE_URL.
+        Err(e) => panic!("AEGIS_TEST_REDIS_URL is set but unreachable: {e}"),
+    }
+}
+
+/// Announce a Redis-specific skip.
+pub fn skip_redis(test_name: &str) {
+    eprintln!(
+        "SKIPPED {test_name}: set AEGIS_TEST_REDIS_URL to run this test against real Redis \
+         (CI always does)"
+    );
 }
 
 /// Announce a skip so it is visible in test output.
@@ -146,4 +175,10 @@ pub async fn setup() -> Option<(AppState, PgPool)> {
 }
 
 /// Re-export so tests need only one import.
+///
+/// Not every integration test binary that pulls in `common` uses this one — `#![allow(
+/// dead_code)]` above covers unused functions, but not an unused `pub use`, so it needs
+/// its own allow rather than tripping `-D warnings` in whichever binary happens not to
+/// touch `repo` directly.
+#[allow(unused_imports)]
 pub use aegis_gateway::db::repo;
