@@ -111,6 +111,14 @@ pub struct Config {
     pub cache_ttl: Duration,
     /// Minimum cosine similarity for a semantic cache hit. Part 5 stage [5b].
     pub semantic_similarity_threshold: f32,
+    /// How long a query that has been asked more than once stays in the durable
+    /// (Postgres, encrypted) cache tier, sliding on every further hit.
+    ///
+    /// Deliberately separate from `cache_ttl`: the hot Redis tier is short and cheap so a
+    /// one-off prompt doesn't linger; this tier exists only for queries the hot tier has
+    /// already proven repeat, so it can safely last much longer without storing anything
+    /// that was only ever asked once. See `docs/adr/0008-tiered-durable-cache.md`.
+    pub durable_cache_ttl_days: i64,
 
     /// Free-tier monthly request allowance.
     pub free_tier_monthly_requests: u64,
@@ -166,6 +174,7 @@ impl Config {
             default_rate_limit_per_minute: num("AEGIS_DEFAULT_RATE_LIMIT", 60)?,
             cache_ttl: Duration::from_secs(num("AEGIS_CACHE_TTL_SECS", 86_400)?),
             semantic_similarity_threshold: fnum("AEGIS_SEMANTIC_THRESHOLD", 0.95)?,
+            durable_cache_ttl_days: num("AEGIS_DURABLE_CACHE_TTL_DAYS", 30)?,
 
             free_tier_monthly_requests: num("AEGIS_FREE_TIER_MONTHLY_REQUESTS", 10_000)?,
         };
@@ -201,6 +210,7 @@ impl Config {
             default_rate_limit_per_minute: 60,
             cache_ttl: Duration::from_secs(86_400),
             semantic_similarity_threshold: 0.95,
+            durable_cache_ttl_days: 30,
             free_tier_monthly_requests: 10_000,
         }
     }
@@ -210,6 +220,11 @@ impl Config {
         if !(0.0..=1.0).contains(&self.semantic_similarity_threshold) {
             return Err(AegisError::Config(
                 "AEGIS_SEMANTIC_THRESHOLD must be between 0.0 and 1.0".into(),
+            ));
+        }
+        if self.durable_cache_ttl_days < 1 {
+            return Err(AegisError::Config(
+                "AEGIS_DURABLE_CACHE_TTL_DAYS must be at least 1".into(),
             ));
         }
         if self.environment.is_production_like() {

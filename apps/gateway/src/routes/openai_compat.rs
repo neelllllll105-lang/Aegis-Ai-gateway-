@@ -18,7 +18,10 @@
 //! we display our own overhead and never game it, so the number on the header is the same
 //! one on the usage record.
 
+use crate::cache::durable::DurableCache;
 use crate::cache::exact::ExactCache;
+use crate::cache::fingerprint;
+use crate::cache::semantic::{self, SemanticCache};
 use crate::engine::classifier::Classifier;
 use crate::engine::compressor::{self, CompressorConfig};
 use crate::engine::fallback::{self, FallbackChain};
@@ -26,6 +29,7 @@ use crate::engine::policy::RoutingPolicy;
 use crate::engine::router::{Router, RoutingInputs};
 use crate::enterprise::residency;
 use crate::error::{AegisError, Result};
+use crate::metering::pricing::PricingTable;
 use crate::metering::savings::SavingsBreakdown;
 use crate::metering::usage::{self, UsageEvent};
 use crate::middleware::auth::{self, AuthContext};
@@ -201,6 +205,50 @@ impl OverheadClock {
     }
 }
 
+/// Build the outcome for any cache hit — hot tier, durable tier, or semantic — and record
+/// its savings metric.
+///
+/// The three tiers share this because a hit costs nothing regardless of which one served
+/// it: the entire baseline becomes the saving, priced through `baseline_of` so a cached
+/// response that itself used the *provider's* own prompt cache reports the saving the
+/// customer actually avoided rather than an inflated full-rate figure.
+#[allow(clippy::too_many_arguments)]
+fn cache_hit_outcome(
+    state: &AppState,
+    request_id: Uuid,
+    requested_model: String,
+    response: NormalizedResponse,
+    served_model: String,
+    savings_share_bp: u32,
+    outcome: CacheOutcome,
+    explanation: String,
+    clock: &OverheadClock,
+) -> PipelineOutcome {
+    let pricing: &PricingTable = &state.pricing;
+    let baseline = pricing.baseline_of(&requested_model, &response.usage, MicroCents::ZERO);
+    let savings = SavingsBreakdown::cache_hit(baseline, savings_share_bp);
+
+    state.metrics.record_cache(outcome.as_str());
+    state.metrics.record_savings(savings.gross_savings.as_i64());
+
+    PipelineOutcome {
+        request_id,
+        tokens: response.usage,
+        served_model,
+        requested_model,
+        provider: "cache".to_string(),
+        response,
+        savings,
+        cache: outcome,
+        routing_reason: RoutingReason::Cache,
+        complexity_score: None,
+        gateway_overhead_ms: clock.overhead_ms(),
+        total_latency_ms: clock.total_ms(),
+        tokens_saved_by_compression: 0,
+        explanation: vec![explanation],
+    }
+}
+
 /// Run the full pipeline for one request.
 pub async fn execute(
     state: &AppState,
@@ -244,46 +292,161 @@ pub async fn execute_with_headroom(
         });
     }
 
-    // ---- [5a] Exact cache --------------------------------------------------------
+    // ---- [5a] Exact cache: hot tier (Redis) ---------------------------------------
+    // Semantic caching (and the durable tier's promotion) is a Pro/Enterprise feature —
+    // MASTER_BUILD.md lists it under the Pro plan, and free-tier traffic already runs on
+    // Aegis's own pooled provider keys, so there is no revenue case for spending extra
+    // storage and embedding calls to optimise it further.
+    let smart_caching_enabled = auth.plan != "free";
     let cache = ExactCache::new(state.store.as_ref(), state.config.cache_ttl);
+    let request_fingerprint = fingerprint::compute(&request, auth.org_id);
+
     if let Some(hit) = cache
         .get(&request, auth.org_id, auth.zero_retention)
         .await
         .unwrap_or(None)
     {
-        state.metrics.record_cache("exact");
+        // This fingerprint has now been asked at least twice — promote it to the durable
+        // tier so a repeat after the hot tier's TTL expires still costs nothing. Best
+        // effort: a promotion failure must never turn a free cache hit into a failed
+        // request.
+        if smart_caching_enabled {
+            if let Some(pool) = state.db.as_ref() {
+                let _ = DurableCache::new(
+                    pool,
+                    &state.config.master_key,
+                    state.config.durable_cache_ttl_days,
+                )
+                .promote(
+                    request_fingerprint.as_str(),
+                    auth.org_id,
+                    auth.zero_retention,
+                    &hit.response,
+                    &hit.served_model,
+                )
+                .await;
+            }
+        }
 
-        // A cache hit costs nothing, so the entire baseline is a saving. Priced through
-        // `cost_of` so a cached response whose original request used the *provider's*
-        // prompt cache reports the saving the customer actually avoided, not an inflated
-        // full-rate figure.
-        let baseline =
-            state
-                .pricing
-                .baseline_of(&requested_model, &hit.response.usage, MicroCents::ZERO);
-        let savings = SavingsBreakdown::cache_hit(baseline, auth.savings_share_bp);
-
-        state.metrics.record_savings(savings.gross_savings.as_i64());
-
-        return Ok(PipelineOutcome {
+        return Ok(cache_hit_outcome(
+            state,
             request_id,
-            served_model: hit.served_model.clone(),
             requested_model,
-            provider: "cache".to_string(),
-            tokens: hit.response.usage,
-            response: hit.response,
-            savings,
-            cache: CacheOutcome::Exact,
-            routing_reason: RoutingReason::Cache,
-            complexity_score: None,
-            gateway_overhead_ms: clock.overhead_ms(),
-            total_latency_ms: clock.total_ms(),
-            tokens_saved_by_compression: 0,
-            explanation: vec![format!(
-                "served from Aegis's exact-match cache — an identical request was answered                  within the cache window, so no provider was called and this request cost                  nothing"
-            )],
-        });
+            hit.response,
+            hit.served_model,
+            auth.savings_share_bp,
+            CacheOutcome::Exact,
+            "served from Aegis's exact-match cache — an identical request was answered \
+             within the cache window, so no provider was called and this request cost \
+             nothing"
+                .to_string(),
+            &clock,
+        ));
     }
+
+    // ---- [5a-warm] Exact cache: durable tier (Postgres, encrypted) ----------------
+    // Only reached once the hot tier has missed. A hit here means the hot tier's TTL
+    // expired on a query that was proven, by an earlier promotion, to genuinely repeat.
+    if smart_caching_enabled && !auth.zero_retention {
+        if let Some(pool) = state.db.as_ref() {
+            let durable = DurableCache::new(
+                pool,
+                &state.config.master_key,
+                state.config.durable_cache_ttl_days,
+            );
+            if let Ok(Some(hit)) = durable
+                .get(
+                    request_fingerprint.as_str(),
+                    auth.org_id,
+                    auth.zero_retention,
+                )
+                .await
+            {
+                // Re-populate the hot tier so the *next* repeat is served in 0.1ms again
+                // instead of a database round trip.
+                let _ = cache
+                    .put(
+                        &request,
+                        auth.org_id,
+                        auth.zero_retention,
+                        &hit.response,
+                        &hit.served_model,
+                    )
+                    .await;
+
+                return Ok(cache_hit_outcome(
+                    state,
+                    request_id,
+                    requested_model,
+                    hit.response,
+                    hit.served_model,
+                    auth.savings_share_bp,
+                    CacheOutcome::Exact,
+                    "served from Aegis's durable cache — this exact request has been asked \
+                     more than once before, so it's kept encrypted past the usual cache \
+                     window, and this request cost nothing"
+                        .to_string(),
+                    &clock,
+                ));
+            }
+        }
+    }
+
+    // ---- [5b] Semantic cache -------------------------------------------------------
+    // Only reached once both exact tiers have missed. Catches a *reworded* repeat of a
+    // question already answered — "how do I enable X" finding "how do I turn on X" — which
+    // no hash-based fingerprint ever can. The embedding is computed at most once per
+    // request: reused below to populate the semantic store on a true miss, so a novel
+    // question costs one embedding call, not two.
+    let mut request_embedding: Option<Vec<f32>> = None;
+    if smart_caching_enabled
+        && !auth.zero_retention
+        && fingerprint::cacheability(&request, auth.zero_retention).is_cacheable()
+    {
+        let text = semantic::embedding_text(&request);
+        if let Some(embedding) = state.embedder.embed(&text).await {
+            let semantic_cache = SemanticCache::new(
+                state.semantic_store.as_ref(),
+                state.config.semantic_similarity_threshold,
+            );
+            if let Ok(Some(hit)) = semantic_cache
+                .get(&embedding, auth.org_id, auth.zero_retention)
+                .await
+            {
+                // Now that we know these two different wordings mean the same thing,
+                // cache *this* wording's exact fingerprint too — the next repeat of this
+                // specific phrasing skips the embedding call entirely.
+                let _ = cache
+                    .put(
+                        &request,
+                        auth.org_id,
+                        auth.zero_retention,
+                        &hit.entry.response,
+                        &hit.entry.served_model,
+                    )
+                    .await;
+
+                return Ok(cache_hit_outcome(
+                    state,
+                    request_id,
+                    requested_model,
+                    hit.entry.response,
+                    hit.entry.served_model,
+                    auth.savings_share_bp,
+                    CacheOutcome::Semantic,
+                    format!(
+                        "served from Aegis's semantic cache — a differently-worded version \
+                         of this request was already answered ({:.0}% similar), so no \
+                         provider was called and this request cost nothing",
+                        hit.similarity * 100.0
+                    ),
+                    &clock,
+                ));
+            }
+            request_embedding = Some(embedding);
+        }
+    }
+
     state.metrics.record_cache(if auth.zero_retention {
         "skipped"
     } else {
@@ -365,7 +528,7 @@ pub async fn execute_with_headroom(
         );
     }
 
-    // ---- [5a] Populate the cache --------------------------------------------------
+    // ---- [5a] Populate the hot cache -----------------------------------------------
     let _ = cache
         .put(
             &request,
@@ -375,6 +538,25 @@ pub async fn execute_with_headroom(
             &served_model,
         )
         .await;
+
+    // ---- [5b] Populate the semantic cache -------------------------------------------
+    // Only when we already paid for an embedding above while checking for a semantic hit
+    // — never a second embedding call for the same request.
+    if let Some(embedding) = request_embedding {
+        let semantic_cache = SemanticCache::new(
+            state.semantic_store.as_ref(),
+            state.config.semantic_similarity_threshold,
+        );
+        let _ = semantic_cache
+            .put(
+                embedding,
+                auth.org_id,
+                auth.zero_retention,
+                &response,
+                &served_model,
+            )
+            .await;
+    }
 
     // ---- [7] Record the outcome for the bandit ------------------------------------
     let classification = router.classify(&request);
@@ -1748,6 +1930,180 @@ mod tests {
             1,
             "a cache hit must not reach the provider"
         );
+    }
+
+    #[tokio::test]
+    async fn a_differently_worded_repeat_hits_the_semantic_cache() {
+        use crate::cache::embed::ConstantEmbedder;
+
+        let mock = Arc::new(MockProvider::returning("Paris"));
+        let state = AppState {
+            embedder: Arc::new(ConstantEmbedder(vec![1.0, 0.0, 0.0])),
+            ..test_state(Arc::clone(&mock))
+        };
+        let auth = auth_context("pro");
+
+        let first = execute(
+            &state,
+            &auth,
+            NormalizedRequest::simple("mock/mock-premium", "What is the capital of France?"),
+            RoutingHint::Auto,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.cache, CacheOutcome::Miss);
+        assert_eq!(mock.call_count(), 1);
+
+        // A completely different wording of the same request. The exact-match cache
+        // cannot catch this — different fingerprint entirely — only the semantic one can.
+        let second = execute(
+            &state,
+            &auth,
+            NormalizedRequest::simple(
+                "mock/mock-premium",
+                "Which city is the capital city of the country France?",
+            ),
+            RoutingHint::Auto,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.cache, CacheOutcome::Semantic);
+        assert_eq!(second.savings.actual_cost, MicroCents::ZERO);
+        assert!(second.savings.gross_savings > MicroCents::ZERO);
+        assert_eq!(
+            mock.call_count(),
+            1,
+            "a semantic hit must not reach the provider"
+        );
+
+        // A third repeat of the *second* wording, word for word, should now hit the exact
+        // cache directly — the semantic hit above is supposed to have promoted it.
+        let third = execute(
+            &state,
+            &auth,
+            NormalizedRequest::simple(
+                "mock/mock-premium",
+                "Which city is the capital city of the country France?",
+            ),
+            RoutingHint::Auto,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            third.cache,
+            CacheOutcome::Exact,
+            "a semantic hit's own wording should be exact-cached for next time"
+        );
+    }
+
+    #[tokio::test]
+    async fn free_tier_never_gets_semantic_caching() {
+        use crate::cache::embed::ConstantEmbedder;
+
+        // Same constant embedder as the test above — if the plan gate is doing its job,
+        // it never even gets called, so a "hit" here would prove the gate is missing.
+        let mock = Arc::new(MockProvider::returning("Paris"));
+        let state = AppState {
+            embedder: Arc::new(ConstantEmbedder(vec![1.0, 0.0, 0.0])),
+            ..test_state(Arc::clone(&mock))
+        };
+        let auth = auth_context("free");
+
+        execute(
+            &state,
+            &auth,
+            NormalizedRequest::simple("mock/mock-premium", "What is the capital of France?"),
+            RoutingHint::Auto,
+        )
+        .await
+        .unwrap();
+
+        let second = execute(
+            &state,
+            &auth,
+            NormalizedRequest::simple(
+                "mock/mock-premium",
+                "Which city is the capital city of the country France?",
+            ),
+            RoutingHint::Auto,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            second.cache,
+            CacheOutcome::Miss,
+            "free-tier traffic must not get semantic caching"
+        );
+        assert_eq!(mock.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_zero_retention_org_never_gets_a_semantic_hit_even_with_an_embedder_configured() {
+        use crate::cache::embed::ConstantEmbedder;
+
+        let mock = Arc::new(MockProvider::returning("Paris"));
+        let state = AppState {
+            embedder: Arc::new(ConstantEmbedder(vec![1.0, 0.0, 0.0])),
+            ..test_state(Arc::clone(&mock))
+        };
+        let mut auth = auth_context("pro");
+        auth.zero_retention = true;
+
+        execute(
+            &state,
+            &auth,
+            NormalizedRequest::simple("mock/mock-premium", "What is the capital of France?"),
+            RoutingHint::Auto,
+        )
+        .await
+        .unwrap();
+
+        let second = execute(
+            &state,
+            &auth,
+            NormalizedRequest::simple(
+                "mock/mock-premium",
+                "Which city is the capital city of the country France?",
+            ),
+            RoutingHint::Auto,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.cache, CacheOutcome::Miss);
+    }
+
+    #[tokio::test]
+    async fn a_genuinely_novel_request_never_semantic_hits_an_unrelated_one() {
+        use crate::cache::embed::DeterministicEmbedder;
+
+        // Unlike the constant-vector tests above, this uses a real per-text embedder —
+        // two unrelated questions must not collide.
+        let mock = Arc::new(MockProvider::returning("answer"));
+        let state = AppState {
+            embedder: Arc::new(DeterministicEmbedder),
+            ..test_state(Arc::clone(&mock))
+        };
+        let auth = auth_context("pro");
+
+        execute(
+            &state,
+            &auth,
+            NormalizedRequest::simple("mock/mock-premium", "What is the capital of France?"),
+            RoutingHint::Auto,
+        )
+        .await
+        .unwrap();
+
+        let second = execute(
+            &state,
+            &auth,
+            NormalizedRequest::simple("mock/mock-premium", "Write me a haiku about autumn."),
+            RoutingHint::Auto,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.cache, CacheOutcome::Miss);
+        assert_eq!(mock.call_count(), 2);
     }
 
     #[tokio::test]

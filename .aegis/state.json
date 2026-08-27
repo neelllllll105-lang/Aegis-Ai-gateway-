@@ -2,9 +2,9 @@
   "$comment": "Machine-readable project state. The human-readable companion is MEMORY.md; keep the two in agreement. Validated by scripts/check-memory-freshness.sh in CI.",
   "schema_version": 1,
   "project": "aegis",
-  "last_updated": "2026-08-26",
+  "last_updated": "2026-08-27",
   "current_phase": 2,
-  "next_task": "Session 6 closed nearly every P0/P1/P2 finding from the session 5 enterprise-readiness audit with real code + tests (see fixed_this_session). What remains: verify against live infrastructure (Docker/Redis/Postgres/Qdrant, still unconfirmed), get real provider keys (Gemini, Vertex GCP service account) for a live end-to-end completion, run the k6 load test against a deployed instance, run the restore drill, close the 9 remaining UNVERIFIED pricing rows, and decide the semantic-cache wiring tradeoff (embedding-call latency on every cache-miss request) with the user before building it. Full detail: MEMORY.md 'Next Steps'.",
+  "next_task": "Session 6 closed nearly every P0/P1/P2 finding from the session 5 enterprise-readiness audit. Session 7 closed the last 'built but not wired' item: semantic caching, plus a new third (durable, encrypted) cache tier bundled with it -- see docs/adr/0008-tiered-durable-cache.md. What remains is entirely infrastructure verification: Docker/Redis/Postgres/Qdrant still unconfirmed on this machine, real provider keys (Gemini, Vertex GCP service account) needed for a live end-to-end completion including one real embedding call, the k6 load test against a deployed instance, the restore drill, and the 9 remaining UNVERIFIED pricing rows. Full detail: MEMORY.md 'Next Steps'.",
   "audit": {
     "id": "session-5-enterprise-readiness-audit",
     "date": "2026-08-25",
@@ -45,11 +45,8 @@
     {
       "id": 3,
       "name": "Optimization engine",
-      "status": "in_progress",
-      "evidence": "Classifier 98% on 100 labelled fixtures, router with graded provider health + bandit-informed selection + human-readable routing explanations (session 6), exact cache, compressor, fallback chain now populated with real cross-provider alternates and streaming resilience (session 6). verify-phase.sh 3 passes.",
-      "remaining": [
-        "Wire cache/semantic.rs into the pipeline -- deliberately deferred again this session. Still a product decision (adds embedding-API latency to every cache-miss request), not a pure bug fix -- needs a scoping conversation with the user before building."
-      ]
+      "status": "complete",
+      "evidence": "Classifier 98% on 100 labelled fixtures, router with graded provider health + bandit-informed selection + human-readable routing explanations (session 6), exact cache, compressor, fallback chain populated with real cross-provider alternates and streaming resilience (session 6). Session 7: semantic cache wired into the live pipeline behind a new cache::embed::Embedder trait (Pro/Enterprise only, embedding on Aegis's own pooled key), plus a new third durable/encrypted cache tier not in the original MASTER_BUILD.md spec -- see docs/adr/0008-tiered-durable-cache.md. verify-phase.sh 3 passes."
     },
     {
       "id": 4,
@@ -155,14 +152,19 @@
     {"id": "admin-audit-log-wrong-org-scope", "summary": "GET /api/admin/audit now takes an org_id query parameter (defaults to caller's own org); previously always read the calling admin's own org, which is almost never the customer org a support investigation needs."},
     {"id": "customer-audit-export-missing", "summary": "GET /api/audit-log.jsonl added -- require_reader-gated, JSONL output -- where no customer-facing audit export existed at all despite the compliance whitepaper describing one."}
   ],
+  "fixed_session_7": [
+    {"id": "semantic-cache-never-wired", "summary": "cache/semantic.rs was fully built since session 1 and never called from the live pipeline (flagged by session 3's and session 5's audits, deliberately deferred as a product decision). Wired into routes/openai_compat.rs::execute_with_headroom behind a new cache::embed::Embedder trait (embedding on Aegis's own pooled provider credential, never a customer's BYOK key), gated to Pro/Enterprise plans. A semantic hit also promotes its own wording into the exact-match tier."},
+    {"id": "no-durable-cache-tier", "summary": "New, beyond the original audit scope -- the founder asked directly for a way to keep cost savings from caching without keeping content around indefinitely. Added cache::durable::DurableCache: a fingerprint the hot Redis tier has already proven repeats gets promoted to an encrypted Postgres row (AES-256-GCM, per-tenant HKDF key, same shape as provider_credentials), sliding 30-day TTL, purged on the existing 04:00 UTC scheduler window. See docs/adr/0008-tiered-durable-cache.md."}
+  ],
   "verification": {
-    "unit_tests_lib": 762,
+    "unit_tests_lib": 774,
     "unit_tests_lib_ignored": 0,
     "unit_tests_passing": true,
-    "full_test_suite_total": 796,
-    "integration_tests_written": 20,
+    "full_test_suite_total": 814,
+    "integration_tests_written": 26,
     "integration_tests_run_locally": false,
     "integration_tests_run_against_real_redis": false,
+    "integration_tests_run_against_real_postgres": false,
     "route_surface_test_passing": true,
     "concurrency_overhead_test_passing": true,
     "budget_race_reproduced_historically": true,
@@ -180,7 +182,7 @@
     "vertex_ai_live_verified": false,
     "docker_functional_on_build_machine": false,
     "redis_concurrency_tests_run_against_real_redis": false,
-    "phase_tasks_complete": "67/69",
+    "phase_tasks_complete": "68/69",
     "providers_registered": 10
   }
 }

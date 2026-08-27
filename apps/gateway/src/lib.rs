@@ -76,6 +76,12 @@ pub struct AppState {
     pub shared_pool: Arc<SharedKeyPool>,
     /// Shared HTTP client — connection pooling across every upstream call.
     pub http: reqwest::Client,
+    /// Vector storage for the semantic cache (Qdrant in production, in-memory in
+    /// development) — pipeline stage [5b].
+    pub semantic_store: Arc<dyn cache::semantic::VectorStore>,
+    /// Generates embeddings for semantic-cache lookups, on Aegis's own pooled credential
+    /// rather than a customer's BYOK key. See `cache::embed` for why.
+    pub embedder: Arc<dyn cache::embed::Embedder>,
     /// Process start time, for uptime reporting.
     pub started_at: Instant,
 }
@@ -120,6 +126,10 @@ impl AppState {
             bandit: Arc::new(RoutingBandit::new()),
             shared_pool: Arc::new(SharedKeyPool::new()),
             http: reqwest::Client::new(),
+            semantic_store: Arc::new(cache::semantic::MemoryVectorStore::new()),
+            // Semantic caching is off by default in tests so every pre-existing test's
+            // behaviour is unchanged; a test that wants to exercise it swaps this field.
+            embedder: Arc::new(cache::embed::NullEmbedder),
             started_at: Instant::now(),
         }
     }

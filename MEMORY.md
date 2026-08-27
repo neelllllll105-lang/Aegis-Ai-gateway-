@@ -27,7 +27,7 @@ First commands:
 
 ```bash
 bash scripts/status.sh          # what the repo actually contains right now
-cargo test --lib                # 762 passing, 0 failing, 0 ignored, ~3s, no database needed
+cargo test --lib                # 774 passing, 0 failing, 0 ignored, ~5s, no database needed
 bash scripts/verify-phase.sh 3  # automated acceptance checks for a phase
 ```
 
@@ -55,7 +55,7 @@ platform-admin control split, plan/billing mechanics, and how self-hosted licens
 | 0 | Foundation: repo, CI, dev stack, schema, config | 🟢 complete |
 | 1 | Auth, keys, orgs | 🟢 complete; TOTP now fully enforced end to end (session 6) |
 | 2 | Core gateway (proxy + metering) | 🟡 budget check is now atomic under concurrency — reserve-then-true-up, proven against `MemoryStore` and real Redis (fixed session 6, was found session 5). Only remaining gap: 9 pricing rows still unverified — a data task, not a code gap |
-| 3 | Optimization engine | 🟡 exact cache/router/classifier/compressor complete; fallback chain now populated with real cross-provider alternates, streaming has full retry/fallback/health-tracking, routing is health- and bandit-informed (all fixed session 6). Semantic cache remains deliberately unwired (session 3) — a scoped product decision, not a bug |
+| 3 | Optimization engine | 🟢 complete; fallback chain populated with real cross-provider alternates, streaming has full retry/fallback/health-tracking, routing is health- and bandit-informed (session 6). Semantic cache is now wired in too (session 7), plus a new third cache tier not in the original spec — see ADR-008 |
 | 4 | Dashboards, billing, launch prep | 🟡 built; budget threshold alerts now actually deliver (fixed session 6); k6 load test against a deployed instance still not executed (infra-blocked, see below) |
 | 5 | Launch + provider expansion | 🟢 complete; Vertex AI added session 5 as a tenth provider (`docs/adr/0007-vertex-ai-jwt-signing.md`), not yet verified against a real GCP project |
 | 6 | Enterprise readiness | 🟡 SSO can now functionally complete (OIDC only — SAML explicitly out of scope), TOTP fully enforced, SCIM tokens self-service, admin audit log correctly org-scoped, customer-facing audit export added (all fixed session 6). Remaining: never verified against a real Okta/Entra tenant |
@@ -63,30 +63,34 @@ platform-admin control split, plan/billing mechanics, and how self-hosted licens
 
 Legend: ⚪ not started · 🟡 in progress · 🟢 complete · 🔴 blocked
 
-> `scripts/check-memory-freshness.sh` will warn that phase 5 shows complete while phases 2
-> and 3 do not, since phases are meant to be strictly ordered. **This is known and
-> intentional, not an oversight:** phases 2 and 3 were genuinely complete when phase 5 was
-> built — they were only downgraded retroactively, after audits found gaps that existed
-> all along but had gone unnoticed (semantic cache never wired, session 3; the budget-check
-> race and the fallback chain's hardcoded-empty alternates, session 5). Nothing in phase 5
-> depends on any of these — Vertex AI (added session 5, also phase 5) uses the same
-> pipeline stages as every other provider and inherits both gaps equally, it didn't
-> introduce either. Phase 4's remaining item (P4.8, the k6 load test) is similarly pure
-> infrastructure execution with no dependency on anything after it. The warning is correct
-> to flag all of this; this note is the confirmation it asks for.
+> `scripts/check-memory-freshness.sh` will warn that phases 3 and 5 show complete while
+> phase 2 does not, since phases are meant to be strictly ordered. **This is known and
+> intentional, not an oversight:** phases 2, 3, and 5 were all genuinely complete when
+> phase 5 was built — phases 2 and 3 were only downgraded retroactively, after audits found
+> gaps that existed all along but had gone unnoticed (semantic cache never wired, session
+> 3; the budget-check race and the fallback chain's hardcoded-empty alternates, session 5),
+> and both have since been re-closed with real fixes (session 6 for phase 2's budget race
+> and phase 3's fallback chain; session 7 for phase 3's semantic cache, the last of the
+> three). Nothing in phase 5 depends on any of these — Vertex AI (added session 5, also
+> phase 5) uses the same pipeline stages as every other provider and inherits none of the
+> gaps that mattered. Phase 4's remaining item (P4.8, the k6 load test) is similarly pure
+> infrastructure execution with no dependency on anything after it. Phase 2's own remaining
+> item (9 unverified pricing rows) is data verification, not a code dependency, so it does
+> not block anything downstream either. The warning is correct to flag the ordering; this
+> note is the confirmation it asks for.
 
-**67 of 69 tasks across all eight phases are checked off in `docs/PHASES.md`.** (Was 68/69
+**68 of 69 tasks across all eight phases are checked off in `docs/PHASES.md`.** (Was 68/69
 after session 2; a session 3 audit unchecked three that had been marked done in error —
 semantic cache, TOTP, and bandit-informed routing. A session 5 enterprise-readiness audit
 unchecked two more — the fallback chain and SSO — for the same reason: implemented and
 tested in isolation, but not delivering the capability the task line names once you trace
 where it's actually called from. **Session 6 fixed and re-checked four of those five**
 (fallback chain, TOTP, SSO for OIDC, bandit-informed routing) with real code and tests, not
-by editing the checkbox — see the Session 6 entry in the Session Log below for exactly what
-changed in each case.) Two items remain unchecked: **P3.5** (semantic cache — still
-deliberately unwired, a scoped product decision about embedding-call latency, not a bug)
-and **P4.8** (the k6 load test — pure infrastructure execution, blocked on a deployed
-instance this machine does not have).
+by editing the checkbox. **Session 7 closed the last one**: semantic caching, once the
+founder made the product call it had been waiting on — see ADR-008 for the design, which
+went beyond the original task line and added a third cache tier along with it.) One item
+remains unchecked: **P4.8** (the k6 load test — pure infrastructure execution, blocked on
+a deployed instance this machine does not have).
 
 Detail with per-criterion evidence: `docs/PHASES.md`. Machine-readable: `.aegis/state.json`.
 
@@ -185,13 +189,32 @@ before building it.
 
 ## What Actually Works — Verified
 
-`cargo test --lib` → **762 passing, 0 failing, 0 ignored** (the session-5 budget-race
+`cargo test --lib` → **774 passing, 0 failing, 0 ignored** (the session-5 budget-race
 `#[ignore]`d proof no longer exists as a documented-bypass — it was replaced by a passing
 proof-of-fix, `concurrent_requests_cannot_overshoot_a_hard_budget`, see session 6 below).
-Full `cargo test` (lib + integration binaries) → **796 passing, 0 failing, 0 ignored**.
-`clippy --all-targets -D warnings` clean. `cargo fmt --check` clean. Dashboard:
-`eslint . && check-design-tokens.mjs` clean, `next build` produces 23 static routes with no
-errors.
+Full `cargo test` (lib + integration binaries, including a new `tests/durable_cache.rs`) →
+**814 passing, 0 failing, 0 ignored**. `clippy --all-targets -D warnings` clean. `cargo fmt
+--check` clean. Dashboard: `eslint . && check-design-tokens.mjs` clean, `next build`
+produces 23 static routes with no errors.
+
+Executed and confirmed by hand session 7:
+
+- **A differently-worded repeat of a cached question is now actually served from cache,
+  not re-billed.** `a_differently_worded_repeat_hits_the_semantic_cache` proves the full
+  chain: miss → provider call → second, unrelated-looking wording → semantic hit, zero
+  cost, zero provider calls → the *same* wording asked a third time hits the exact tier
+  directly (proving the promote-on-semantic-hit optimization actually fires). A companion
+  test with a real per-text embedder (not a fixed test vector) proves two genuinely
+  unrelated questions never collide.
+- **Free-tier and zero-retention orgs are structurally excluded**, not just told not to
+  use it — `free_tier_never_gets_semantic_caching` and
+  `a_zero_retention_org_never_gets_a_semantic_hit_even_with_an_embedder_configured` both
+  configure an embedder that *would* produce a hit and prove the plan/retention gate stops
+  it before the embedder is ever consulted.
+- **The durable tier's tenant isolation, encryption round trip, sliding expiry, and purge
+  job were each proven against a real Postgres schema**, not just the encryption math in
+  isolation — `tests/durable_cache.rs`, 6 tests, gated on `AEGIS_TEST_DATABASE_URL`,
+  confirmed to compile and skip correctly here (Docker still unavailable on this machine).
 
 Executed and confirmed by hand this session (session 6):
 
@@ -487,15 +510,15 @@ tests. Full detail in the Session Log below and the audit artifact.
 ## Known Limitations (be honest about these)
 
 0. **Built but not wired — found by an explicit audit in session 3, most of it closed by
-   session 6.** Each row below was fully implemented with its own passing unit tests, but
-   nothing in the live request path called it — a materially worse situation than "not
-   started," since the tests gave false confidence the feature worked end to end. Six of
-   the seven original findings are now fixed (real code + tests, this session); one remains
-   a deliberate, scoped product decision rather than an oversight.
+   sessions 6-7.** Each row below was fully implemented with its own passing unit tests,
+   but nothing in the live request path called it — a materially worse situation than "not
+   started," since the tests gave false confidence the feature worked end to end. **All
+   seven of the original findings are now fixed**, real code and tests, no exceptions
+   remaining in this table.
 
    | Feature | Status |
    |---|---|
-   | **Semantic cache** | **Still deliberately unwired.** `cache/semantic.rs`, 624 lines, 15 tests, a real Qdrant-backed `VectorStore` implementation, tenant-isolated by collection — none of it called from the live pipeline, because wiring it adds an embedding-API call and its latency to every cache-miss request. This is a genuine cost/latency tradeoff the user needs to weigh in, not a bug — re-confirmed, not re-litigated, this session. |
+   | **Semantic cache** | **Fixed session 7.** Wired into `execute_with_headroom` behind a new `cache::embed::Embedder` trait, gated to Pro/Enterprise plans, embedding generated once per request and reused for both lookup and (on a miss) storage. A semantic hit also writes the current wording into the hot exact-match tier, so its own repeat skips the embedding call next time. Went further than the original task: a new third cache tier (`cache::durable`, Postgres, per-tenant-encrypted, 30-day sliding TTL) now promotes any fingerprint the hot tier has proven repeats, so it survives past the hot tier's 24h window too. Full design: `docs/adr/0008-tiered-durable-cache.md`. |
    | **Outcome-trained bandit** | **Fixed session 6.** The router now reads the bandit back via `RoutingInputs::bandit`, folded into `select_at_tier`'s candidate scoring alongside graded provider health and price. Previously write-only. |
    | **Budget threshold alerts** | **Fixed session 6.** `workers/budget_alerts::run` sweeps every org on an interval and delivers exactly one alert per threshold crossing per period (a "last alerted" watermark), spawned from `main.rs`. |
    | **TOTP two-factor auth** | **Fixed session 6.** Repo layer, enroll/confirm/disable endpoints, a new per-user HKDF key namespace, and a real login-time check all added — proven end to end by `totp_protects_login_end_to_end`. |
@@ -503,9 +526,7 @@ tests. Full detail in the Session Log below and the audit artifact.
    | **Streaming resilience** | **Fixed session 6.** `open_stream_with_fallback` gives streaming the same retry/fallback path and health-recording non-streaming already had. |
    | **`workers::reconciliation::run` and the budget-alert worker never spawned** | **Fixed session 6.** Both spawned from `main.rs`, alongside a new `workers::health_probe::run` publishing dependency-up gauges. |
 
-   The semantic-cache tradeoff is the one item genuinely worth a scoping conversation with
-   the user before building further — everything else in this row used to be here is now
-   closed.
+   Every item that used to be in this table is now closed.
 
 1. **Classifier V2 does not beat V1.** Both sit at 98% on the fixture set — 100
    hand-written cases cannot separate them. The test asserts "does not regress," not
@@ -574,27 +595,27 @@ that has persisted since session 3, now the dominant one:
    docker compose -f infra/docker-compose.yml up -d
    export AEGIS_TEST_DATABASE_URL=postgres://aegis:aegis_dev_password@localhost:5432/aegis
    export AEGIS_TEST_REDIS_URL=redis://localhost:6379
-   cargo test --tests          # integration tests, including tests/redis_concurrency.rs, will now actually run
+   cargo test --tests          # integration tests, including tests/redis_concurrency.rs and tests/durable_cache.rs, will now actually run
    ```
 2. **Add the Gemini provider key** (and a Vertex AI service-account key) and confirm one
    live completion against each, checking the savings figure by hand against the
-   provider's own billing.
+   provider's own billing — and, new this session, confirm one real embedding call for
+   the semantic cache against whichever provider ends up cheapest in the pricing table.
 3. **Close the 9 remaining unverified pricing rows** — `docs/runbooks/pricing-update.md`,
    pure data verification now that the cached-token/long-context pricing-model work is
    done.
 4. **Deploy to staging, run the k6 load test**, then **run the restore drill**.
 5. **Test SSO and SCIM against a real Okta or Entra tenant** — the code path is complete
    for OIDC; only real-IdP verification remains.
-6. **Scope the semantic-cache wiring decision with the user** — the one remaining "built
-   but not wired" item, and the one that's a genuine product tradeoff (embedding-call
-   latency on every cache-miss request) rather than a bug to just fix.
-7. **Fix `gh auth`**, retry PR creation or push directly, and consider cleaning up the
+6. **Fix `gh auth`**, retry PR creation or push directly, and consider cleaning up the
    stale `fix/enterprise-audit-remediation` branch (zero unique commits vs. `main`).
-8. Only after 1–7: the two remaining operational blind spots from the session 5 audit that
+7. Only after 1–6: the two remaining operational blind spots from the session 5 audit that
    need real infrastructure work, not application code — distributed tracing, and a
    connection-pooling proxy (or larger instance class) ahead of the ~8-10-replica Postgres
    scaling wall — plus the compliance items in `docs/compliance/soc2-readiness.md` that
-   require a live deployment.
+   require a live deployment. Also worth a look once there's real traffic: surface
+   `cache_entries.hit_count` somewhere in the admin console — it's tracked and available,
+   nothing reads it yet.
 
 ---
 
@@ -757,6 +778,55 @@ Each of these cost real time during the build.
 ## Session Log
 
 Newest first.
+
+### 2026-08-27 — Session 7 — Claude Sonnet 5
+
+User asked, in plain language, about the caching tradeoff: store content to cut cost, or
+don't store it for security — direct quote of the dilemma: *"Or is there a way out where
+you can store the top cash[ed] queries? In an encrypted format in our database and then
+retrieve it... I get the best of the world's worlds."* Then, separately: *"we want it to
+be as smart as possible and use caching as optimally as possible."* That second sentence
+is the exact product decision the semantic-cache wiring had been waiting on since session
+3 — flagged, not built, every session until the founder actually weighed in.
+
+**Built the hybrid the founder described, plus wired the semantic cache it was bundled
+with — one feature, three cache tiers:**
+
+1. **Hot (Redis, unchanged)** — every cache-eligible response, plaintext, 24h TTL, as
+   before.
+2. **New: durable (Postgres, encrypted).** `migrations/0004_durable_cache.sql` +
+   `cache::durable::DurableCache`. Only a fingerprint the hot tier has *already proven
+   repeats* gets promoted — encrypted with the same per-tenant HKDF key BYOK credentials
+   already use, sliding 30-day expiry (`AEGIS_DURABLE_CACHE_TTL_DAYS`), purged by a new job
+   in `workers::scheduler` on the existing 04:00 UTC window. A one-off prompt never reaches
+   this tier at all, which is what makes 30 days safe to keep despite Redis's 24h being
+   deliberately short.
+3. **Semantic (Qdrant), finally wired.** `cache/semantic.rs` was fully built and tested
+   since session 3 and never called from the live pipeline — the exact "built but not
+   wired" gap this file has tracked every session since. New `cache::embed::Embedder`
+   trait + `ProviderEmbedder` generate the embedding on Aegis's own pooled credential
+   (never a customer's BYOK key — see the module doc for why), gated to Pro/Enterprise
+   plans per `MASTER_BUILD.md`'s own plan table. A semantic hit promotes its own wording
+   into the exact tier too, so a repeat of that specific phrasing skips the embedding call
+   next time.
+
+Full design and the honest tradeoffs: `docs/adr/0008-tiered-durable-cache.md` — this is a
+genuine deviation from `MASTER_BUILD.md` Part 5's two-tier cache spec, recorded per
+CLAUDE.md rule 4, not applied silently.
+
+**Every tier honors `zero_retention` identically** — proven by a test that configures an
+embedder guaranteed to produce a hit and confirms a zero-retention org still never gets
+one. **Free-tier traffic is structurally excluded** from both new tiers, proven the same
+way, not just documented.
+
+12 new tests across `cache/embed.rs`, `cache/durable.rs`, `routes/openai_compat.rs`, and a
+new `tests/durable_cache.rs` (6 tests against real Postgres — tenant isolation, the
+encrypted round trip, sliding expiry, and the purge job, gated on
+`AEGIS_TEST_DATABASE_URL`, confirmed to skip correctly here). `cargo fmt --check` clean,
+`cargo clippy --all-targets -- -D warnings` clean, `cargo test` → 774 lib passing (was
+762) + 814 full-suite passing (was 796), 0 failing, 0 ignored. P3.5 (semantic cache),
+open since session 1 and unchecked by the session 3 audit, is checked off for the first
+time with the capability it names actually true in production.
 
 ### 2026-08-26 — Session 6 — Claude Sonnet 5
 

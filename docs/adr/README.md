@@ -19,6 +19,7 @@ them and re-introducing the bug it was written to avoid is a record of why.
 | [005](0005-store-abstraction.md) | Key-value store behind a trait | Accepted | **Yes** — extends Part 2 |
 | [006](0006-classifier-versioning.md) | Classifier versions and sign-constrained training | Accepted | Partial — reframes P5.3 |
 | [007](0007-vertex-ai-jwt-signing.md) | `jsonwebtoken` for Vertex AI service-account auth | Accepted | **Yes** — new dependency outside Part 2 |
+| [008](0008-tiered-durable-cache.md) | A durable, encrypted cache tier + wiring the semantic cache | Accepted | **Yes** — Part 5 specs two cache tiers, this adds a third |
 
 ## Writing a new one
 

@@ -1947,6 +1947,86 @@ pub async fn consume_credits(
 }
 
 // ---------------------------------------------------------------------------
+// Durable cache (tiered exact-match cache, Part 5's warm tier)
+// ---------------------------------------------------------------------------
+
+/// One encrypted, promoted cache entry. `encrypted_response` is opaque here — only
+/// `cache::durable` holds the key to decrypt it.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DurableCacheRow {
+    pub encrypted_response: Vec<u8>,
+    pub hit_count: i32,
+}
+
+/// Fetch a promoted entry, if one exists and has not expired.
+///
+/// An expired row is treated exactly like a miss rather than returned with a "please
+/// delete this" flag — the purge job (`workers::scheduler`) is what actually removes it,
+/// so a read never needs write access.
+pub async fn get_cache_entry(
+    pool: &PgPool,
+    org_id: Uuid,
+    fingerprint: &str,
+) -> Result<Option<DurableCacheRow>> {
+    sqlx::query_as::<_, DurableCacheRow>(
+        "SELECT encrypted_response, hit_count
+         FROM cache_entries
+         WHERE org_id = $1 AND fingerprint = $2 AND expires_at > NOW()",
+    )
+    .bind(org_id)
+    .bind(fingerprint)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Promote a fingerprint into the durable tier, or refresh it if already there.
+///
+/// `ON CONFLICT` rather than a read-then-write: two replicas promoting the same
+/// fingerprint at once is a real possibility (two requests for the same repeated query,
+/// microseconds apart), and a read-then-write would race exactly like the budget check
+/// used to. The upsert makes "arrived twice" collapse into "one row, hit_count bumped
+/// once more" instead of a duplicate-key error or a lost update.
+pub async fn upsert_cache_entry(
+    pool: &PgPool,
+    org_id: Uuid,
+    fingerprint: &str,
+    encrypted_response: &[u8],
+    ttl_days: i64,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO cache_entries (org_id, fingerprint, encrypted_response, expires_at)
+         VALUES ($1, $2, $3, NOW() + ($4 || ' days')::interval)
+         ON CONFLICT (org_id, fingerprint) DO UPDATE SET
+             hit_count   = cache_entries.hit_count + 1,
+             last_hit_at = NOW(),
+             expires_at  = NOW() + ($4 || ' days')::interval",
+    )
+    .bind(org_id)
+    .bind(fingerprint)
+    .bind(encrypted_response)
+    .bind(ttl_days)
+    .execute(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(())
+}
+
+/// Delete every expired durable-cache row. Returns how many were removed.
+///
+/// Expiry alone (the `WHERE expires_at > NOW()` in `get_cache_entry`) already keeps a
+/// stale row from ever being served — this exists so the table doesn't grow forever, not
+/// because a stale row is otherwise dangerous. Not org-scoped: unlike every other function
+/// in this file, deleting rows nobody can read anymore is not a tenant-isolation concern.
+pub async fn purge_expired_cache_entries(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query("DELETE FROM cache_entries WHERE expires_at <= NOW()")
+        .execute(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(result.rows_affected())
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -2167,6 +2247,8 @@ mod tests {
             "fn list_requests",
             "fn list_audit_logs",
             "fn find_org_for_user",
+            "fn get_cache_entry",
+            "fn upsert_cache_entry",
         ];
         for name in scoped_fns {
             let start = source
@@ -2177,7 +2259,13 @@ mod tests {
             let sql_end = body.find("\n}").unwrap_or(body.len());
             let body = &body[..sql_end];
             assert!(
-                body.contains("org_id = $") || body.contains("m.user_id = $"),
+                body.contains("org_id = $")
+                    || body.contains("m.user_id = $")
+                    // An INSERT-shaped scoped query (upsert_cache_entry) has no WHERE to
+                    // filter by — org_id is a bound column value instead, part of the
+                    // (org_id, fingerprint) uniqueness constraint that makes the upsert
+                    // itself tenant-scoped.
+                    || body.contains("(org_id, fingerprint"),
                 "{name} does not appear to filter by org_id — possible cross-tenant read"
             );
         }

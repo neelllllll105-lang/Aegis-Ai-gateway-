@@ -12,6 +12,7 @@
 //! 5. Only then bind the port and accept traffic.
 
 use aegis_gateway::build_router;
+use aegis_gateway::cache;
 use aegis_gateway::config::Config;
 use aegis_gateway::engine::bandit::RoutingBandit;
 use aegis_gateway::engine::fallback::ProviderHealth;
@@ -147,19 +148,52 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let pricing = Arc::new(pricing);
+    let providers = Arc::new(ProviderRegistry::with_builtins());
+    let shared_pool = Arc::new(SharedKeyPool::new());
+    let http = build_http_client(&config)?;
+
+    // ---- Semantic cache vector store ---------------------------------------------
+    let semantic_store: Arc<dyn cache::semantic::VectorStore> = match &config.qdrant_url {
+        Some(url) => {
+            tracing::info!("semantic cache backed by qdrant");
+            Arc::new(cache::semantic::QdrantVectorStore::new(
+                url.clone(),
+                reqwest::Client::new(),
+            ))
+        }
+        None => {
+            tracing::warn!(
+                "QDRANT_URL not set — semantic cache runs in-process only, per replica, \
+                 and does not survive a restart"
+            );
+            Arc::new(cache::semantic::MemoryVectorStore::new())
+        }
+    };
+
+    let embedder: Arc<dyn cache::embed::Embedder> = Arc::new(cache::embed::ProviderEmbedder::new(
+        Arc::clone(&pricing),
+        Arc::clone(&providers),
+        Arc::clone(&shared_pool),
+        Arc::clone(&config),
+        http.clone(),
+    ));
+
     let state = AppState {
         config: Arc::clone(&config),
         store: Arc::clone(&store),
         metrics: Arc::new(Metrics::new()),
         db,
         db_replica,
-        pricing: Arc::new(pricing),
-        providers: Arc::new(ProviderRegistry::with_builtins()),
+        pricing,
+        providers,
         key_cache: Arc::new(KeyCache::default()),
         health: Arc::new(ProviderHealth::new()),
         bandit: Arc::new(RoutingBandit::new()),
-        shared_pool: Arc::new(SharedKeyPool::new()),
-        http: build_http_client(&config)?,
+        shared_pool,
+        http,
+        semantic_store,
+        embedder,
         started_at: Instant::now(),
     };
 

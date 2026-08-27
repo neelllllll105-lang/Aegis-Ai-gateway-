@@ -122,15 +122,23 @@ rate limiting, and metering. A working product in passthrough mode.
 - [x] P3.2 Routing engine + policy loader + `routing_reason`
 - [x] P3.3 Capability map (tool use, vision, context window minimums)
 - [x] P3.4 Exact cache: fingerprint + Redis SETEX, skip rules
-- [ ] P3.5 Semantic cache: Qdrant, org-namespaced, similarity >= 0.95 — *`cache/semantic.rs`
-      fully implements this (624 lines, 15 tests, org-namespaced Qdrant collections, the
-      0.95 threshold) and was checked off as done. A session 3 audit found it is **never
-      called from the live pipeline** — no embedding is generated on a cache miss, so a
-      semantic hit can never actually occur in production. Unchecked to reflect that. The
-      routing simulator on the landing page shows a semantic-hit scenario; it is scripted
-      demo data, not a real gateway response. Wiring this in is a product decision (it adds
-      an embedding-API call and its latency to every cache-miss request) as much as a code
-      change — see `MEMORY.md` Known Limitations item 0.*
+- [x] P3.5 Semantic cache: Qdrant, org-namespaced, similarity >= 0.95 — *`cache/semantic.rs`
+      always fully implemented this (624 lines, 15 tests, org-namespaced Qdrant
+      collections, the 0.95 threshold). A session 3 audit found it was never called from
+      the live pipeline — no embedding was generated on a cache miss, so a semantic hit
+      could never actually occur in production; unchecked at the time. **Fixed and
+      re-checked, session 6 continuation**: the founder asked directly for "as smart as
+      possible" caching, which is exactly the product decision this line was blocked on.
+      Wired into `routes/openai_compat.rs::execute_with_headroom` behind a new
+      `cache::embed::Embedder` trait (real HTTP embedding calls on Aegis's own pooled
+      credential, never a customer's BYOK key), gated to Pro/Enterprise plans per
+      `MASTER_BUILD.md`'s own plan table. **Went further than the original task line**:
+      also added a third, durable cache tier (`cache::durable`, Postgres, AES-256-GCM
+      per-tenant-encrypted, 30-day sliding TTL) so a fingerprint the hot Redis tier has
+      already proven repeats survives past its 24h TTL — see
+      `docs/adr/0008-tiered-durable-cache.md` for the full design, a genuine deviation
+      from `MASTER_BUILD.md`'s two-tier cache spec. The landing page's routing simulator
+      still shows scripted demo data, not a live gateway response — unchanged by this fix.
 - [x] P3.6 Context compression v1
 - [x] P3.7 Fallback + circuit breakers + provider health — *circuit breakers and
       provider-health tracking always worked for non-streaming requests. A session 5

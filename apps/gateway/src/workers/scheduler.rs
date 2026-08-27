@@ -134,6 +134,16 @@ pub async fn run(state: AppState) {
                 tracing::error!(error = %e, "expired session purge failed");
             }
         }
+
+        // Same window as the session purge — both are cheap, idempotent DELETEs and
+        // neither benefits from running separately.
+        if is_session_purge_window(now)
+            && claim(state.store.as_ref(), "durable-cache-purge", &day_key(now)).await
+        {
+            if let Err(e) = purge_expired_cache_entries(&state).await {
+                tracing::error!(error = %e, "expired durable cache purge failed");
+            }
+        }
     }
 }
 
@@ -143,6 +153,19 @@ async fn purge_expired_sessions(state: &AppState) -> Result<()> {
     let purged = crate::db::repo::purge_expired_sessions(pool).await?;
     if purged > 0 {
         tracing::info!(purged, "purged expired sessions");
+    }
+    Ok(())
+}
+
+/// Delete durable-cache rows past their (sliding) expiry.
+///
+/// A stale row is already unreachable — `db::repo::get_cache_entry` filters on
+/// `expires_at` itself — so this is pure table-size hygiene, not a correctness fix.
+async fn purge_expired_cache_entries(state: &AppState) -> Result<()> {
+    let pool = state.db()?;
+    let purged = crate::db::repo::purge_expired_cache_entries(pool).await?;
+    if purged > 0 {
+        tracing::info!(purged, "purged expired durable cache entries");
     }
     Ok(())
 }
