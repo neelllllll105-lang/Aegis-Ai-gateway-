@@ -41,7 +41,10 @@ actually fixed, with struck-through prior values kept visible rather than silent
 away. This file's Known Limitations section below summarizes the findings that still
 change project state; the artifact has the full evidence for each, updated to match. Also
 current: the [Aegis Field Manual](https://claude.ai/code/artifact/fc18e8d1-cb1d-40d6-88d5-393be51bf276),
-the founder-level walkthrough of the whole system, updated the same session.
+the founder-level walkthrough of the whole system, updated the same session; and the
+[Aegis Control Room](https://claude.ai/code/artifact/3e1c0060-2d00-4995-bbf6-3e113dcf6e87)
+(new session 6), the operator's answer to how it's deployed, the org-role vs.
+platform-admin control split, plan/billing mechanics, and how self-hosted licensing works.
 
 ---
 
