@@ -8,4 +8,6 @@ pub mod durable;
 pub mod embed;
 pub mod exact;
 pub mod fingerprint;
+#[cfg(feature = "local-embeddings")]
+pub mod onnx_embed;
 pub mod semantic;

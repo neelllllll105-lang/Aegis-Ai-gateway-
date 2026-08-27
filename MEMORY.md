@@ -586,10 +586,17 @@ Session 6 closed essentially every code-level P0/P1/P2 finding from the session 
 What's left is almost entirely "run it against something real" — the same category of gap
 that has persisted since session 3, now the dominant one:
 
-1. **Fix the Docker install, then verify against real infrastructure** — the single
-   highest-leverage remaining step, since it unblocks re-running this session's entire
-   Redis/Postgres-gated test surface for real rather than confirming it merely compiles and
-   skips:
+1. **Provision a real ONNX Runtime binary + `all-MiniLM-L6-v2` model** and run
+   `docs/runbooks/local-embeddings-setup.md` end to end — `cache::onnx_embed::OnnxEmbedder`
+   type-checks and passes clippy but has never actually linked, run, or been benchmarked
+   in any environment yet (see the session 7 log entry and
+   `docs/adr/0009-local-onnx-embeddings.md`). Do the false-positive-rate check against the
+   0.95 similarity threshold before wiring it into `AppState` anywhere real — that's the
+   one number that actually matters, not just speed.
+2. **Fix the Docker install, then verify against real infrastructure** — the single
+   highest-leverage remaining infra-verification step, since it unblocks re-running this
+   session's entire Redis/Postgres-gated test surface for real rather than confirming it
+   merely compiles and skips:
    ```bash
    docker version   # must succeed before anything below is worth attempting
    docker compose -f infra/docker-compose.yml up -d
@@ -597,19 +604,19 @@ that has persisted since session 3, now the dominant one:
    export AEGIS_TEST_REDIS_URL=redis://localhost:6379
    cargo test --tests          # integration tests, including tests/redis_concurrency.rs and tests/durable_cache.rs, will now actually run
    ```
-2. **Add the Gemini provider key** (and a Vertex AI service-account key) and confirm one
+3. **Add the Gemini provider key** (and a Vertex AI service-account key) and confirm one
    live completion against each, checking the savings figure by hand against the
-   provider's own billing — and, new this session, confirm one real embedding call for
-   the semantic cache against whichever provider ends up cheapest in the pricing table.
-3. **Close the 9 remaining unverified pricing rows** — `docs/runbooks/pricing-update.md`,
+   provider's own billing — and, if step 1 hasn't landed yet, confirm one real remote
+   embedding call for the semantic cache too.
+4. **Close the 9 remaining unverified pricing rows** — `docs/runbooks/pricing-update.md`,
    pure data verification now that the cached-token/long-context pricing-model work is
    done.
-4. **Deploy to staging, run the k6 load test**, then **run the restore drill**.
-5. **Test SSO and SCIM against a real Okta or Entra tenant** — the code path is complete
+5. **Deploy to staging, run the k6 load test**, then **run the restore drill**.
+6. **Test SSO and SCIM against a real Okta or Entra tenant** — the code path is complete
    for OIDC; only real-IdP verification remains.
-6. **Fix `gh auth`**, retry PR creation or push directly, and consider cleaning up the
+7. **Fix `gh auth`**, retry PR creation or push directly, and consider cleaning up the
    stale `fix/enterprise-audit-remediation` branch (zero unique commits vs. `main`).
-7. Only after 1–6: the two remaining operational blind spots from the session 5 audit that
+8. Only after 1–7: the two remaining operational blind spots from the session 5 audit that
    need real infrastructure work, not application code — distributed tracing, and a
    connection-pooling proxy (or larger instance class) ahead of the ~8-10-replica Postgres
    scaling wall — plus the compliance items in `docs/compliance/soc2-readiness.md` that
@@ -827,6 +834,51 @@ encrypted round trip, sliding expiry, and the purge job, gated on
 762) + 814 full-suite passing (was 796), 0 failing, 0 ignored. P3.5 (semantic cache),
 open since session 1 and unchecked by the session 3 audit, is checked off for the first
 time with the capability it names actually true in production.
+
+**Same session, continued: the founder pasted a detailed external brief targeting a 20ms
+cache-hit path** (local ONNX embeddings, Qdrant HNSW tuning, AES-NI, `target-cpu=native`,
+Bincode over JSON) and asked to evaluate and integrate it. Corrected the target first —
+this project's own stated budget (`routes/openai_compat.rs`'s module doc) is ~1.45ms for
+the *entire* gateway, not 20ms just for cache; 20ms would be a regression from what's
+already promised, even though it would be a huge win over the current semantic path's
+50-300ms remote embedding call. Went through the brief point by point rather than
+adopting it wholesale — agreed (local embeddings is the real fix, and `cache::embed::Embedder`
+was already the exact seam needed for it), corrected (per-org Qdrant collections, already
+in place, give stronger tenant isolation than the brief's single-collection-plus-filter
+suggestion; `aes-gcm` already autodetects AES-NI at runtime, no build flag needed for that
+specifically), and flagged a real risk the brief treated as free (INT8 quantization can
+shift which prompt pairs land above/below the 0.95 similarity threshold — a
+false-positive-rate question, not just a speed one, deliberately not attempted this
+session).
+
+**Built `cache::onnx_embed::OnnxEmbedder`** — a second `Embedder` implementation (`ort` +
+`tokenizers`, `all-MiniLM-L6-v2`, FP32, mean-pooled + L2-normalized), behind a new
+`local-embeddings` Cargo feature that is **off by default** specifically so enabling it
+never makes `cargo build` silently fetch a native binary — see
+`docs/adr/0009-local-onnx-embeddings.md` and `docs/runbooks/local-embeddings-setup.md`.
+
+**Honest status, stated as precisely as the verification allows — this is categorically
+different from everything else in this file:**
+- `cargo check --features local-embeddings` **succeeds** — type-checks against the real
+  `ort` v2.0.0-rc.10 and `tokenizers` v0.23 APIs (caught and fixed one real borrow-checker
+  bug: the original draft dropped the session's `MutexGuard` before reading its output,
+  which doesn't compile). `cargo clippy --features local-embeddings --lib` is clean too.
+- `cargo build`/`cargo test` **with that feature fail to link**, confirmed directly rather
+  than assumed: `ort-sys` emits a self-explanatory placeholder linker input when no ONNX
+  Runtime binary is configured, and the linker fails loudly on it. This means **even the
+  pure mean-pooling unit tests (hand-built vectors, no model needed) have never actually
+  run** — Rust links whole test binaries, so the crate needs the native library resolvable
+  regardless of which test is selected. Reviewed by hand; not run.
+- **The default build is completely unaffected**, confirmed by re-running it after every
+  step above: `cargo test` with no feature flags still shows 774 lib / 814 full-suite,
+  identical to before this work started.
+- Not attempted: wiring `OnnxEmbedder` into `AppState` anywhere real. The runbook is
+  explicit that verification (including a false-positive-rate check against the 0.95
+  threshold with real embeddings) comes before that, not after.
+
+A criterion benchmark (`benches/semantic_embedding.rs`, `local-embeddings`-gated) exists
+for p50/p95/p99 latency once a real model is available — also unrun here for the same
+reason.
 
 ### 2026-08-26 — Session 6 — Claude Sonnet 5
 

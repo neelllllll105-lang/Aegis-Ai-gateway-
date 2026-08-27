@@ -74,8 +74,34 @@ regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# Local embeddings for the semantic cache — optional, see docs/adr/0009-local-onnx-embeddings.md.
+# `default-features = false` on `ort` deliberately excludes its `download-binaries` feature:
+# enabling `local-embeddings` must never make `cargo build` silently fetch a native binary
+# from the internet. A deployment that wants this path either enables `ort`'s
+# `download-binaries` feature itself (an explicit, informed choice) or points `ort` at a
+# system-installed ONNX Runtime via `load-dynamic` — see the ADR.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+  "std",
+  "ndarray",
+], optional = true }
+ndarray = { version = "0.16", optional = true }
+tokenizers = { version = "0.23", default-features = false, features = [
+  "fancy-regex",
+], optional = true }
+
+[features]
+# Off by default: no code path anywhere in the default build depends on ort or tokenizers,
+# so `cargo build`/`cargo test` with no flags is completely unaffected by this feature's
+# existence. Enable explicitly once a real ONNX model + tokenizer are provisioned — see the
+# ADR for exactly what "provisioned" means and why that step is deliberately not automated.
+local-embeddings = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+# Only exercised by benches/semantic_embedding.rs, which itself only compiles under
+# `local-embeddings` (see that file's own doc comment) — a plain `cargo bench` with no
+# feature flags never touches this.
+criterion = "0.5"
 # Deliberately NOT depending on the `rsa` crate for the SSO id-token verification tests.
 # It was tried first and removed: `cargo audit` (which CI runs with `--deny warnings`)
 # flags it under RUSTSEC-2023-0071, a timing side-channel with no fixed release available.
@@ -90,3 +116,8 @@ path = "src/lib.rs"
 [[bin]]
 name = "aegis-gateway"
 path = "src/main.rs"
+
+[[bench]]
+name = "semantic_embedding"
+harness = false
+required-features = ["local-embeddings"]
