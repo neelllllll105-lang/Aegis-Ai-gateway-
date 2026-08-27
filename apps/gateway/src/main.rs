@@ -154,22 +154,36 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let http = build_http_client(&config)?;
 
     // ---- Semantic cache vector store ---------------------------------------------
-    let semantic_store: Arc<dyn cache::semantic::VectorStore> = match &config.qdrant_url {
-        Some(url) => {
-            tracing::info!("semantic cache backed by qdrant");
-            Arc::new(cache::semantic::QdrantVectorStore::new(
-                url.clone(),
-                reqwest::Client::new(),
-            ))
-        }
-        None => {
-            tracing::warn!(
-                "QDRANT_URL not set — semantic cache runs in-process only, per replica, \
-                 and does not survive a restart"
+    // gRPC preferred when configured (binary protocol, no JSON parse cost on either side
+    // — see docs/adr/0010-qdrant-grpc-client.md); REST as a fallback that needs no
+    // separate port opened; in-memory only as a last resort with no Qdrant configured at
+    // all. `QDRANT_GRPC_URL` is deliberately a *separate* setting from `QDRANT_URL` rather
+    // than derived by swapping the port — see `Config::qdrant_grpc_url`'s own doc comment.
+    let semantic_store: Arc<dyn cache::semantic::VectorStore> =
+        match (&config.qdrant_grpc_url, &config.qdrant_url) {
+            (Some(grpc_url), _) => {
+                tracing::info!("semantic cache backed by qdrant (gRPC)");
+                Arc::new(cache::qdrant_grpc::QdrantGrpcVectorStore::connect(
+                    grpc_url,
+                )?)
+            }
+            (None, Some(rest_url)) => {
+                tracing::info!(
+                "semantic cache backed by qdrant (REST) — set QDRANT_GRPC_URL for lower overhead"
             );
-            Arc::new(cache::semantic::MemoryVectorStore::new())
-        }
-    };
+                Arc::new(cache::semantic::QdrantVectorStore::new(
+                    rest_url.clone(),
+                    reqwest::Client::new(),
+                ))
+            }
+            (None, None) => {
+                tracing::warn!(
+                    "QDRANT_URL/QDRANT_GRPC_URL not set — semantic cache runs in-process only, \
+                     per replica, and does not survive a restart"
+                );
+                Arc::new(cache::semantic::MemoryVectorStore::new())
+            }
+        };
 
     let embedder: Arc<dyn cache::embed::Embedder> = Arc::new(cache::embed::ProviderEmbedder::new(
         Arc::clone(&pricing),

@@ -87,7 +87,8 @@ services:
       retries: 10
       start_period: 20s
     expose:
-      - "6333"
+      - "6333"  # REST — kept as the fallback path, see docs/adr/0010-qdrant-grpc-client.md
+      - "6334"  # gRPC — lower overhead, preferred when QDRANT_GRPC_URL is set
 
   gateway:
     build:

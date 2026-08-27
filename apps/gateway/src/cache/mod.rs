@@ -10,4 +10,5 @@ pub mod exact;
 pub mod fingerprint;
 #[cfg(feature = "local-embeddings")]
 pub mod onnx_embed;
+pub mod qdrant_grpc;
 pub mod semantic;

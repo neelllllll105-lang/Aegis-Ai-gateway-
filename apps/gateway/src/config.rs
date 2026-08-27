@@ -53,8 +53,15 @@ pub struct Config {
     /// correct for a single instance and explicitly not for a cluster.
     pub redis_url: Option<String>,
 
-    /// Qdrant base URL for the semantic cache (Phase 3).
+    /// Qdrant REST base URL for the semantic cache (Phase 3). Still read as the fallback
+    /// vector store when `qdrant_grpc_url` isn't set — see `docs/adr/0010-qdrant-grpc-client.md`.
     pub qdrant_url: Option<String>,
+    /// Qdrant's gRPC endpoint (default port 6334, distinct from the REST port 6333) —
+    /// deliberately a separate, explicit setting rather than derived by substituting the
+    /// REST URL's port: Qdrant Cloud and some self-hosted setups front REST and gRPC on
+    /// different hosts entirely, and a derived-and-wrong URL fails in a way that's much
+    /// harder to notice than an unset one falling back to REST. `None` means "use REST."
+    pub qdrant_grpc_url: Option<String>,
 
     /// 32-byte AES-256-GCM master key, base64-encoded. Encrypts BYOK provider
     /// credentials. Never logged, never stored in the database.
@@ -146,6 +153,7 @@ impl Config {
 
             redis_url: opt("REDIS_URL"),
             qdrant_url: opt("QDRANT_URL"),
+            qdrant_grpc_url: opt("QDRANT_GRPC_URL"),
 
             master_key,
 
@@ -194,6 +202,7 @@ impl Config {
             database_max_connections: 5,
             redis_url: None,
             qdrant_url: None,
+            qdrant_grpc_url: None,
             master_key: [7u8; 32],
             shared_provider_keys: std::collections::HashMap::new(),
             resend_api_key: None,

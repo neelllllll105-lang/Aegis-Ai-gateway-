@@ -25,4 +25,21 @@ ignore = [
     # is ever reconfigured to enable the mysql feature, or if `cargo tree -e normal -p
     # sqlx-mysql` ever starts printing something.
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2024-0436 — the `paste` crate is unmaintained (not a vulnerability, an
+    # "unmaintained" advisory `--deny warnings` still treats as denyable).
+    #
+    # Same shape as the entry above: `paste` resolves into Cargo.lock but is NOT compiled
+    # into the aegis-gateway binary by default. It is a transitive dependency of
+    # `tokenizers`, which is itself only reachable through this crate's own
+    # `local-embeddings` Cargo feature — off by default (see
+    # `docs/adr/0009-local-onnx-embeddings.md`). Confirmed directly: `cargo tree -i paste`
+    # with default features finds nothing; `cargo tree -i paste --all-features` shows the
+    # single path `paste -> tokenizers -> aegis-gateway`. Same lockfile-artifact shape as
+    # the sqlx-mysql/rsa case above, not a supply-chain exposure in the default build.
+    #
+    # Investigated 2026-08-27 (session 7, adding local ONNX embeddings + Qdrant gRPC).
+    # Re-check if `local-embeddings` is ever enabled by default, or if `tokenizers`
+    # upgrades past its `paste` dependency.
+    "RUSTSEC-2024-0436",
 ]

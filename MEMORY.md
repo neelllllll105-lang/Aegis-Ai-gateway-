@@ -596,7 +596,10 @@ that has persisted since session 3, now the dominant one:
 2. **Fix the Docker install, then verify against real infrastructure** — the single
    highest-leverage remaining infra-verification step, since it unblocks re-running this
    session's entire Redis/Postgres-gated test surface for real rather than confirming it
-   merely compiles and skips:
+   merely compiles and skips, and also unblocks the first real test of
+   `cache::qdrant_grpc::QdrantGrpcVectorStore` against a live Qdrant instance — the gRPC
+   Qdrant path is fully compiled/linked/test-suite-verified (see `docs/adr/0010-qdrant-grpc-client.md`)
+   but has never actually connected to a real server.
    ```bash
    docker version   # must succeed before anything below is worth attempting
    docker compose -f infra/docker-compose.yml up -d
@@ -909,6 +912,45 @@ different from everything else in this file:**
 A criterion benchmark (`benches/semantic_embedding.rs`, `local-embeddings`-gated) exists
 for p50/p95/p99 latency once a real model is available — also unrun here for the same
 reason.
+
+**Then asked to check which of four technologies were actually in use (`aes-gcm`,
+`qdrant-client`, gRPC, `ort`) — answered by grepping the real repo rather than recalling
+from memory: `aes-gcm` genuinely load-bearing since early sessions; `ort` added but
+unverified (above); `qdrant-client`/gRPC not present at all, deliberately deferred earlier
+this session in favor of the embedding fix.** Asked directly whether to pick gRPC back up
+now — yes: `VectorStore` was already a trait, `qdrant-client` is pure Rust with no
+native-binary problem, and now that the embedding step is fast, Qdrant's own REST/JSON
+round trip is a proportionally bigger slice of what's left.
+
+**Built `cache::qdrant_grpc::QdrantGrpcVectorStore`** — a second `VectorStore`
+implementation alongside the existing REST-based one, chosen in `main.rs` by a new
+`QDRANT_GRPC_URL` setting (deliberately separate from `QDRANT_URL`, not derived by
+swapping the port — Qdrant Cloud and some self-hosted setups front REST and gRPC on
+different hosts). REST kept, not deleted — it's the fallback when gRPC isn't configured.
+Full reasoning: `docs/adr/0010-qdrant-grpc-client.md`.
+
+**Fully verified this time — a stronger claim than the ONNX work could make, and worth
+naming why:** `qdrant-client` has no native binary to provision, so unlike `ort`,
+`cargo check`, `cargo clippy --all-targets -- -D warnings`, and the full `cargo test`
+suite all actually ran with this dependency compiled in by default (not feature-gated).
+Every API call in the new module matched the real `qdrant-client` v1.19.0 surface on the
+first attempt. Default build: still 774 lib / 814 full-suite passing. What's *not*
+verified: whether it actually works against a live Qdrant server — no Docker here, same
+gap as everything else in this file.
+
+**Caught a real `cargo audit` regression before it shipped.** `local-embeddings`'s
+`tokenizers` dependency transitively pulls in the now-unmaintained `paste` crate
+(RUSTSEC-2024-0436) — same lockfile-artifact shape session 6 found for `sqlx-mysql`/`rsa`
+(confirmed: `cargo tree -i paste` finds nothing with default features, only appears under
+`--all-features` via `tokenizers`). Would have broken CI's `cargo audit --deny warnings`
+gate. Closed with a scoped, evidenced ignore in `.cargo/audit.toml`, matching the existing
+entry's format; re-ran the exact CI command from the repo root afterward — clean.
+
+**Also fixed something the ADR draft got wrong before it shipped**: the ADR initially
+claimed the bundled self-hosted Qdrant container already exposed gRPC on 6334. It didn't —
+checked `infra/docker-compose.yml` and `infra/docker-compose.self-hosted.yml` directly,
+found only port 6333 (REST) was exposed in either, and added 6334 to both rather than
+leave documentation describing infrastructure that didn't match reality.
 
 ### 2026-08-26 — Session 6 — Claude Sonnet 5
 

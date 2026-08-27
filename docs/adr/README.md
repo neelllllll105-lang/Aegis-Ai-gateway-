@@ -21,6 +21,7 @@ them and re-introducing the bug it was written to avoid is a record of why.
 | [007](0007-vertex-ai-jwt-signing.md) | `jsonwebtoken` for Vertex AI service-account auth | Accepted | **Yes** — new dependency outside Part 2 |
 | [008](0008-tiered-durable-cache.md) | A durable, encrypted cache tier + wiring the semantic cache | Accepted | **Yes** — Part 5 specs two cache tiers, this adds a third |
 | [009](0009-local-onnx-embeddings.md) | Local ONNX embeddings for the semantic cache | Proposed — not yet verified, see the ADR | **Yes** — new native-binary dependency outside Part 2 |
+| [010](0010-qdrant-grpc-client.md) | Qdrant over gRPC, preferred over REST when configured | Accepted — compiled, linked, full test suite passes; not yet run against a live Qdrant | **Yes** — new gRPC dependency outside Part 2 |
 
 ## Writing a new one
 

@@ -74,6 +74,14 @@ regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# The official gRPC client for the semantic cache's vector store — see
+# docs/adr/0010-qdrant-grpc-client.md. Pure Rust, no native binary, so unlike `ort` this is
+# a normal always-on dependency, not feature-gated.
+qdrant-client = { version = "1", default-features = false, features = [
+  "serde",
+  "uuid",
+] }
+
 # Local embeddings for the semantic cache — optional, see docs/adr/0009-local-onnx-embeddings.md.
 # `default-features = false` on `ort` deliberately excludes its `download-binaries` feature:
 # enabling `local-embeddings` must never make `cargo build` silently fetch a native binary
