@@ -28,6 +28,20 @@ downloading and executing a native binary from the internet as a side effect of 
 running `cargo build`. So this ADR's decision is as much about *how the dependency is
 introduced safely* as it is about the embedding pipeline itself.
 
+**Which model, revisited before shipping.** The founder also asked directly whether an
+NVIDIA open embedding model made sense here, and to compare it against the alternatives —
+worth researching properly rather than assuming. NVIDIA's current open, commercially-usable
+line (Nemotron 3 Embed, released July 2026, OpenMDW-1.1 license) tops the RTEB leaderboard,
+but even its smallest variant is 1.14B parameters, decoder-based, and quantized (NVFP4) for
+Blackwell-class GPUs — roughly 50x larger than the CPU-sized tier this feature needs, and
+architecturally built for a different job: embed a corpus once, offline, as well as
+possible, not embed one live request in single-digit milliseconds on a CPU core. Ruled out
+on fit, not license. Within the actual CPU tier, `BAAI/bge-small-en-v1.5` (33M params,
+384-dim, MIT) was chosen over the originally-proposed `sentence-transformers/all-MiniLM-L6-v2`
+(22M params) — multiple current sources rank BGE-small above MiniLM on retrieval quality at
+nearly identical latency and size, and for a mechanism whose real risk is a false-positive
+cache hit, that tradeoff is worth taking.
+
 ## Decision
 
 **`cache::onnx_embed::OnnxEmbedder`**, a second implementation of the `Embedder` trait
@@ -99,20 +113,33 @@ environment, before being called done. This one only got the first of those thre
   path everyone actually uses — re-ran clean after all of the above, 774 lib / 814
   full-suite passing, identical to before this ADR existed. The isolation the feature flag
   is supposed to provide is real, not just claimed.
+- Re-confirmed after switching the target model from MiniLM to BGE-small-en-v1.5 (which
+  also made `max_sequence_length` a constructor parameter instead of a hardcoded constant,
+  since silently reusing one model's trained context length for a different model is
+  exactly the kind of quiet mismatch worth designing out): `cargo check`/`cargo clippy
+  --lib`/`cargo clippy --benches`, all with `--features local-embeddings`, still pass
+  clean, and the default build still shows the same 774/814.
 
 What remains genuinely open, and needs a real ONNX Runtime binary plus a real
-`all-MiniLM-L6-v2.onnx` and tokenizer file to close: whether the pure-math unit tests
+`bge-small-en-v1.5.onnx` and tokenizer file to close: whether the pure-math unit tests
 actually pass when they can run, and — the part that actually matters — whether real
 embeddings from this model behave the way `cache/semantic.rs`'s 0.95 threshold assumes.
 
-**Quantization was deliberately not attempted here.** The founder's original brief
-proposed INT8 quantization for extra speed; this ADR ships FP32 first, on purpose. A
-quantized model shifts the embedding space, which can change which pairs of prompts land
-above or below the 0.95 similarity threshold — for a mechanism whose entire safety
-argument is "false positives must be rare," that needs to be measured against a real
-false-positive-rate benchmark before it ships, not assumed safe because it's faster. FP32
-first establishes the correctness baseline; quantization is a follow-up decision, not
-bundled into this one.
+**Quantization was deliberately not attempted here — and the same caution applies to the
+model choice itself, not just quantization.** The founder's original brief proposed INT8
+quantization for extra speed; this ADR ships FP32 first, on purpose. A quantized model
+shifts the embedding space, which can change which pairs of prompts land above or below
+the 0.95 similarity threshold. But that's really one instance of a broader fact worth
+stating plainly: **any change to which model produces the vectors — quantizing it,
+swapping it for a different architecture, even switching pooling strategy — can move that
+threshold's real meaning**, because 0.95 was reasoned about in the context of whatever
+model actually produced the scores it was calibrated against. BGE-small's own
+documentation makes this concrete: unrelated-text similarity in its embedding space sits
+noticeably above zero, not near it. For a mechanism whose entire safety argument is "false
+positives must be rare," any of these changes needs a real false-positive-rate benchmark
+before it ships, not an assumption that a threshold tuned in one context still means the
+same thing in another. FP32 BGE-small first establishes the correctness baseline;
+quantization is a follow-up decision, not bundled into this one.
 
 **The `Mutex`-serialized session is a real, accepted limitation for now.** Under load,
 every concurrent semantic-cache-eligible request queues behind the same lock for its

@@ -51,7 +51,7 @@ fn embed_latency(c: &mut Criterion) {
     // something bundled in the repo, for the same reason `cache::onnx_embed`'s own docs
     // give: this crate does not ship a model or a native binary.
     let model_path = env::var("AEGIS_BENCH_ONNX_MODEL").expect(
-        "set AEGIS_BENCH_ONNX_MODEL to an all-MiniLM-L6-v2.onnx path to run this benchmark",
+        "set AEGIS_BENCH_ONNX_MODEL to a bge-small-en-v1.5.onnx path to run this benchmark",
     );
     let tokenizer_path = env::var("AEGIS_BENCH_TOKENIZER")
         .expect("set AEGIS_BENCH_TOKENIZER to a tokenizer.json path to run this benchmark");
@@ -60,8 +60,13 @@ fn embed_latency(c: &mut Criterion) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(2);
 
-    let embedder = OnnxEmbedder::load(&model_path, &tokenizer_path, threads)
-        .expect("model and tokenizer must load for this benchmark to mean anything");
+    let embedder = OnnxEmbedder::load(
+        &model_path,
+        &tokenizer_path,
+        threads,
+        aegis_gateway::cache::onnx_embed::BGE_SMALL_MAX_SEQUENCE_LENGTH,
+    )
+    .expect("model and tokenizer must load for this benchmark to mean anything");
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime for the async embed() call");
 

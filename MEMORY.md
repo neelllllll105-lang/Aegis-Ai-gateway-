@@ -586,7 +586,7 @@ Session 6 closed essentially every code-level P0/P1/P2 finding from the session 
 What's left is almost entirely "run it against something real" — the same category of gap
 that has persisted since session 3, now the dominant one:
 
-1. **Provision a real ONNX Runtime binary + `all-MiniLM-L6-v2` model** and run
+1. **Provision a real ONNX Runtime binary + `BAAI/bge-small-en-v1.5` model** and run
    `docs/runbooks/local-embeddings-setup.md` end to end — `cache::onnx_embed::OnnxEmbedder`
    type-checks and passes clippy but has never actually linked, run, or been benchmarked
    in any environment yet (see the session 7 log entry and
@@ -852,10 +852,40 @@ false-positive-rate question, not just a speed one, deliberately not attempted t
 session).
 
 **Built `cache::onnx_embed::OnnxEmbedder`** — a second `Embedder` implementation (`ort` +
-`tokenizers`, `all-MiniLM-L6-v2`, FP32, mean-pooled + L2-normalized), behind a new
-`local-embeddings` Cargo feature that is **off by default** specifically so enabling it
-never makes `cargo build` silently fetch a native binary — see
-`docs/adr/0009-local-onnx-embeddings.md` and `docs/runbooks/local-embeddings-setup.md`.
+`tokenizers`, FP32, mean-pooled + L2-normalized), behind a new `local-embeddings` Cargo
+feature that is **off by default** specifically so enabling it never makes `cargo build`
+silently fetch a native binary — see `docs/adr/0009-local-onnx-embeddings.md` and
+`docs/runbooks/local-embeddings-setup.md`.
+
+**Then asked directly whether an NVIDIA open embedding model made sense here, and for a
+comparison against the alternatives.** Researched rather than assumed (NVIDIA's open
+embedding line moves fast — Nemotron 3 Embed shipped mid-July 2026, after this session's
+training-knowledge cutoff for that specific release). Verdict: no — even NVIDIA's smallest
+open, commercially-licensed variant (Nemotron 3 Embed 1B, OpenMDW-1.1) is 1.14B parameters,
+decoder-based, and NVFP4-quantized for Blackwell-class GPUs, roughly 50x too large and the
+wrong architecture family for a sub-5ms CPU cache lookup — ruled out on fit, not license.
+Within the actual CPU-sized tier, **switched the target model from the originally-proposed
+`all-MiniLM-L6-v2` to `BAAI/bge-small-en-v1.5`** (33M params, 384-dim, MIT) — multiple
+current sources rank it above MiniLM on retrieval quality at nearly identical size/speed,
+worth taking for a mechanism whose real risk is a false-positive cache hit. Two BGE-specific
+correctness details, verified against the model's own docs rather than assumed: it mean-pools
+by default (matches the code already written, no change needed — CLS pooling would have
+produced an incompatible embedding space), and needs no query-instruction prefix for a
+symmetric prompt-to-prompt comparison (that prefix is BGE's own recommendation for
+asymmetric query-vs-document retrieval, a different job). Also found and generalized a
+sharper point while researching this: BGE's own docs note unrelated-text similarity in its
+embedding space sits noticeably above zero, which sharpens (not just repeats) the ADR's
+existing warning that the 0.95 threshold's meaning isn't automatically portable across a
+model change, quantization included.
+
+Refactored `MAX_SEQUENCE_LENGTH` from a hardcoded MiniLM-specific constant into a real
+constructor parameter (`OnnxEmbedder::load`'s new `max_sequence_length` argument, with
+`BGE_SMALL_MAX_SEQUENCE_LENGTH = 512` as the named constant for this model) — silently
+reusing one model's trained context length for a different model is exactly the kind of
+quiet mismatch worth designing out rather than leaving as a trap for whoever swaps models
+next. Re-verified after the swap: `cargo check`/`cargo clippy --lib`/`cargo clippy
+--benches`, all with `--features local-embeddings`, still clean; default build still 774
+lib / 814 full-suite, unaffected.
 
 **Honest status, stated as precisely as the verification allows — this is categorically
 different from everything else in this file:**

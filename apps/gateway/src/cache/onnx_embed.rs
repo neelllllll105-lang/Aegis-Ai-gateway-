@@ -19,13 +19,41 @@
 //!
 //! # The model this expects
 //!
-//! `sentence-transformers/all-MiniLM-L6-v2`, ONNX-exported (e.g. via `optimum-cli export
-//! onnx --model sentence-transformers/all-MiniLM-L6-v2`), with a standard BERT-style
+//! **`BAAI/bge-small-en-v1.5`** (33M params, 384-dim, MIT license) — chosen over
+//! `sentence-transformers/all-MiniLM-L6-v2` (22M params) after comparing both against
+//! current benchmarks and NVIDIA's open embedding line (Nemotron 3 Embed): NVIDIA's
+//! smallest variant is 1.14B parameters and quantized for Blackwell-class GPUs, roughly
+//! 50x too large and the wrong architecture family for a sub-5ms CPU cache lookup: two
+//! separate models tuned for two different jobs. Within the CPU-sized tier, BGE-small
+//! consistently benchmarks above MiniLM at nearly the same latency and size — worth taking
+//! for a mechanism whose real danger is a false-positive cache hit, not raw speed.
+//!
+//! Get it ONNX-exported via `optimum-cli export onnx --model BAAI/bge-small-en-v1.5`, or a
+//! pre-exported copy (verify before trusting a third party, same as any model weights —
+//! see `docs/runbooks/local-embeddings-setup.md`). Expects a standard BERT-style
 //! `input_ids`/`attention_mask`/`token_type_ids` input signature and a `last_hidden_state`
-//! output — the raw per-token hidden states, not a pre-pooled sentence embedding. This
-//! module does the mean-pooling and L2 normalization itself (the exact recipe the model's
-//! own card documents), so it works against the common raw export rather than depending on
-//! a specific tool's pooled-output variant.
+//! output — the raw per-token hidden states, not a pre-pooled sentence embedding.
+//!
+//! **Pooling: mean, not CLS.** BGE supports both, and they produce *incompatible*
+//! embedding spaces — mixing them silently corrupts every similarity comparison. This
+//! module always mean-pools (matching this model's own documented default), so don't swap
+//! in a CLS-pooled export without changing the code to match.
+//!
+//! **No query instruction prefix.** BGE's own documentation recommends a
+//! `"Represent this sentence for searching relevant passages: "` prefix specifically for
+//! *asymmetric* retrieval (a short query against long documents) — our semantic cache
+//! compares one prompt against other prompts, a symmetric comparison the same model card
+//! says needs no instruction. Prepending one here would just be a self-inflicted
+//! fingerprint mismatch against anything cached before the code changed.
+//!
+//! **The 0.95 threshold is not automatically portable across models.** BGE's own docs
+//! note its cosine-similarity distribution for genuinely unrelated text sits noticeably
+//! above zero (roughly 0.6+, not the near-zero baseline some embedding spaces produce) —
+//! `cache::semantic::DEFAULT_SIMILARITY_THRESHOLD` was picked as "strict enough that false
+//! positives are rare," a claim tied to whichever model actually produced the vectors it
+//! was reasoned about. Re-validate it against this model specifically (see the runbook's
+//! false-positive-rate check) rather than assuming a threshold that made sense for one
+//! embedding space still means the same thing in another.
 
 use crate::cache::embed::Embedder;
 use async_trait::async_trait;
@@ -34,11 +62,6 @@ use ort::value::Tensor;
 use std::path::Path;
 use std::sync::Mutex;
 use tokenizers::Tokenizer;
-
-/// Sequence length the model was validated at. Longer inputs are truncated rather than
-/// rejected — a cache-lookup embedding degrading gracefully on an unusually long prompt is
-/// better than the request failing outright.
-const MAX_SEQUENCE_LENGTH: usize = 256;
 
 /// A local, in-process embedder backed by ONNX Runtime.
 ///
@@ -52,7 +75,15 @@ const MAX_SEQUENCE_LENGTH: usize = 256;
 pub struct OnnxEmbedder {
     session: Mutex<Session>,
     tokenizer: Tokenizer,
+    max_sequence_length: usize,
 }
+
+/// bge-small-en-v1.5's trained context — a BERT-base-style 512-token position embedding
+/// limit. Longer inputs are truncated rather than rejected: a cache-lookup embedding
+/// degrading gracefully on an unusually long prompt is better than the request failing
+/// outright. A different model swapped in later should pass its own real limit to
+/// [`OnnxEmbedder::load`] rather than inherit this one silently.
+pub const BGE_SMALL_MAX_SEQUENCE_LENGTH: usize = 512;
 
 /// Everything that can go wrong constructing an [`OnnxEmbedder`] — deliberately its own
 /// type rather than `crate::error::AegisError`, since this only ever happens at startup
@@ -72,10 +103,17 @@ impl OnnxEmbedder {
     /// `intra_threads` should match the number of physical cores you're willing to give
     /// this one session — not the whole machine's core count, since the gateway's own
     /// async runtime and every other stage of the pipeline are competing for the same CPU.
+    ///
+    /// `max_sequence_length` must match the model actually being loaded — passed in
+    /// explicitly rather than hardcoded, since silently reusing one model's trained
+    /// context length for a different model is exactly the kind of quiet mismatch that
+    /// degrades embedding quality without ever producing an error. Use
+    /// [`BGE_SMALL_MAX_SEQUENCE_LENGTH`] for this module's target model.
     pub fn load(
         model_path: impl AsRef<Path>,
         tokenizer_path: impl AsRef<Path>,
         intra_threads: usize,
+        max_sequence_length: usize,
     ) -> Result<OnnxEmbedder, OnnxEmbedderError> {
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
@@ -88,6 +126,7 @@ impl OnnxEmbedder {
         Ok(OnnxEmbedder {
             session: Mutex::new(session),
             tokenizer,
+            max_sequence_length,
         })
     }
 
@@ -102,8 +141,8 @@ impl OnnxEmbedder {
             .iter()
             .map(|&m| m as i64)
             .collect();
-        ids.truncate(MAX_SEQUENCE_LENGTH);
-        mask.truncate(MAX_SEQUENCE_LENGTH);
+        ids.truncate(self.max_sequence_length);
+        mask.truncate(self.max_sequence_length);
         let seq_len = ids.len();
         if seq_len == 0 {
             return None;
