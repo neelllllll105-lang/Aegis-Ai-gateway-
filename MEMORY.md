@@ -35,9 +35,13 @@ bash scripts/verify-phase.sh 3  # automated acceptance checks for a phase
 — a full 16-section audit (pricing, security, reliability, scale, routing, testing,
 enterprise-deployment fitness, a 0-10 scorecard, and a P0-P3 findings list) done session 5
 by tracing real execution paths and running adversarial tests, not by reading
-documentation. Three P0s were fixed during the audit itself; the rest are open findings
-with complexity estimates. This file's Known Limitations section below summarizes the
-findings that change project state; the artifact has the full evidence for each.
+documentation, **updated in place session 6** after a remediation pass closed every P0/P1
+finding and 9 of 10 P2s — the scorecard and every finding status now reflect what's
+actually fixed, with struck-through prior values kept visible rather than silently edited
+away. This file's Known Limitations section below summarizes the findings that still
+change project state; the artifact has the full evidence for each, updated to match. Also
+current: the [Aegis Field Manual](https://claude.ai/code/artifact/fc18e8d1-cb1d-40d6-88d5-393be51bf276),
+the founder-level walkthrough of the whole system, updated the same session.
 
 ---
 
