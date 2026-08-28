@@ -127,6 +127,19 @@ pub struct Config {
     /// that was only ever asked once. See `docs/adr/0008-tiered-durable-cache.md`.
     pub durable_cache_ttl_days: i64,
 
+    /// The token circuit breaker: the hard ceiling on a single request's `max_tokens`,
+    /// enforced platform-wide before routing.
+    ///
+    /// Budget checking (`middleware::budget`) bounds *aggregate* spend over a period; it
+    /// says nothing about one request. A prompt with no `max_tokens` set, or a reasoning
+    /// model given free rein, can generate far more output than the 1/3-of-input estimate
+    /// `budget::project_cost` uses to reserve against — the aggregate budget eventually
+    /// catches up (the reservation is trued up after the fact), but a single request can
+    /// still land as a large, surprising outlier before that happens. This closes that gap
+    /// independently of budget: every request's effective `max_tokens` is clamped to this
+    /// ceiling, unconditionally, regardless of remaining budget headroom.
+    pub max_tokens_per_request: u32,
+
     /// Free-tier monthly request allowance.
     pub free_tier_monthly_requests: u64,
 }
@@ -183,6 +196,7 @@ impl Config {
             cache_ttl: Duration::from_secs(num("AEGIS_CACHE_TTL_SECS", 86_400)?),
             semantic_similarity_threshold: fnum("AEGIS_SEMANTIC_THRESHOLD", 0.95)?,
             durable_cache_ttl_days: num("AEGIS_DURABLE_CACHE_TTL_DAYS", 30)?,
+            max_tokens_per_request: num("AEGIS_MAX_TOKENS_PER_REQUEST", 16_384)?,
 
             free_tier_monthly_requests: num("AEGIS_FREE_TIER_MONTHLY_REQUESTS", 10_000)?,
         };
@@ -220,6 +234,7 @@ impl Config {
             cache_ttl: Duration::from_secs(86_400),
             semantic_similarity_threshold: 0.95,
             durable_cache_ttl_days: 30,
+            max_tokens_per_request: 16_384,
             free_tier_monthly_requests: 10_000,
         }
     }
@@ -234,6 +249,11 @@ impl Config {
         if self.durable_cache_ttl_days < 1 {
             return Err(AegisError::Config(
                 "AEGIS_DURABLE_CACHE_TTL_DAYS must be at least 1".into(),
+            ));
+        }
+        if self.max_tokens_per_request == 0 {
+            return Err(AegisError::Config(
+                "AEGIS_MAX_TOKENS_PER_REQUEST must be at least 1".into(),
             ));
         }
         if self.environment.is_production_like() {

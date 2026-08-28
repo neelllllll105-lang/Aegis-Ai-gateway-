@@ -952,6 +952,45 @@ checked `infra/docker-compose.yml` and `infra/docker-compose.self-hosted.yml` di
 found only port 6333 (REST) was exposed in either, and added 6334 to both rather than
 leave documentation describing infrastructure that didn't match reality.
 
+**Then asked for five things in one message: a token circuit breaker, formalizing
+execution levels (user vs org), UI/infrastructure decisions, IDE integration, and
+10/10 performance/scalability targets.** Treated as a backlog to work through with
+appropriate depth per item, not five things to build blind in one pass — checked what
+already existed against the real code before proposing anything new for each.
+
+**Built the token circuit breaker — the one item that was a clear, well-scoped gap.**
+Budget checking (`middleware::budget`) bounds *aggregate* spend over a period; nothing
+bounded a single request's `max_tokens` independent of that. A prompt with no
+`max_tokens` (the more dangerous case, not the safer one — defers to the provider's own
+default, which can be very large) or one requesting far more than the budget projection
+assumed could still land as a large, surprising outlier before the aggregate counter
+caught up. New `Config::max_tokens_per_request` (`AEGIS_MAX_TOKENS_PER_REQUEST`, default
+16,384) enforced by a shared `clamp_max_tokens()` — clamps down, or injects the ceiling
+when absent, unconditionally.
+
+**Found and closed a real gap while implementing it**: the natural first instinct
+(enforce inside `execute_with_headroom`, the shared pipeline function) would have missed
+streaming entirely — `stream_chat` runs a completely separate pipeline that never calls
+`execute_with_headroom`. Moved the authoritative enforcement to `handle_chat` and
+`handle_messages` (the two HTTP-level entry points), before their budget reservation
+call — covers streaming and non-streaming from one call site per endpoint, and fixes a
+second, subtler issue for free: the budget *projection* itself now reflects the bound
+that will actually be enforced, rather than projecting against a value the request will
+never actually be allowed to reach. Proved directly, not assumed: extended
+`MockProvider::RecordedCall` to capture the `max_tokens` a provider actually received, then
+wrote a streaming-specific test (`the_token_circuit_breaker_also_protects_streaming_requests`)
+that would have caught the gap had it shipped. 8 new tests, `cargo fmt`/`clippy --all-targets
+-- -D warnings` clean, `cargo test` → 782 lib passing (was 774) + 822 full-suite (was 814).
+
+**The other four items got direct answers, not code** — see the chat response for the
+full treatment: Execution Levels and UI/Infrastructure were mostly already true, answered
+by pointing at what's real (the 4 budget scopes, the 3 deployment paths, the [Control
+Room](https://claude.ai/code/artifact/3e1c0060-2d00-4995-bbf6-3e113dcf6e87) artifact);
+Performance/Scalability got concrete numeric targets grounded in what's already measured
+rather than an unqualified "10/10"; IDE Integration is a genuinely new, large,
+different-tech-stack commitment (TypeScript for VS Code/Cursor, Kotlin for JetBrains) —
+scoped as a proposal, not started, pending which surface the founder actually wants.
+
 ### 2026-08-26 — Session 6 — Claude Sonnet 5
 
 User's request, quoted in full because it set the scope for the entire session: *"The

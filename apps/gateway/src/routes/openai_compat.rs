@@ -205,6 +205,26 @@ impl OverheadClock {
     }
 }
 
+/// The token circuit breaker — stage [4b].
+///
+/// Clamps (never raises) a request's effective `max_tokens` to `ceiling`, unconditionally.
+/// A request with no `max_tokens` at all is the more dangerous case, not the safer one: it
+/// defers to whatever the provider's own default happens to be, which for some models is
+/// very large and for reasoning models can include a substantial "thinking" allowance the
+/// caller never asked for — this injects the ceiling rather than leaving it unset.
+///
+/// Returns whether the request was actually changed, so the caller can decide whether to
+/// surface it in the response's explanation rather than clamping silently.
+pub(crate) fn clamp_max_tokens(request: &mut NormalizedRequest, ceiling: u32) -> bool {
+    match request.max_tokens {
+        Some(requested) if requested <= ceiling => false,
+        Some(_) | None => {
+            request.max_tokens = Some(ceiling);
+            true
+        }
+    }
+}
+
 /// Build the outcome for any cache hit — hot tier, durable tier, or semantic — and record
 /// its savings metric.
 ///
@@ -275,6 +295,19 @@ pub async fn execute_with_headroom(
     let mut clock = OverheadClock::start();
     let request_id = Uuid::new_v4();
     let requested_model = request.model.clone();
+
+    // ---- [4b] Token circuit breaker ------------------------------------------------
+    // As early as possible — before the fingerprint is computed, so a clamped value is
+    // what gets cached and hashed too, rather than letting an over-the-ceiling request
+    // fragment the cache key space for no benefit.
+    let token_limit_enforced = clamp_max_tokens(&mut request, state.config.max_tokens_per_request);
+    if token_limit_enforced {
+        tracing::info!(
+            org_id = %auth.org_id,
+            ceiling = state.config.max_tokens_per_request,
+            "token circuit breaker: clamped max_tokens for this request"
+        );
+    }
 
     // ---- [3] Free-tier allowance -------------------------------------------------
     if !budget::check_free_tier_allowance(
@@ -578,6 +611,13 @@ pub async fn execute_with_headroom(
     if used_fallback {
         explanation.push(format!(
             "the routed provider failed, so this request was served by {provider_id} instead"
+        ));
+    }
+    if token_limit_enforced {
+        explanation.push(format!(
+            "max_tokens was capped at {} by Aegis's platform-wide token circuit breaker, \
+             to bound this request's worst-case cost independently of budget headroom",
+            state.config.max_tokens_per_request
         ));
     }
 
@@ -1123,13 +1163,29 @@ async fn handle_chat(
     if body.len() > state.config.max_body_bytes {
         return Err(AegisError::PayloadTooLarge);
     }
-    let request: NormalizedRequest = serde_json::from_slice(&body)
+    let mut request: NormalizedRequest = serde_json::from_slice(&body)
         .map_err(|e| AegisError::BadRequest(format!("invalid request body: {e}")))?;
 
     if request.messages.is_empty() {
         return Err(AegisError::BadRequest(
             "messages must contain at least one message".into(),
         ));
+    }
+
+    // ---- [4b] Token circuit breaker -------------------------------------------------
+    // Before the budget reservation below, deliberately: the reservation projects cost
+    // from `max_tokens`, so clamping first means the projection reflects the bound that
+    // will actually be enforced rather than whatever the client sent (or didn't send —
+    // an absent `max_tokens` is the more dangerous case, not the safer one). Also covers
+    // both branches below (`stream_chat` and `execute_with_headroom`) from one call site,
+    // since streaming has its own separate pipeline that never reaches the second, later
+    // clamp inside `execute_with_headroom`.
+    if clamp_max_tokens(&mut request, state.config.max_tokens_per_request) {
+        tracing::info!(
+            org_id = %auth_context.org_id,
+            ceiling = state.config.max_tokens_per_request,
+            "token circuit breaker: clamped max_tokens for this request"
+        );
     }
 
     // ---- [3] Budget --------------------------------------------------------------
@@ -2595,6 +2651,139 @@ mod tests {
             response.is_ok(),
             "a matching region must be served: {response:?}"
         );
+    }
+
+    // ---- Token circuit breaker -----------------------------------------------------
+
+    #[test]
+    fn clamp_max_tokens_injects_the_ceiling_when_absent() {
+        let mut request = NormalizedRequest::simple("mock/mock-premium", "hi");
+        assert_eq!(request.max_tokens, None);
+        assert!(clamp_max_tokens(&mut request, 1_000));
+        assert_eq!(request.max_tokens, Some(1_000));
+    }
+
+    #[test]
+    fn clamp_max_tokens_lowers_a_request_above_the_ceiling() {
+        let mut request = NormalizedRequest::simple("mock/mock-premium", "hi");
+        request.max_tokens = Some(50_000);
+        assert!(clamp_max_tokens(&mut request, 1_000));
+        assert_eq!(request.max_tokens, Some(1_000));
+    }
+
+    #[test]
+    fn clamp_max_tokens_leaves_a_request_already_under_the_ceiling_alone() {
+        let mut request = NormalizedRequest::simple("mock/mock-premium", "hi");
+        request.max_tokens = Some(200);
+        assert!(!clamp_max_tokens(&mut request, 1_000));
+        assert_eq!(request.max_tokens, Some(200));
+    }
+
+    #[test]
+    fn clamp_max_tokens_leaves_a_request_exactly_at_the_ceiling_alone() {
+        let mut request = NormalizedRequest::simple("mock/mock-premium", "hi");
+        request.max_tokens = Some(1_000);
+        assert!(!clamp_max_tokens(&mut request, 1_000));
+    }
+
+    fn state_with_low_token_ceiling(mock: Arc<MockProvider>) -> AppState {
+        let state = test_state(mock);
+        let mut config = (*state.config).clone();
+        config.max_tokens_per_request = 500;
+        AppState {
+            config: std::sync::Arc::new(config),
+            ..state
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_with_no_max_tokens_reaches_the_provider_with_the_ceiling_injected() {
+        let mock = Arc::new(MockProvider::returning("answer"));
+        let state = state_with_low_token_ceiling(Arc::clone(&mock));
+        let token = seed_key(&state, "test");
+        let headers = bearer_headers(&token);
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "mock/mock-premium",
+                "messages": [{"role": "user", "content": "hi"}]
+            })
+            .to_string(),
+        );
+
+        let response = handle_chat(&state, &headers, body).await;
+        assert!(response.is_ok(), "request should succeed: {response:?}");
+        assert_eq!(mock.calls().last().unwrap().max_tokens, Some(500));
+    }
+
+    #[tokio::test]
+    async fn a_request_asking_for_more_than_the_ceiling_is_clamped_before_reaching_the_provider() {
+        let mock = Arc::new(MockProvider::returning("answer"));
+        let state = state_with_low_token_ceiling(Arc::clone(&mock));
+        let token = seed_key(&state, "test");
+        let headers = bearer_headers(&token);
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "mock/mock-premium",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1_000_000
+            })
+            .to_string(),
+        );
+
+        let response = handle_chat(&state, &headers, body).await;
+        assert!(response.is_ok(), "request should succeed: {response:?}");
+        assert_eq!(
+            mock.calls().last().unwrap().max_tokens,
+            Some(500),
+            "the platform ceiling must win over a client-requested value above it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_already_under_the_ceiling_is_sent_unchanged() {
+        let mock = Arc::new(MockProvider::returning("answer"));
+        let state = state_with_low_token_ceiling(Arc::clone(&mock));
+        let token = seed_key(&state, "test");
+        let headers = bearer_headers(&token);
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "mock/mock-premium",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 100
+            })
+            .to_string(),
+        );
+
+        let response = handle_chat(&state, &headers, body).await;
+        assert!(response.is_ok(), "request should succeed: {response:?}");
+        assert_eq!(
+            mock.calls().last().unwrap().max_tokens,
+            Some(100),
+            "a client-requested value already under the ceiling must be honoured exactly"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_token_circuit_breaker_also_protects_streaming_requests() {
+        // The safety property this whole feature exists for would have a hole here if it
+        // didn't: `stream_chat` runs a completely separate pipeline from
+        // `execute_with_headroom` and never reaches its clamp.
+        let mock = Arc::new(MockProvider::returning("streamed answer"));
+        let state = state_with_low_token_ceiling(Arc::clone(&mock));
+        let token = seed_key(&state, "test");
+        let headers = bearer_headers(&token);
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "mock/mock-premium",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true
+            })
+            .to_string(),
+        );
+
+        let response = handle_chat(&state, &headers, body).await;
+        assert!(response.is_ok(), "request should succeed: {response:?}");
+        assert_eq!(mock.calls().last().unwrap().max_tokens, Some(500));
     }
 
     #[tokio::test]

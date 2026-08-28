@@ -250,7 +250,22 @@ async fn handle_messages(
         ));
     }
 
-    let request = inbound.normalize();
+    let mut request = inbound.normalize();
+
+    // [4b] Token circuit breaker. Same reasoning and ordering as the OpenAI-compatible
+    // endpoint (before the budget reservation, so the projection reflects the bound that
+    // will actually be enforced) — shared implementation, so neither endpoint can drift
+    // into being the one without this protection.
+    if crate::routes::openai_compat::clamp_max_tokens(
+        &mut request,
+        state.config.max_tokens_per_request,
+    ) {
+        tracing::info!(
+            org_id = %auth_context.org_id,
+            ceiling = state.config.max_tokens_per_request,
+            "token circuit breaker: clamped max_tokens for this request"
+        );
+    }
 
     // [3] Budget. Atomically reserves this request's projected cost against every ceiling
     // that applies, exactly as the OpenAI-compatible endpoint does. Both endpoints share

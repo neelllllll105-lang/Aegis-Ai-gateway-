@@ -53,6 +53,10 @@ pub struct RecordedCall {
     /// same key is reused across retries of one logical request rather than a fresh one
     /// being minted per attempt (which would defeat the whole point).
     pub idempotency_key: Option<String>,
+    /// `max_tokens` as the provider actually received it — recorded so a test can prove
+    /// the token circuit breaker's clamp reached the outgoing request, not just the
+    /// pipeline's own view of it.
+    pub max_tokens: Option<u32>,
 }
 
 /// Scriptable in-process provider.
@@ -130,13 +134,20 @@ impl MockProvider {
         self.call_count.store(0, Ordering::SeqCst);
     }
 
-    fn record(&self, model: &str, streamed: bool, idempotency_key: Option<&str>) {
+    fn record(
+        &self,
+        model: &str,
+        streamed: bool,
+        idempotency_key: Option<&str>,
+        max_tokens: Option<u32>,
+    ) {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut calls) = self.calls.lock() {
             calls.push(RecordedCall {
                 model: model.to_string(),
                 streamed,
                 idempotency_key: idempotency_key.map(|k| k.to_string()),
+                max_tokens,
             });
         }
     }
@@ -206,13 +217,13 @@ impl Provider for MockProvider {
     async fn chat(
         &self,
         _http: &reqwest::Client,
-        _request: &NormalizedRequest,
+        request: &NormalizedRequest,
         model: &str,
         _credential: &Credential,
         _timeout: Duration,
         idempotency_key: Option<&str>,
     ) -> Result<NormalizedResponse> {
-        self.record(model, false, idempotency_key);
+        self.record(model, false, idempotency_key, request.max_tokens);
         match self.next_outcome() {
             MockBehavior::Succeed {
                 content,
@@ -245,13 +256,13 @@ impl Provider for MockProvider {
     async fn chat_stream(
         &self,
         _http: &reqwest::Client,
-        _request: &NormalizedRequest,
+        request: &NormalizedRequest,
         model: &str,
         _credential: &Credential,
         _timeout: Duration,
         idempotency_key: Option<&str>,
     ) -> Result<ChunkStream> {
-        self.record(model, true, idempotency_key);
+        self.record(model, true, idempotency_key, request.max_tokens);
         match self.next_outcome() {
             MockBehavior::Succeed {
                 content,
