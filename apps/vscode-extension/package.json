@@ -1,0 +1,72 @@
+{
+  "name": "aegis-vscode",
+  "displayName": "Aegis",
+  "description": "Point your editor's AI assistant (Continue, Cline, or any OpenAI-compatible client) through Aegis for cost-optimized, metered routing — one API key, no code change to your assistant.",
+  "version": "0.1.0",
+  "publisher": "aegis",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other", "Machine Learning"],
+  "activationEvents": [
+    "onCommand:aegis.setApiKey",
+    "onCommand:aegis.setBaseUrl",
+    "onCommand:aegis.copyContinueConfig",
+    "onCommand:aegis.showConnectionValues",
+    "onCommand:aegis.openDashboard",
+    "onCommand:aegis.clearApiKey"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "aegis.setApiKey",
+        "title": "Aegis: Set API Key",
+        "category": "Aegis"
+      },
+      {
+        "command": "aegis.setBaseUrl",
+        "title": "Aegis: Set Gateway URL (self-hosted only)",
+        "category": "Aegis"
+      },
+      {
+        "command": "aegis.copyContinueConfig",
+        "title": "Aegis: Copy Continue.dev Configuration",
+        "category": "Aegis"
+      },
+      {
+        "command": "aegis.showConnectionValues",
+        "title": "Aegis: Show Connection Values (for Cline or any other assistant)",
+        "category": "Aegis"
+      },
+      {
+        "command": "aegis.openDashboard",
+        "title": "Aegis: Open Dashboard",
+        "category": "Aegis"
+      },
+      {
+        "command": "aegis.clearApiKey",
+        "title": "Aegis: Clear Stored API Key",
+        "category": "Aegis"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./",
+    "typecheck": "tsc --noEmit -p ./",
+    "lint": "eslint src",
+    "package": "vsce package",
+    "pretest": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.17.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -789,6 +789,64 @@ Each of these cost real time during the build.
 
 Newest first.
 
+### 2026-08-28 — Session 8 — Claude Sonnet 5
+
+User handed over a five-item planning list in one message: a per-request token circuit
+breaker, formalizing execution levels (individual vs. org), UI/infrastructure architecture,
+IDE integration, and performance/scalability targets. Addressed each on its own footing
+rather than treating the list as one undifferentiated task — two were real, scoped
+engineering work; two were mostly already-decided reality worth confirming rather than
+re-deciding; one is a target-setting exercise with two genuinely open numbers.
+
+**Built the token circuit breaker** — `AEGIS_MAX_TOKENS_PER_REQUEST` (default 16,384),
+enforced platform-wide in `routes/openai_compat.rs::execute_with_headroom`, before the
+cache fingerprint is even computed. Closes a real gap budget checking didn't:
+`middleware::budget::project_cost` only estimates output at ~1/3 of input when a request
+sets no `max_tokens`, and the *aggregate* budget only catches an outlier after the fact
+(the reservation is trued up post-hoc). A single request — no `max_tokens` set, or a
+reasoning model given free rein — could still land as a large, surprising cost before that
+happened. Now: no `max_tokens` gets the ceiling injected; a `max_tokens` above the ceiling
+gets clamped down; a value already under it is left alone. Clamping is never a rejection
+(matches the project's "serve it, bound it" pattern elsewhere) and is surfaced in
+`x-aegis-routing-explanation` when it fires, not silent. Unit-tested for all four cases.
+Committed and pushed (`70f3a26`).
+
+**Built `apps/vscode-extension/`** — the IDE integration item, deliberately scoped down
+from "build a coding assistant" to "make it trivial to point your *existing* one (Continue,
+Cline) at Aegis." No chat panel, no in-editor proxy — Aegis already speaks the
+OpenAI-compatible protocol every one of those tools expects; the extension's whole job is
+holding the API key in VS Code's encrypted `SecretStorage` (never `settings.json`) and
+generating the three connection values correctly. Six commands, real TypeScript, strict
+tsconfig. Genuinely verified, not just written: `npm install`, `npm run typecheck`,
+`npm run compile`, and `npm run lint` all pass clean against the real `@types/vscode`,
+`eslint@9`, and `@typescript-eslint` APIs. **Not** run inside an actual VS Code Extension
+Development Host — no way to launch VS Code itself here, so the six commands' interactive
+behavior is reviewed by hand, not exercised live. JetBrains and Cursor are open — Cursor is
+a VS Code fork and likely needs little or no change once verified there; JetBrains is a
+genuinely separate platform (Kotlin/Java, its own plugin SDK) — deferred pending the
+founder's priority call, not attempted blind.
+
+**A real Windows-specific npm gotcha, worth remembering**: running two `npm install`
+invocations against the same `node_modules` concurrently corrupts the loser's packages —
+here, `eslint` ended up missing its own `package.json` and bin shim, `ENOTEMPTY`/`EPERM`
+errors on Windows file locks during the collision. First background install actually
+succeeded on its own (18 minutes — Windows Defender scanning each extracted file in real
+time produced a long run of retried `TAR_ENTRY_ERROR` warnings before finishing clean); a
+second, impatient foreground attempt against the same directory is what broke it. Fixed by
+deleting `node_modules` entirely and running exactly one install, waited out fully before
+touching the directory again (30s the second time, no contention). Also found and fixed a
+real gap while verifying: no `eslint.config.js` existed at all — ESLint 9 requires the flat
+config format and silently can't run without one; `.eslintrc.*` is no longer read.
+
+**Answered directly rather than rebuilding**: UI/infrastructure was already decided (the
+Control Room artifact, unchanged); execution levels mostly already exist (API key ≈
+individual, team/region/org/platform above it) with one clearly-scoped gap flagged rather
+than built blind — no person-level spend aggregation distinct from a key, a real but
+additive feature pending the founder's call; performance/scalability got concrete proposed
+targets (0.5ms/2ms P50/P99 gateway overhead, 99.9% uptime, the existing ~8-10-replica
+Postgres wall) with the two genuinely open numbers (target RPS, whether 99.9% is the right
+SLA bar) left for the founder rather than invented.
+
 ### 2026-08-27 — Session 7 — Claude Sonnet 5
 
 User asked, in plain language, about the caching tradeoff: store content to cut cost, or
