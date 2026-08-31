@@ -43,8 +43,12 @@ change project state; the artifact has the full evidence for each, updated to ma
 current: the [Aegis Field Manual](https://claude.ai/code/artifact/fc18e8d1-cb1d-40d6-88d5-393be51bf276),
 the founder-level walkthrough of the whole system, updated the same session; and the
 [Aegis Control Room](https://claude.ai/code/artifact/3e1c0060-2d00-4995-bbf6-3e113dcf6e87)
-(new session 6), the operator's answer to how it's deployed, the org-role vs.
-platform-admin control split, plan/billing mechanics, and how self-hosted licensing works.
+(session 6), the operator's answer to how it's deployed, the org-role vs.
+platform-admin control split, plan/billing mechanics, and how self-hosted licensing works;
+and [Aegis Journeys](https://claude.ai/code/artifact/196f024b-ffc7-4955-bfc9-e5cb7c175446)
+(new session 9), the individual/organization/admin workflow walkthrough, unusual among
+these artifacts for marking each claim by whether it was live-verified in a real browser
+against a real running gateway+dashboard or only checked against source.
 
 ---
 
@@ -788,6 +792,52 @@ Each of these cost real time during the build.
 ## Session Log
 
 Newest first.
+
+### 2026-08-31 — Session 9 — Claude Sonnet 5
+
+User asked for something this project's own tooling has never actually done in any prior
+session: run both the real gateway and the real dashboard together, live, and walk the
+actual user/org/admin workflows through a browser rather than describe them from source.
+Added a `"gateway"` entry to `.claude/launch.json` (only `"web"` existed before) and
+started both — `cargo run --bin aegis-gateway` on :8080, `next dev` on :3000, no
+Redis/Postgres/Qdrant (Docker still unavailable on this machine).
+
+**Found and fixed a real bug by doing this, not by reading code**: signing up against a
+database-less gateway returned a bare `500 internal_error` with no actionable signal,
+instead of the `503` every other database-dependent management endpoint already used.
+Root cause: `AppState::db()` — the single function every one of those handlers calls —
+used `AegisError::Internal` (documented as "anything genuinely unexpected") for a
+condition that is neither unexpected nor even undetected — `/health` was already
+reporting the identical "database not configured" fact clearly. Added a proper
+`AegisError::ServiceUnavailable` variant (503, message passed through rather than
+opaqued — `/health` already makes the same fact public, so nothing new is being
+disclosed) and switched `AppState::db()` to it, fixing every caller at once by
+construction. Two new regression tests (the error mapping itself, and a handler-level
+test calling the real `signup()` against `AppState::for_tests()`). Re-verified live in
+the browser after rebuilding: `503`, correct message, and the dashboard's signup page —
+already built correctly — displayed it inline with zero frontend changes needed. Neither
+`route_surface.rs` nor any DB-gated integration test had ever caught this, because CI's
+DB-gated tests only run *with* a database present; the "database absent" path had never
+actually been exercised by anything until it was exercised by hand.
+
+Published a new artifact, [Aegis Journeys](https://claude.ai/code/artifact/196f024b-ffc7-4955-bfc9-e5cb7c175446)
+— the individual/organization/admin workflow walkthrough the founder asked for, with every
+step marked by how it was actually checked: live-verified (landing, signup, login, the
+unauthenticated-dashboard redirect, CORS between the two real services, `/health`'s honest
+dependency reporting) versus code-verified only (every authenticated dashboard page —
+Policies, Budgets, Providers, Team, Billing — accurate per source, not clicked through,
+since no database means no real session can ever be created here). Confirmed the org
+role/policy/budget model already exists roughly as MASTER_BUILD.md describes it — API key
+≈ individual actor, team/region/org/platform above it, `can_write()`/`can_read()` enforced
+server-side per role, four roles (owner/admin/member/viewer), a structural guard against
+ever demoting the last owner.
+
+Live Gemini API key testing requested but not yet received — the founder said "we are
+going to use Google Gemini" without pasting the actual key value. Plan once it arrives:
+construct an `AppState`/`AuthContext` directly in-process (no HTTP auth needed, the same
+way `AppState::for_tests()` already does it) and drive a real completion through the real
+pipeline code — genuine, non-mocked verification of the Google provider adapter, pricing
+accuracy, and caching, without needing Postgres at all.
 
 ### 2026-08-28 — Session 8 — Claude Sonnet 5
 
