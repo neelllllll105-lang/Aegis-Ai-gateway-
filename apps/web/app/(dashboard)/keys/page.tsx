@@ -119,7 +119,7 @@ export default function KeysPage() {
           </p>
 
           <div className="mt-4 flex flex-wrap items-center gap-2">
-            <code className="tabular flex-1 overflow-x-auto rounded-[var(--radius)] border border-[var(--color-line-dark)] bg-[var(--color-bg)] px-3 py-2 text-xs text-[var(--color-ink)]">
+            <code className="tabular flex-1 overflow-x-auto rounded-[var(--radius)] border border-[#3C3324] bg-[#201B14] px-3 py-2 text-xs text-[#F7F1E4]">
               {created.key}
             </code>
             <Button variant="secondary" onClick={copyKey}>

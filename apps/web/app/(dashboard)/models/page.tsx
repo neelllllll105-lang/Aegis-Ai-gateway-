@@ -84,7 +84,7 @@ export default function ModelsPage() {
       <Card className="mb-6 p-4">
         <div className="flex flex-wrap items-center gap-4">
           <div
-            className="flex gap-1 rounded-xl border border-[#D9CFC7] bg-[#F9F8F6] p-1"
+            className="flex gap-1 rounded-xl border border-[var(--color-ink)] bg-[var(--color-surface2)] p-1"
             role="group"
             aria-label="Filter by tier"
           >
@@ -96,8 +96,8 @@ export default function ModelsPage() {
                 aria-pressed={tier === option}
                 className={`rounded-lg px-3 py-1.5 text-xs font-bold capitalize transition-colors ${
                   tier === option
-                    ? "border border-[#D9CFC7] bg-white text-black shadow-xs"
-                    : "text-[#403B35] hover:text-black"
+                    ? "border border-[var(--color-ink)] bg-[var(--color-surface)] text-[var(--color-ink)] shadow-[3px_3px_0_var(--shadow-color)]"
+                    : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
                 }`}
               >
                 {option}
@@ -106,25 +106,25 @@ export default function ModelsPage() {
           </div>
 
           {retiredCount > 0 && (
-            <label className="flex items-center gap-2 text-xs font-bold text-[#403B35]">
+            <label className="flex items-center gap-2 text-xs font-bold text-[var(--color-muted)]">
               <input
                 type="checkbox"
                 checked={showRetired}
                 onChange={(event) => setShowRetired(event.target.checked)}
-                className="h-3.5 w-3.5 accent-[#C9B59C]"
+                className="h-3.5 w-3.5 accent-[var(--color-accent)]"
               />
               Show {retiredCount} retired model{retiredCount === 1 ? "" : "s"}
             </label>
           )}
 
-          <span className="ml-auto font-mono text-[11px] font-bold text-[#70685E]">
+          <span className="ml-auto font-mono text-[11px] font-bold text-[var(--color-muted-light)]">
             {visible.length} shown
           </span>
         </div>
       </Card>
 
       {loading ? (
-        <Card className="p-10 text-center text-xs font-bold text-[#70685E]">
+        <Card className="p-10 text-center text-xs font-bold text-[var(--color-muted-light)]">
           Loading catalogue…
         </Card>
       ) : (
@@ -156,12 +156,12 @@ export default function ModelsPage() {
                   </div>
                   <div className="mt-0.5 flex gap-1.5">
                     {model.supports_tools && (
-                      <span className="text-[10px] font-bold text-[#70685E]">
+                      <span className="text-[10px] font-bold text-[var(--color-muted-light)]">
                         tools
                       </span>
                     )}
                     {model.supports_vision && (
-                      <span className="text-[10px] font-bold text-[#70685E]">
+                      <span className="text-[10px] font-bold text-[var(--color-muted-light)]">
                         vision
                       </span>
                     )}
@@ -190,11 +190,11 @@ export default function ModelsPage() {
                 </Td>
                 <Td align="right" mono>
                   {model.potential_saving_pct > 0 ? (
-                    <span className="font-black text-[var(--color-positive)]">
+                    <span className="font-bold text-[var(--color-positive)]">
                       &minus;{model.potential_saving_pct}%
                     </span>
                   ) : (
-                    <span className="text-[#70685E]">cheapest</span>
+                    <span className="text-[var(--color-muted-light)]">cheapest</span>
                   )}
                 </Td>
                 <Td align="right" mono muted>
@@ -206,7 +206,7 @@ export default function ModelsPage() {
         </TableShell>
       )}
 
-      <p className="mt-4 text-[11px] font-medium leading-relaxed text-[#70685E]">
+      <p className="mt-4 text-[11px] font-medium leading-relaxed text-[var(--color-muted-light)]">
         Prices are list prices published by each provider, carried with their source date
         in the pricing table. Aegis never marks them up: under BYOK you are billed by the
         provider directly, and Aegis charges only a share of verified savings.

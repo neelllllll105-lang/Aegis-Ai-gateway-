@@ -50,20 +50,25 @@ export function Card({
 }) {
   const variantClass =
     variant === "warm"
-      ? "bg-[#EFE9E3] border border-[#D9CFC7]"
+      ? "bg-[var(--color-surface2)] border-[var(--color-ink)] text-[var(--color-ink)]"
       : variant === "subtle"
-        ? "bg-[#F9F8F6] border border-[#D9CFC7]"
-        : "bg-white border border-[#D9CFC7]";
+        ? "bg-[var(--color-desk-raised)] border-[var(--color-desk-line)] text-[var(--color-paper-on-desk)]"
+        : "bg-[var(--color-surface)] border-[var(--color-ink)] text-[var(--color-ink)]";
 
   return (
     <div
-      className={`rounded-2xl ${variantClass} shadow-xs transition-all hover:border-[#C9B59C] ${className}`}
+      className={`rounded-2xl border-[1.5px] ${variantClass} shadow-[3px_3px_0_var(--shadow-color)] transition-transform duration-150 hover:-translate-x-px hover:-translate-y-px ${className}`}
     >
       {children}
     </div>
   );
 }
 
+/**
+ * Always used bare, directly on the dashboard's dark desk main area — never inside a
+ * paper card. Its text colors are therefore the `*-on-desk` trio, not `--color-ink`.
+ * If this ever gets used inside a `Card`, it will need a `variant` prop instead.
+ */
 export function SectionHeader({
   title,
   description,
@@ -79,15 +84,15 @@ export function SectionHeader({
     <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-6">
       <div>
         {eyebrow && (
-          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#70685E] mb-1">
+          <div className="font-mono text-[11px] uppercase tracking-[0.2em] font-bold text-[var(--color-muted-on-desk)] mb-1">
             {eyebrow}
           </div>
         )}
-        <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-black">
+        <h2 className="font-serif text-2xl sm:text-3xl font-semibold tracking-tight text-[var(--color-paper-on-desk)]">
           {title}
         </h2>
         {description && (
-          <p className="mt-1 text-sm text-[#403B35] max-w-2xl font-medium leading-relaxed">
+          <p className="mt-1 text-sm text-[var(--color-muted-on-desk)] max-w-2xl font-medium leading-relaxed font-sans">
             {description}
           </p>
         )}
@@ -115,26 +120,24 @@ export function Stat({
   trend?: string;
 }) {
   return (
-    <div className="rounded-2xl border border-[#D9CFC7] bg-white p-5 shadow-xs relative overflow-hidden">
+    <div className="rounded-2xl border-[1.5px] border-[var(--color-ink)] bg-[var(--color-surface)] p-5 shadow-[3px_3px_0_var(--shadow-color)] relative overflow-hidden">
       <div className="flex items-center justify-between">
-        <div className="text-[11px] font-black uppercase tracking-wider text-[#70685E]">
-          {label}
-        </div>
+        <div className="eyebrow-accent">{label}</div>
         {trend && (
-          <span className="inline-flex items-center gap-1 text-[11px] font-black text-black bg-[#EFE9E3] px-2 py-0.5 rounded-full border border-[#D9CFC7]">
+          <span className="inline-flex items-center gap-1 text-[11px] font-mono font-bold text-[var(--color-ink)] bg-[var(--color-surface2)] px-2 py-0.5 rounded-full border border-[var(--color-ink)]">
             {trend}
           </span>
         )}
       </div>
       <div
-        className={`tabular mt-2 text-2xl sm:text-3xl font-black tracking-tight ${
-          accent ? "text-[#0A0A0A]" : "text-black"
+        className={`tabular mt-2 text-2xl sm:text-3xl font-semibold tracking-tight font-serif ${
+          accent ? "text-[var(--color-accent)]" : "text-[var(--color-ink)]"
         }`}
       >
         {value}
       </div>
       {sublabel && (
-        <div className="mt-1 text-xs text-[#70685E] font-medium">{sublabel}</div>
+        <div className="mt-1 text-xs text-[var(--color-muted-light)] font-medium">{sublabel}</div>
       )}
     </div>
   );
@@ -150,13 +153,13 @@ export type BadgeTone =
   | "info";
 
 const BADGE_TONES: Record<BadgeTone, string> = {
-  neutral: "bg-[#EFE9E3] text-black border-[#D9CFC7] font-bold",
-  accent: "bg-[#C9B59C] text-black border-[#BFAF98] font-black",
-  warm: "bg-[#EFE9E3] text-black border-[#D9CFC7] font-bold",
-  warn: "bg-[#FEF3C7] text-[#B45309] border-[#FDE68A] font-bold",
-  danger: "bg-[#FEE2E2] text-[#DC2626] border-[#FECACA] font-bold",
-  success: "bg-[#EFE9E3] text-black border-[#D9CFC7] font-bold",
-  info: "bg-[#EFE9E3] text-black border-[#D9CFC7] font-bold",
+  neutral: "bg-[var(--color-surface2)] text-[var(--color-ink)] border-[var(--color-ink)] font-semibold",
+  accent: "bg-[var(--color-accent)] text-[var(--color-surface)] border-[var(--color-accent-dark)] font-bold",
+  warm: "bg-[var(--color-surface2)] text-[var(--color-ink)] border-[var(--color-ink)] font-semibold",
+  warn: "bg-[var(--color-amber-bg)] text-[var(--color-amber)] border-[var(--color-amber)] font-bold",
+  danger: "bg-[var(--color-accent-bg)] text-[var(--color-accent)] border-[var(--color-accent)] font-bold",
+  success: "bg-[var(--color-positive-bg)] text-[var(--color-positive)] border-[var(--color-positive)] font-bold",
+  info: "bg-[var(--color-ochre-bg)] text-[var(--color-ochre)] border-[var(--color-ochre)] font-bold",
 };
 
 export function Badge({
@@ -178,6 +181,161 @@ export function Badge({
   );
 }
 
+/**
+ * Stamp — a rotated, bordered one-word chip for a routing reason, a cache
+ * outcome, a plan tier. The border always matches the text color (see
+ * `.stamp` in globals.css), so a single `tone` sets the whole chip.
+ */
+export type StampTone = "agent" | "pending" | "verdict" | "muted" | "other";
+
+const STAMP_TONES: Record<StampTone, string> = {
+  agent: "text-[var(--color-accent)]",
+  pending: "text-[var(--color-amber)]",
+  verdict: "text-[var(--color-positive)]",
+  muted: "text-[var(--color-muted-light)]",
+  other: "text-[var(--color-ochre)]",
+};
+
+export function Stamp({
+  children,
+  tone = "muted",
+}: {
+  children: ReactNode;
+  tone?: StampTone;
+}) {
+  return <span className={`stamp ${STAMP_TONES[tone]}`}>{children}</span>;
+}
+
+/**
+ * AttributionChip — who is responsible for this value: the caller (YOU),
+ * the routing engine (AEGIS), or an upstream party (a provider name). This
+ * is the on-brand home for the requested-vs-served model pair.
+ */
+export type AttributionActor = "you" | "agent" | "other";
+
+const ATTRIBUTION_STYLES: Record<AttributionActor, string> = {
+  you: "bg-[var(--color-ink)] text-[var(--color-surface)]",
+  agent: "bg-[var(--color-accent)] text-[var(--color-surface)]",
+  other: "bg-[var(--color-ochre)] text-[var(--color-ink)]",
+};
+
+export function AttributionChip({
+  actor,
+  label,
+}: {
+  actor: AttributionActor;
+  label: string;
+}) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-mono font-bold uppercase tracking-wider ${ATTRIBUTION_STYLES[actor]}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+/**
+ * DecisionCard — narrates one thing the routing engine did: who/what acted,
+ * what it did, when, the exact value, and why. The left rail color is the
+ * outcome at a glance; everything else is read left-to-right like a log
+ * line that happens to be legible.
+ */
+export type DecisionOutcome = "agent" | "pending" | "verdict" | "muted" | "other";
+
+const DECISION_RAIL: Record<DecisionOutcome, string> = {
+  agent: "rail-agent",
+  pending: "rail-pending",
+  verdict: "rail-verdict",
+  muted: "rail-muted",
+  other: "rail-other",
+};
+
+export function DecisionCard({
+  actor,
+  action,
+  timestamp,
+  value,
+  reason,
+  outcome = "muted",
+}: {
+  actor: string;
+  action: string;
+  timestamp: string;
+  value?: string;
+  reason?: string;
+  outcome?: DecisionOutcome;
+}) {
+  return (
+    <div
+      className={`${DECISION_RAIL[outcome]} bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg px-4 py-3`}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs">
+          <span className="font-bold text-[var(--color-ink)]">{actor}</span>
+          <span className="text-[var(--color-muted-light)]">{action}</span>
+        </div>
+        <span className="tabular font-mono text-[10px] text-[var(--color-muted-light)] shrink-0">
+          {timestamp}
+        </span>
+      </div>
+      {value && (
+        <div className="tabular mt-1 font-mono text-sm font-bold text-[var(--color-ink)]">{value}</div>
+      )}
+      {reason && (
+        <div className="mt-1 text-xs text-[var(--color-muted)] leading-relaxed">{reason}</div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * DisclosureMeter — a spend/usage bar where the solid fill is committed
+ * spend and a diagonal hatch is reserved-but-not-final (an atomic budget
+ * hold, a projection). Reading the hatch as "not settled yet" is the whole
+ * point — don't replace it with a second solid color.
+ */
+export function DisclosureMeter({
+  label,
+  committedPct,
+  reservedPct = 0,
+  tone = "verdict",
+}: {
+  label?: string;
+  committedPct: number;
+  reservedPct?: number;
+  tone?: "verdict" | "pending" | "agent";
+}) {
+  const fillColor =
+    tone === "pending"
+      ? "var(--color-amber)"
+      : tone === "agent"
+        ? "var(--color-accent)"
+        : "var(--color-positive)";
+  const committed = Math.max(0, Math.min(100, committedPct));
+  const reserved = Math.max(0, Math.min(100 - committed, reservedPct));
+
+  return (
+    <div>
+      {label && (
+        <div className="mb-1.5 flex items-center justify-between text-[11px] font-mono uppercase tracking-wider text-[var(--color-muted-light)]">
+          <span>{label}</span>
+          <span className="tabular">{Math.round(committed + reserved)}%</span>
+        </div>
+      )}
+      <div className="flex h-2.5 w-full overflow-hidden rounded-full border border-[var(--color-ink)] bg-[var(--color-surface2)]">
+        <div style={{ width: `${committed}%`, backgroundColor: fillColor }} />
+        <div
+          style={{
+            width: `${reserved}%`,
+            backgroundImage: `repeating-linear-gradient(45deg, ${fillColor} 0, ${fillColor} 2px, transparent 2px, transparent 6px)`,
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function EmptyState({
   title,
   description,
@@ -188,14 +346,14 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <div className="px-6 py-14 text-center rounded-2xl border border-dashed border-[#D9CFC7] bg-[#F9F8F6]">
-      <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-[#EFE9E3] text-[#70685E] mb-3 border border-[#D9CFC7]">
+    <div className="border-pending rounded-2xl border-[1.5px] bg-[var(--color-surface)] px-6 py-14 text-center">
+      <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full border border-[var(--color-ink)] bg-[var(--color-surface2)] text-[var(--color-muted-light)]">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
           <path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
         </svg>
       </div>
-      <p className="text-sm font-black text-black">{title}</p>
-      <p className="mx-auto mt-1 max-w-md text-xs text-[#403B35] font-medium">
+      <p className="font-serif text-sm font-semibold text-[var(--color-ink)]">{title}</p>
+      <p className="mx-auto mt-1 max-w-md text-xs text-[var(--color-muted)] font-medium">
         {description}
       </p>
       {action && <div className="mt-5">{action}</div>}
@@ -205,11 +363,11 @@ export function EmptyState({
 
 export function ErrorState({ message }: { message: string }) {
   return (
-    <div className="border border-[#FECACA] bg-[#FEF2F2] rounded-xl p-4 flex items-start gap-3">
-      <svg className="w-4 h-4 text-[#DC2626] shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
+    <div className="rail-agent flex items-start gap-3 rounded-xl border border-[var(--color-line)] bg-[var(--color-accent-bg)] p-4">
+      <svg className="w-4 h-4 text-[var(--color-accent)] shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
         <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
       </svg>
-      <p className="text-xs font-bold text-[#DC2626]">{message}</p>
+      <p className="text-xs font-bold text-[var(--color-accent)]">{message}</p>
     </div>
   );
 }
@@ -220,7 +378,7 @@ export function ErrorState({ message }: { message: string }) {
 
 export function TableShell({ children }: { children: ReactNode }) {
   return (
-    <div className="overflow-x-auto rounded-2xl border border-[#D9CFC7] bg-white shadow-xs">
+    <div className="overflow-x-auto rounded-2xl border-[1.5px] border-[var(--color-ink)] bg-[var(--color-surface)] shadow-[3px_3px_0_var(--shadow-color)]">
       <table className="w-full min-w-[640px] text-sm">{children}</table>
     </div>
   );
@@ -235,7 +393,7 @@ export function Th({
 }) {
   return (
     <th
-      className={`border-b border-[#D9CFC7] px-4 py-3.5 text-xs font-black uppercase tracking-wider text-black bg-[#EFE9E3] ${
+      className={`border-b-[1.5px] border-[var(--color-ink)] bg-[var(--color-surface2)] px-4 py-3.5 font-mono text-xs font-bold uppercase tracking-wider text-[var(--color-ink)] ${
         align === "right" ? "text-right" : "text-left"
       }`}
     >
@@ -257,9 +415,9 @@ export function Td({
 }) {
   return (
     <td
-      className={`border-b border-[#EFE9E3] px-4 py-3.5 text-xs ${align === "right" ? "text-right" : "text-left"} ${
+      className={`border-b border-[var(--color-line)] px-4 py-3.5 text-xs ${align === "right" ? "text-right" : "text-left"} ${
         mono ? "tabular font-mono font-bold" : ""
-      } ${muted ? "text-[#70685E]" : "text-black font-medium"}`}
+      } ${muted ? "text-[var(--color-muted-light)]" : "text-[var(--color-ink)] font-medium"}`}
     >
       {children}
     </td>
@@ -274,15 +432,14 @@ type ButtonVariant = "primary" | "secondary" | "accent" | "ghost" | "danger";
 
 const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
   primary:
-    "bg-black text-white hover:bg-[#262626] shadow-xs font-black active:scale-[0.98]",
-  accent:
-    "bg-[#C9B59C] text-[#0A0A0A] hover:bg-[#BFAF98] shadow-xs font-bold active:scale-[0.98]",
+    "bg-[var(--color-ink)] text-[var(--color-surface)] border-[1.5px] border-[var(--color-ink)] shadow-[3px_3px_0_var(--shadow-color)] hover:-translate-x-px hover:-translate-y-px hover:shadow-[4px_4px_0_var(--shadow-color)] active:translate-x-px active:translate-y-px active:shadow-[1px_1px_0_var(--shadow-color)] font-bold",
+  accent: "btn-accent !px-5 !py-2.5 !rounded-xl",
   secondary:
-    "bg-white text-black border border-[#D9CFC7] hover:bg-[#EFE9E3] shadow-xs font-bold active:scale-[0.98]",
+    "bg-[var(--color-surface)] text-[var(--color-ink)] border-[1.5px] border-[var(--color-ink)] hover:bg-[var(--color-surface2)] font-bold",
   ghost:
-    "text-[#403B35] hover:text-black hover:bg-[#EFE9E3] font-bold",
+    "text-[var(--color-muted)] hover:text-[var(--color-ink)] hover:bg-[var(--color-surface2)] font-bold",
   danger:
-    "bg-transparent text-[#DC2626] border border-[#FECACA] hover:bg-[#FEF2F2] font-bold",
+    "bg-transparent text-[var(--color-accent)] border-[1.5px] border-[var(--color-accent)] hover:bg-[var(--color-accent-bg)] font-bold",
 };
 
 export function Button({
@@ -337,10 +494,10 @@ export function Field({
     <div>
       <label
         htmlFor={id}
-        className="block text-xs font-black text-black"
+        className="block text-xs font-bold text-[var(--color-ink)]"
       >
         {label}
-        {required && <span className="ml-1 text-[#DC2626]">*</span>}
+        {required && <span className="ml-1 text-[var(--color-accent)]">*</span>}
       </label>
       <input
         id={id}
@@ -351,9 +508,9 @@ export function Field({
         autoComplete={autoComplete}
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
-        className="mt-1.5 w-full rounded-xl border border-[#D9CFC7] bg-white px-3.5 py-2.5 text-xs text-black placeholder:text-[#9E9487] focus:border-[#C9B59C] focus:ring-1 focus:ring-[#C9B59C] focus:outline-none transition-colors"
+        className="mt-1.5 w-full rounded-lg border-[1.5px] border-[var(--color-ink)] bg-[var(--color-surface)] px-3.5 py-2.5 text-xs text-[var(--color-ink)] placeholder:text-[var(--color-muted-light)] focus:border-[var(--color-accent)] focus:ring-1 focus:ring-[var(--color-accent)] focus:outline-none transition-colors"
       />
-      {hint && <p className="mt-1 text-[11px] text-[#70685E] font-medium">{hint}</p>}
+      {hint && <p className="mt-1 text-[11px] text-[var(--color-muted-light)] font-medium">{hint}</p>}
     </div>
   );
 }
@@ -384,26 +541,26 @@ export function CodeBlock({
       // Comments
       if (line.trim().startsWith("#")) {
         return (
-          <span key={idx} className="block text-[#C9B59C] font-medium">
+          <span key={idx} className="block text-[#B8912E] font-medium">
             {line}
           </span>
         );
       }
-      
+
       const commentIndex = line.indexOf("#");
       if (commentIndex !== -1) {
         const codePart = line.slice(0, commentIndex);
         const commentPart = line.slice(commentIndex);
         return (
           <span key={idx} className="block">
-            <span className="text-[#F9F8F6]">{codePart}</span>
-            <span className="text-[#C9B59C] font-bold">{commentPart}</span>
+            <span className="text-[#F7F1E4]">{codePart}</span>
+            <span className="text-[#B8912E] font-bold">{commentPart}</span>
           </span>
         );
       }
 
       return (
-        <span key={idx} className="block text-[#F9F8F6]">
+        <span key={idx} className="block text-[#F7F1E4]">
           {line}
         </span>
       );
@@ -411,38 +568,38 @@ export function CodeBlock({
   }
 
   return (
-    <div className="relative group rounded-2xl border border-[#38332D] bg-[#141210] text-[#F9F8F6] overflow-hidden shadow-sm">
+    <div className="relative group rounded-2xl border-[1.5px] border-[#3C3324] bg-[#201B14] text-[#F7F1E4] overflow-hidden shadow-[4px_4px_0_var(--shadow-color)]">
       {/* Terminal Window Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 bg-[#0D0B0A] border-b border-[#2A2420] text-xs">
+      <div className="flex items-center justify-between px-4 py-2.5 bg-[#160F09] border-b border-[#3C3324] text-xs">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
             <span
-              className="w-3 h-3 rounded-full bg-[#FF5F56] border border-[#E0443E]"
+              className="w-3 h-3 rounded-full bg-[#A8341E] border border-[#822712]"
               title="Close"
             />
             <span
-              className="w-3 h-3 rounded-full bg-[#FFBD2E] border border-[#DEA123]"
+              className="w-3 h-3 rounded-full bg-[#B8912E] border border-[#93630F]"
               title="Minimize"
             />
             <span
-              className="w-3 h-3 rounded-full bg-[#27C93F] border border-[#1AAB29]"
+              className="w-3 h-3 rounded-full bg-[#5B8A4E] border border-[#3F6B34]"
               title="Expand"
             />
           </div>
-          {caption && <span className="ml-1 font-bold text-[#F9F8F6]">{caption}</span>}
+          {caption && <span className="ml-1 font-bold text-[#F7F1E4]">{caption}</span>}
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-[10px] font-mono uppercase tracking-wider text-[#A8A29E] font-bold">
+          <span className="text-[10px] font-mono uppercase tracking-wider text-[#B8AC8E] font-bold">
             {language}
           </span>
           <button
             type="button"
             onClick={handleCopy}
-            className="flex items-center gap-1 rounded bg-[#2A2420] px-2 py-1 text-[10px] font-bold text-[#F9F8F6] hover:bg-[#403B35] transition-colors"
+            className="flex items-center gap-1 rounded bg-[#3C3324] px-2 py-1 text-[10px] font-bold text-[#F7F1E4] hover:bg-[#4A3F2C] transition-colors"
             aria-label="Copy code"
           >
             {copied ? (
-              <span className="text-[#C9B59C]">Copied</span>
+              <span className="text-[#B8912E]">Copied</span>
             ) : (
               <span>Copy</span>
             )}

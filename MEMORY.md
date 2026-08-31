@@ -4,7 +4,7 @@
 > This file is the handoff protocol. It tells you where the project is, what genuinely
 > works, what does not, what was decided and why, and exactly what to do next.
 >
-> **Last updated:** 2026-08-26
+> **Last updated:** 2026-08-31
 > **Updated by:** Claude Opus 5 (Claude Code)
 > **Update this file before ending any session.** See `CLAUDE.md`.
 
@@ -630,6 +630,13 @@ that has persisted since session 3, now the dominant one:
    require a live deployment. Also worth a look once there's real traffic: surface
    `cache_entries.hit_count` somewhere in the admin console — it's tracked and available,
    nothing reads it yet.
+9. **Visually verify the authenticated dashboard pages** (Settings, Keys, Providers,
+   Models, Policies, Team, Billing, Savings, Usage) against the new Deskwork theme once a
+   real session exists (needs step 2, Docker/Postgres) — Session 10 re-themed every one of
+   them via the shared `components/ui.tsx` primitives and a hex-literal sweep, verified by
+   `tsc`/`eslint`/the token guard and by direct `getComputedStyle` checks, but never
+   actually loaded any of them in a browser with a live session. `docs/design.md` has the
+   full token/component reference if something looks off.
 
 ---
 
@@ -702,6 +709,24 @@ Full records in `docs/adr/`. The ones that will surprise you:
 
 Each of these cost real time during the build.
 
+- **Text color has to be chosen relative to what's actually behind it, not by habit.**
+  Repainting `apps/web` to a dark-desk/warm-paper theme (Session 10) meant most page
+  background went from light to dark — every section header that has no card wrapper
+  (sits directly on the page `<body>`) was still using the "text on paper" color tokens
+  and went nearly invisible, dark-text-on-dark-background. `getComputedStyle` on the
+  actual rendered element caught it definitively where screenshots alone were ambiguous
+  (see the next entry) — when a redesign changes what a bare section sits on, grep for
+  every text color used outside a `bg-[var(--color-surface*)]` container and check it by
+  hand, don't assume the token name still describes the contrast it used to.
+- **The browser-preview screenshot tool can return a stale/blank frame at a non-zero
+  scroll position while reporting success** — repeatable, not a one-off timeout retry:
+  `computer{action:"screenshot"}` after `window.scrollTo(0, 900)` returned an identical
+  solid-color frame on three consecutive attempts (including after an explicit wait),
+  while the same call at `scrollTo(0,0)` worked immediately. `getComputedStyle` on the
+  actual DOM elements (color, position) is ground truth when this happens — don't trust a
+  screenshot's absence of content as proof of a rendering bug without cross-checking
+  computed styles first. Resizing the viewport taller (`resize_window` to e.g. 900×1600)
+  so the content of interest fits without scrolling worked as a reliable workaround.
 - **CSS custom properties fail silently.** `var(--color-does-not-exist)` is not a type
   error, not a lint error, not a build error — it just resolves to nothing and the element
   inherits. This is how a palette rename shipped nine dangling dashboard tokens undetected
@@ -792,6 +817,92 @@ Each of these cost real time during the build.
 ## Session Log
 
 Newest first.
+
+### 2026-08-31 — Session 10 — Claude Sonnet 5
+
+Founder supplied a complete design spec ("Deskwork" — dark desk chrome, warm paper content
+surfaces, hard zero-blur offset shadows, a strict ink/red/amber/positive/ochre semantic
+color contract, three type voices) and asked for it to be integrated into `apps/web`, with
+explicit emphasis that §7 of the spec — attribution chips, decision cards, stamps, a
+disclosure meter — is "product logic expressed as design" and should be ported wholesale
+since Aegis's routing engine is itself agent-like (it makes and narrates decisions on the
+caller's behalf).
+
+**What shipped, not just what was asked** — see [docs/design.md](docs/design.md) for the
+full token table and component reference, this is the summary:
+
+1. **`app/globals.css`** rewritten in place — every existing `--color-*` token *name* kept
+   (so `scripts/check-design-tokens.mjs` needed zero changes and nothing else in the app
+   had to be touched to pick up the new palette), only values changed: dark desk
+   (`--color-bg`) as the page chrome, warm paper (`--color-surface`/`--color-surface2`) as
+   content surfaces, red as the sole event/agent/danger color, a five-stop hard shadow
+   ladder, a border-style-carries-meaning grammar (solid/dashed/double/rail), radius capped
+   at 11px everywhere except pills.
+2. **Fonts swapped** in `app/layout.tsx`: Space Grotesk replaced Plus Jakarta Sans as the UI
+   voice; Spectral (serif) added for headings/document voice; Caveat added but deliberately
+   *not* used yet anywhere — the dashboard is operational/tabular, not
+   document-and-annotation, so there's no honest surface for a handwritten voice today.
+   JetBrains Mono kept as-is for the machine voice.
+3. **`components/ui.tsx` rewritten** — every shared primitive (`Card`, `Stat`, `Badge`,
+   `Button`, `Table*`, `Field`, `EmptyState`, `ErrorState`, `CodeBlock`) re-themed, plus four
+   new components that are the actual §7 port: `Stamp` (rotated severity/reason chip,
+   border-matches-text-color), `AttributionChip` (you/agent/other — the direct visual home
+   for the `X-Aegis-Requested-Model`/`X-Aegis-Served-By` header pair), `DecisionCard`
+   (actor→action→timestamp→value→reason with a severity rail, built for narrating one
+   routing decision as a stream item), `DisclosureMeter` (solid fill + diagonal hatch for
+   "committed vs. not yet settled"). Staged-approval blocks and the MANUAL/APPROVAL/
+   AUTONOMOUS mode grammar from the source spec were deliberately **not** ported — those
+   model a human+agent co-authoring handoff, which isn't Aegis's interaction shape
+   (automatic per-request routing, not turn-taking).
+4. **Applied**, not just built: the homepage routing simulator now uses `Stamp`/
+   `AttributionChip` for its live pipeline steps and audit receipt; the Requests page uses
+   them for routing-reason badges and the requested/served model pair; the Budgets page uses
+   `DisclosureMeter` on the anomaly card (today's spend vs. usual baseline — deliberately
+   *not* used on the budget-limit rows themselves, since the API returns a limit but no
+   current-spend-against-it figure, and faking a percentage against data that isn't there
+   would misrepresent what's real). Every layout shell (`(marketing)/layout.tsx`,
+   `(auth)/layout.tsx`, `(dashboard)/shell.tsx`) repainted to dark-desk chrome; every page
+   file's hardcoded old-palette hex literals (352 across `app/`, 194 in `components/`, zero
+   left in either now) replaced with the token set.
+5. **One real bug found by live-verifying, not by reading the diff**: several marketing-page
+   section headers have no card wrapper — they sit directly on the (now dark) page body —
+   and were still using `--color-ink`/`--color-muted` (dark-on-paper colors), which is
+   nearly invisible dark-on-dark. Caught via `getComputedStyle` spot-checks after a
+   screenshot artifact (see Gotchas) made the bug visually obvious at one scroll depth;
+   fixed by routing every bare-on-desk text node through the new `*-on-desk` token trio
+   (`--color-paper-on-desk`/`--color-muted-on-desk`/`--color-faint-on-desk`) instead. This
+   exact class of bug — and the fix — is written up in docs/design.md as the first thing to
+   check if a new bare section is ever added.
+
+Verified: `cargo`-side untouched (frontend-only session); `npx tsc --noEmit` clean, `npx
+eslint .` clean, `node scripts/check-design-tokens.mjs` clean (29 tokens, all resolve); live
+in the browser preview via `getComputedStyle` spot checks plus full-page screenshots at a
+taller emulated viewport (900×1600) covering hero, routing simulator, and login. Did **not**
+verify authenticated dashboard pages visually (Settings/Keys/Providers/etc.) beyond the hex-
+literal sweep and typecheck — no live session exists without Postgres, same limitation
+Session 9 hit. `docs/design.md` written per the founder's own suggestion, as contributor
+documentation for the system, not an ADR (this is a visual-identity change, not a deviation
+from `MASTER_BUILD.md`'s architecture).
+
+**Correction, same session, right after the above shipped**: the founder then shared the
+actual reference screenshot the "Deskwork" spec was inspired by (a whiteboard app called
+Boardify) — a light, warm-cream canvas throughout, not a dark chrome anywhere. The "dark
+desk" described above was invented, not sourced: the original spec text had scrolled out of
+context by the time it was implemented, and the reconstruction guessed a dark outer chrome
+that the real reference never had. Fixed by redefining six token *values* in
+`app/globals.css` (`--color-bg` and `--color-desk-raised`/`--color-desk-line` to light warm
+tones close to the original pre-redesign palette; `--color-paper-on-desk`/
+`--color-muted-on-desk`/`--color-faint-on-desk` to dark ink-family values instead of light
+ones) plus the body background-image gradient and `layout.tsx`'s `themeColor` — zero
+component files touched, because every "text on bare chrome" spot had already been routed
+through that token family rather than hardcoded per-file. The four intentionally-dark
+terminal/machine-value panels (routing simulator's audit receipt, the API-key display, the
+fee-calculation `<pre>` block, `CodeBlock`) were left dark on purpose — a dark code/terminal
+accent panel on an otherwise light page is a distinct, legitimate voice, not the mistake.
+Re-verified live: hero, login, routing simulator all now read as light paper-on-desk,
+matching the reference. Lesson for next time, also in Gotchas: when a design spec scrolls
+out of context mid-session, re-read it (or ask for it again) before implementing from
+memory — a plausible reconstruction is not the same thing as the source.
 
 ### 2026-08-31 — Session 9 — Claude Sonnet 5
 

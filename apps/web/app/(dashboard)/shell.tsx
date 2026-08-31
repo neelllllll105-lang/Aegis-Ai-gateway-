@@ -93,9 +93,9 @@ export default function DashboardShell({
 
   if (state === "loading") {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#F9F8F6]">
-        <div className="flex items-center gap-2 text-xs font-bold text-black">
-          <span className="flex h-2 w-2 rounded-full bg-[#A89379] animate-pulse" />
+      <div className="flex min-h-screen items-center justify-center bg-[var(--color-bg)]">
+        <div className="flex items-center gap-2 text-xs font-bold text-[var(--color-paper-on-desk)]">
+          <span className="flex h-2 w-2 rounded-full bg-[var(--color-accent)] animate-pulse" />
           Loading dashboard session…
         </div>
       </div>
@@ -104,26 +104,26 @@ export default function DashboardShell({
 
   if (state === "error") {
     return (
-      <div className="flex min-h-screen items-center justify-center px-6 bg-[#F9F8F6]">
-        <div className="rounded-2xl border border-[#D9CFC7] bg-white max-w-md p-6 shadow-xs">
-          <div className="flex items-center gap-2 text-[#B45309] mb-2">
+      <div className="flex min-h-screen items-center justify-center px-6 bg-[var(--color-bg)]">
+        <div className="rounded-2xl border-[1.5px] border-[var(--color-ink)] bg-[var(--color-surface)] max-w-md p-6 shadow-[4px_4px_0_var(--shadow-color)]">
+          <div className="flex items-center gap-2 text-[var(--color-amber)] mb-2">
             <svg className="w-5 h-5" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
             </svg>
-            <h1 className="text-base font-black text-black">
+            <h1 className="font-serif text-base font-semibold text-[var(--color-ink)]">
               API Connection Notice
             </h1>
           </div>
-          <p className="text-xs text-[#403B35] leading-relaxed font-medium">{message}</p>
-          <div className="mt-4 rounded-xl bg-[#F9F8F6] p-3 border border-[#D9CFC7]">
-            <p className="text-[11px] text-black font-mono font-bold">
+          <p className="text-xs text-[var(--color-muted)] leading-relaxed font-medium">{message}</p>
+          <div className="mt-4 rounded-xl bg-[var(--color-surface2)] p-3 border border-[var(--color-ink)]">
+            <p className="text-[11px] text-[var(--color-ink)] font-mono font-bold">
               cd apps/gateway &amp;&amp; cargo run --bin aegis-gateway
             </p>
           </div>
           <div className="mt-4 flex justify-end">
             <button
               onClick={() => window.location.reload()}
-              className="rounded-xl bg-[#A89379] px-4 py-2 text-xs font-black text-white shadow-xs hover:bg-[#8C7960]"
+              className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-xs font-bold text-[var(--color-surface)] shadow-[2px_2px_0_var(--shadow-color)] hover:bg-[var(--color-accent-dark)]"
             >
               Retry Connection
             </button>
@@ -134,15 +134,15 @@ export default function DashboardShell({
   }
 
   return (
-    <div className="flex min-h-screen bg-[#F9F8F6] text-black">
-      {/* Sidebar */}
-      <aside className="hidden w-60 shrink-0 border-r border-[#D9CFC7] bg-[#EFE8DF] md:block">
+    <div className="flex min-h-screen bg-[var(--color-bg)] text-[var(--color-paper-on-desk)]">
+      {/* Sidebar — a raised desk panel; the active page is a paper tab set into it */}
+      <aside className="hidden w-60 shrink-0 border-r border-[var(--color-desk-line)] bg-[var(--color-desk-raised)] md:block">
         <div className="sticky top-0 flex h-screen flex-col p-4">
           <Link href="/dashboard" className="flex items-center gap-2.5 px-2 py-2 group">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#EFE9E3] border border-[#C9B59C] text-[#A89379] shadow-2xs">
-              <AegisLogo className="w-5 h-5 text-[#A89379]" />
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[var(--color-surface2)] border-[1.5px] border-[var(--color-ink)] text-[var(--color-ink)]">
+              <AegisLogo className="w-5 h-5 text-[var(--color-accent)]" />
             </div>
-            <span className="text-sm font-black tracking-tight text-black">
+            <span className="font-serif text-sm font-semibold tracking-tight text-[var(--color-paper-on-desk)]">
               Aegis Dashboard
             </span>
           </Link>
@@ -150,7 +150,7 @@ export default function DashboardShell({
           <nav className="mt-6 flex-1 space-y-5 overflow-y-auto" aria-label="Dashboard">
             {NAV.map((group) => (
               <div key={group.section}>
-                <div className="px-3 pb-1.5 font-mono text-[10px] font-black uppercase tracking-[0.18em] text-[#70685E]">
+                <div className="px-3 pb-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-[var(--color-faint-on-desk)]">
                   {group.section}
                 </div>
                 <div className="space-y-0.5">
@@ -163,8 +163,8 @@ export default function DashboardShell({
                         aria-current={active ? "page" : undefined}
                         className={`flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-bold transition-all ${
                           active
-                            ? "bg-white text-black border border-[#D9CFC7] shadow-xs"
-                            : "text-[#403B35] hover:bg-white/60 hover:text-black"
+                            ? "bg-[var(--color-surface)] text-[var(--color-ink)] border-[1.5px] border-[var(--color-ink)] shadow-[2px_2px_0_var(--color-desk-line)]"
+                            : "text-[var(--color-muted-on-desk)] hover:bg-[var(--color-bg)] hover:text-[var(--color-paper-on-desk)]"
                         }`}
                       >
                         <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -179,13 +179,13 @@ export default function DashboardShell({
             ))}
           </nav>
 
-          <div className="border-t border-[#D9CFC7] pt-3">
+          <div className="border-t border-[var(--color-desk-line)] pt-3">
             {org && (
-              <div className="rounded-xl bg-white p-2.5 mb-2 border border-[#D9CFC7]">
-                <div className="truncate text-xs font-black text-black">
+              <div className="rounded-xl bg-[var(--color-surface)] p-2.5 mb-2 border-[1.5px] border-[var(--color-ink)]">
+                <div className="truncate text-xs font-bold text-[var(--color-ink)]">
                   {org.name}
                 </div>
-                <div className="text-[10px] capitalize text-[#A89379] font-black">
+                <div className="text-[10px] capitalize text-[var(--color-accent)] font-bold">
                   {org.plan} tier
                 </div>
               </div>
@@ -193,7 +193,7 @@ export default function DashboardShell({
             <button
               type="button"
               onClick={handleSignOut}
-              className="w-full rounded-xl px-2.5 py-1.5 text-left text-xs font-bold text-[#403B35] transition-colors hover:bg-white hover:text-black"
+              className="w-full rounded-xl px-2.5 py-1.5 text-left text-xs font-bold text-[var(--color-muted-on-desk)] transition-colors hover:bg-[var(--color-bg)] hover:text-[var(--color-paper-on-desk)]"
             >
               Sign out
             </button>
@@ -205,7 +205,7 @@ export default function DashboardShell({
       <div className="min-w-0 flex-1">
         {/* Mobile Header Nav */}
         <nav
-          className="flex gap-1 overflow-x-auto border-b border-[#D9CFC7] bg-[#EFE8DF] px-4 py-2.5 md:hidden"
+          className="flex gap-1 overflow-x-auto border-b border-[var(--color-desk-line)] bg-[var(--color-desk-raised)] px-4 py-2.5 md:hidden"
           aria-label="Dashboard"
         >
           {FLAT_NAV.map((item) => (
@@ -215,8 +215,8 @@ export default function DashboardShell({
               aria-current={pathname === item.href ? "page" : undefined}
               className={`whitespace-nowrap rounded-xl px-3 py-1.5 text-xs font-bold ${
                 pathname === item.href
-                  ? "bg-white text-black border border-[#D9CFC7]"
-                  : "text-[#403B35] hover:bg-white/60 hover:text-black"
+                  ? "bg-[var(--color-surface)] text-[var(--color-ink)] border-[1.5px] border-[var(--color-ink)]"
+                  : "text-[var(--color-muted-on-desk)] hover:bg-[var(--color-bg)] hover:text-[var(--color-paper-on-desk)]"
               }`}
             >
               {item.label}

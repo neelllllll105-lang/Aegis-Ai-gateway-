@@ -110,7 +110,7 @@ export default function SavingsPage() {
   }, [rows]);
 
   if (loading) {
-    return <p className="text-sm text-[var(--color-muted-light)]">Loading…</p>;
+    return <p className="text-sm text-[var(--color-muted-on-desk)]">Loading…</p>;
   }
   if (error) {
     return <ErrorState message={error} />;
@@ -247,7 +247,7 @@ export default function SavingsPage() {
               would have, the saving floors at zero and no fee applies — that overspend is
               ours to absorb.
             </p>
-            <pre className="tabular mt-4 overflow-x-auto rounded-[var(--radius)] border border-[var(--color-line)] bg-[var(--color-bg)] p-4 text-xs text-[var(--color-muted)]">
+            <pre className="tabular mt-4 overflow-x-auto rounded-[var(--radius)] border border-[#3C3324] bg-[#201B14] p-4 text-xs text-[#B8AC8E]">
               <code>{`baseline_cost  = ${formatUsd(summary?.baseline_cost_mc ?? 0)}
 actual_cost    = ${formatUsd(summary?.actual_cost_mc ?? 0)}
 gross_savings  = ${formatUsd(summary?.gross_savings_mc ?? 0)}

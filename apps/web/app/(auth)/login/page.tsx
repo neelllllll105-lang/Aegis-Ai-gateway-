@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { api, ApiError } from "@/lib/api";
-import { Button, Card, Field } from "@/components/ui";
+import { Button, Card, ErrorState, Field } from "@/components/ui";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -32,9 +32,9 @@ export default function LoginPage() {
   }
 
   return (
-    <Card className="p-7 shadow-xs">
-      <h1 className="text-xl font-extrabold tracking-tight text-[#0A0A0A]">Sign in</h1>
-      <p className="mt-1 text-xs text-[#262320] font-medium">
+    <Card className="p-7">
+      <h1 className="font-serif text-xl font-semibold tracking-tight text-[var(--color-ink)]">Sign in</h1>
+      <p className="mt-1 text-xs text-[var(--color-muted)] font-medium">
         Welcome back to your Aegis dashboard.
       </p>
 
@@ -59,23 +59,16 @@ export default function LoginPage() {
           required
         />
 
-        {error && (
-          <div
-            role="alert"
-            className="rounded-[var(--radius)] border border-[#FECACA] bg-[#FEF2F2] px-3.5 py-2 text-xs font-semibold text-[#DC2626]"
-          >
-            {error}
-          </div>
-        )}
+        {error && <ErrorState message={error} />}
 
         <Button type="submit" disabled={submitting} className="w-full mt-2">
           {submitting ? "Signing in…" : "Sign in to Dashboard"}
         </Button>
       </form>
 
-      <p className="mt-6 text-center text-xs text-[#262320] font-medium">
+      <p className="mt-6 text-center text-xs text-[var(--color-muted)] font-medium">
         Don&apos;t have an account?{" "}
-        <Link href="/signup" className="font-extrabold text-[#0A0A0A] underline hover:text-[var(--color-accent-dark)]">
+        <Link href="/signup" className="font-bold text-[var(--color-ink)] underline hover:text-[var(--color-accent)]">
           Create free account
         </Link>
       </p>

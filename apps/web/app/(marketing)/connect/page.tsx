@@ -9,35 +9,35 @@ export const metadata: Metadata = {
 
 export default function ConnectPage() {
   return (
-    <div className="space-y-16 pb-16 text-black">
+    <div className="space-y-16 pb-16 text-[var(--color-ink)]">
       {/* Header */}
       <section className="mx-auto max-w-2xl pt-2 text-center">
-        <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#70685E]">
+        <div className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-[var(--color-muted-light)]">
           Connect anything
         </div>
-        <h1 className="mt-2 text-balance text-3xl font-black tracking-tight sm:text-4xl text-black">
+        <h1 className="mt-2 text-balance text-3xl font-bold tracking-tight sm:text-4xl text-[var(--color-ink)]">
           Connect Anything.
         </h1>
-        <p className="mt-3 text-[#403B35] text-sm sm:text-base font-semibold leading-relaxed">
-          Aegis is a <b className="text-black">drop-in replacement</b> for the OpenAI and Anthropic APIs. Point your app, IDE, or SDK at it and instantly spend less, with full governance and analytics — <b className="text-black">with no code changes</b>.
+        <p className="mt-3 text-[var(--color-muted)] text-sm sm:text-base font-semibold leading-relaxed">
+          Aegis is a <b className="text-[var(--color-ink)]">drop-in replacement</b> for the OpenAI and Anthropic APIs. Point your app, IDE, or SDK at it and instantly spend less, with full governance and analytics — <b className="text-[var(--color-ink)]">with no code changes</b>.
         </p>
       </section>
 
       {/* Base URL & 3 Steps */}
       <section className="mx-auto max-w-3xl space-y-4">
-        <div className="rounded-2xl border-2 border-[#C9B59C] bg-[#EFE9E3] p-5 shadow-xs">
-          <div className="text-[11px] font-mono font-black uppercase tracking-wide text-black">
+        <div className="rounded-2xl border-2 border-[var(--color-accent)] bg-[var(--color-surface2)] p-5 shadow-[3px_3px_0_var(--shadow-color)]">
+          <div className="text-[11px] font-mono font-bold uppercase tracking-wide text-[var(--color-ink)]">
             Base URL
           </div>
-          <div className="mt-2 flex items-center justify-between gap-2 rounded-xl bg-white border border-[#D9CFC7] p-3">
-            <code className="font-mono text-sm sm:text-base font-black text-black">
+          <div className="mt-2 flex items-center justify-between gap-2 rounded-xl bg-[var(--color-surface)] border border-[var(--color-ink)] p-3">
+            <code className="font-mono text-sm sm:text-base font-bold text-[var(--color-ink)]">
               http://localhost:8080/v1
             </code>
-            <span className="rounded bg-[#EFE9E3] px-2.5 py-1 text-xs font-bold text-black border border-[#D9CFC7]">
+            <span className="rounded bg-[var(--color-surface2)] px-2.5 py-1 text-xs font-bold text-[var(--color-ink)] border border-[var(--color-ink)]">
               OpenAI &amp; Anthropic Ready
             </span>
           </div>
-          <div className="mt-2 text-xs text-[#403B35] font-medium">
+          <div className="mt-2 text-xs text-[var(--color-muted)] font-medium">
             Paste this one URL into any tool — OpenAI-compatible apps and Claude Code alike. That&apos;s it.
           </div>
         </div>
@@ -64,61 +64,61 @@ export default function ConnectPage() {
       {/* Works with Badges Grid */}
       <section className="space-y-6">
         <div className="text-center">
-          <div className="font-mono text-[11px] font-black uppercase tracking-[0.18em] text-[#70685E]">
+          <div className="font-mono text-[11px] font-bold uppercase tracking-[0.18em] text-[var(--color-muted-light)]">
             Works with
           </div>
-          <h2 className="mx-auto mt-2 max-w-2xl text-balance text-2xl font-black tracking-tight sm:text-3xl text-black">
+          <h2 className="mx-auto mt-2 max-w-2xl text-balance text-2xl font-bold tracking-tight sm:text-3xl text-[var(--color-ink)]">
             Your stack, unchanged
           </h2>
-          <p className="mx-auto mt-2 max-w-xl text-xs sm:text-sm text-[#403B35] font-semibold">
+          <p className="mx-auto mt-2 max-w-xl text-xs sm:text-sm text-[var(--color-muted)] font-semibold">
             If it can set an API base URL, it works. No SDK to adopt, no rewrite.
           </p>
         </div>
 
         <div className="mx-auto max-w-3xl space-y-4">
           <div>
-            <div className="mb-2 text-xs font-black uppercase tracking-wide text-[#70685E]">
+            <div className="mb-2 text-xs font-bold uppercase tracking-wide text-[var(--color-muted-light)]">
               IDEs &amp; editors
             </div>
             <div className="flex flex-wrap gap-2">
               {["Cursor", "Claude Code", "Continue", "Cline", "Roo", "VS Code"].map((tool) => (
                 <span
                   key={tool}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#D9CFC7] bg-white px-3 py-1.5 text-xs font-bold text-black shadow-2xs"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-ink)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-bold text-[var(--color-ink)] shadow-2xs"
                 >
-                  <span className="text-black font-black">✓</span> {tool}
+                  <span className="text-[var(--color-ink)] font-bold">✓</span> {tool}
                 </span>
               ))}
             </div>
           </div>
 
           <div>
-            <div className="mb-2 text-xs font-black uppercase tracking-wide text-[#70685E]">
+            <div className="mb-2 text-xs font-bold uppercase tracking-wide text-[var(--color-muted-light)]">
               SDKs &amp; frameworks
             </div>
             <div className="flex flex-wrap gap-2">
               {["OpenAI SDK", "Anthropic SDK", "Python", "Node.js", "LangChain", "LlamaIndex"].map((tool) => (
                 <span
                   key={tool}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#D9CFC7] bg-white px-3 py-1.5 text-xs font-bold text-black shadow-2xs"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-ink)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-bold text-[var(--color-ink)] shadow-2xs"
                 >
-                  <span className="text-black font-black">✓</span> {tool}
+                  <span className="text-[var(--color-ink)] font-bold">✓</span> {tool}
                 </span>
               ))}
             </div>
           </div>
 
           <div>
-            <div className="mb-2 text-xs font-black uppercase tracking-wide text-[#70685E]">
+            <div className="mb-2 text-xs font-bold uppercase tracking-wide text-[var(--color-muted-light)]">
               CLI
             </div>
             <div className="flex flex-wrap gap-2">
               {["Claude CLI", "aider", "curl"].map((tool) => (
                 <span
                   key={tool}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#D9CFC7] bg-white px-3 py-1.5 text-xs font-bold text-black shadow-2xs"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-ink)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-bold text-[var(--color-ink)] shadow-2xs"
                 >
-                  <span className="text-black font-black">✓</span> {tool}
+                  <span className="text-[var(--color-ink)] font-bold">✓</span> {tool}
                 </span>
               ))}
             </div>
@@ -129,22 +129,22 @@ export default function ConnectPage() {
       {/* Integration Guides (Collapsible Accordions) */}
       <section id="guides" className="scroll-mt-8 space-y-4">
         <div className="text-center">
-          <div className="font-mono text-[11px] font-black uppercase tracking-[0.18em] text-[#70685E]">
+          <div className="font-mono text-[11px] font-bold uppercase tracking-[0.18em] text-[var(--color-muted-light)]">
             Integration guides
           </div>
-          <h2 className="mx-auto mt-2 max-w-2xl text-balance text-2xl font-black tracking-tight sm:text-3xl text-black">
+          <h2 className="mx-auto mt-2 max-w-2xl text-balance text-2xl font-bold tracking-tight sm:text-3xl text-[var(--color-ink)]">
             Copy-paste setup for your tool
           </h2>
         </div>
 
-        <div className="mx-auto max-w-3xl rounded-2xl border border-[#D9CFC7] bg-[#EFE9E3] p-5 shadow-xs">
-          <h3 className="text-sm font-black text-black">
+        <div className="mx-auto max-w-3xl rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface2)] p-5 shadow-[3px_3px_0_var(--shadow-color)]">
+          <h3 className="text-sm font-bold text-[var(--color-ink)]">
             Coding in Cursor or VS Code? Get the biggest savings.
           </h3>
-          <p className="mt-1.5 text-xs sm:text-sm leading-relaxed text-[#403B35] font-medium">
+          <p className="mt-1.5 text-xs sm:text-sm leading-relaxed text-[var(--color-muted)] font-medium">
             Cut your coding bill without changing how you work:
           </p>
-          <ol className="mt-2 space-y-1 text-xs sm:text-sm text-[#403B35] font-semibold">
+          <ol className="mt-2 space-y-1 text-xs sm:text-sm text-[var(--color-muted)] font-semibold">
             <li>1. <b>Bring your own key</b> for Anthropic, OpenAI, or Google in Settings.</li>
             <li>2. Point your editor at <b>the model you already use</b>.</li>
             <li>3. Aegis does the rest — live dashboard itemizes your net savings.</li>
@@ -219,13 +219,13 @@ const response = await client.chat.completions.create({
 
 function StepCard({ num, title, desc }: { num: string; title: string; desc: string }) {
   return (
-    <div className="flex gap-3 rounded-2xl border border-[#D9CFC7] bg-white p-4 shadow-xs">
-      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#EFE9E3] font-mono text-xs font-black text-black border border-[#D9CFC7]">
+    <div className="flex gap-3 rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface)] p-4 shadow-[3px_3px_0_var(--shadow-color)]">
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--color-surface2)] font-mono text-xs font-bold text-[var(--color-ink)] border border-[var(--color-ink)]">
         {num}
       </span>
       <div>
-        <div className="text-sm font-black text-black">{title}</div>
-        <div className="mt-0.5 text-xs text-[#403B35] font-medium">{desc}</div>
+        <div className="text-sm font-bold text-[var(--color-ink)]">{title}</div>
+        <div className="mt-0.5 text-xs text-[var(--color-muted)] font-medium">{desc}</div>
       </div>
     </div>
   );
@@ -241,15 +241,15 @@ function GuideItem({
   code: string;
 }) {
   return (
-    <details className="group rounded-2xl border border-[#D9CFC7] bg-white open:bg-white shadow-xs">
-      <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 font-black text-black text-sm marker:hidden">
+    <details className="group rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface)] open:bg-[var(--color-surface)] shadow-[3px_3px_0_var(--shadow-color)]">
+      <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 font-bold text-[var(--color-ink)] text-sm marker:hidden">
         <span>{title}</span>
-        <span className="text-black font-black transition-transform group-open:rotate-90">
+        <span className="text-[var(--color-ink)] font-bold transition-transform group-open:rotate-90">
           ▶
         </span>
       </summary>
-      <div className="border-t border-[#D9CFC7] px-5 py-4">
-        <p className="mb-3 text-xs sm:text-sm text-[#403B35] font-medium leading-relaxed">
+      <div className="border-t border-[var(--color-ink)] px-5 py-4">
+        <p className="mb-3 text-xs sm:text-sm text-[var(--color-muted)] font-medium leading-relaxed">
           {instruction}
         </p>
         <CodeBlock code={code} />

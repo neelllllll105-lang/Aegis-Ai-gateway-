@@ -107,87 +107,87 @@ const FAQS = [
 
 export default function FaqPage() {
   return (
-    <div className="mx-auto max-w-5xl space-y-16 pb-16 pt-4 text-black">
+    <div className="mx-auto max-w-5xl space-y-16 pb-16 pt-4 text-[var(--color-ink)]">
       {/* Comparison Section matching tokenator.ai/faq layout */}
       <section className="space-y-6">
         <header className="mx-auto max-w-2xl text-center">
-          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#70685E]">
+          <div className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-[var(--color-muted-light)]">
             How Aegis compares
           </div>
-          <h1 className="mt-2 text-2xl sm:text-4xl font-black tracking-tight text-black">
+          <h1 className="mt-2 text-2xl sm:text-4xl font-bold tracking-tight text-[var(--color-ink)]">
             One control layer, not another point tool
           </h1>
-          <p className="mt-3 text-xs sm:text-sm leading-relaxed text-[#403B35] font-medium">
-            You don&apos;t run Aegis <i>instead</i> of your favorite tools — you run it <i>underneath</i> them. Aegis manages the whole bill — <b className="text-black">cutting cost, protecting quality, and showing you the savings.</b>
+          <p className="mt-3 text-xs sm:text-sm leading-relaxed text-[var(--color-muted)] font-medium">
+            You don&apos;t run Aegis <i>instead</i> of your favorite tools — you run it <i>underneath</i> them. Aegis manages the whole bill — <b className="text-[var(--color-ink)]">cutting cost, protecting quality, and showing you the savings.</b>
           </p>
         </header>
 
         {/* Comparison Matrix Table */}
-        <div className="overflow-x-auto rounded-2xl border border-[#D9CFC7] bg-white shadow-xs">
+        <div className="overflow-x-auto rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface)] shadow-[3px_3px_0_var(--shadow-color)]">
           <table className="w-full border-collapse text-left text-xs">
             <thead>
-              <tr className="border-b border-[#D9CFC7] bg-[#EFE9E3]">
-                <th className="px-4 py-3 font-black text-black">Layer</th>
-                <th className="px-3 py-3 text-center font-bold text-[#403B35]">Lowers Cost</th>
-                <th className="px-3 py-3 text-center font-bold text-[#403B35]">No Pay Twice</th>
-                <th className="px-3 py-3 text-center font-bold text-[#403B35]">Budgets</th>
-                <th className="px-3 py-3 text-center font-bold text-[#403B35]">Visibility</th>
-                <th className="px-3 py-3 text-center font-bold text-[#403B35]">Attribution</th>
-                <th className="px-3 py-3 text-center font-bold text-[#403B35]">Cuts Spend</th>
-                <th className="px-3 py-3 text-center font-bold text-[#403B35]">Shows Savings</th>
-                <th className="px-3 py-3 text-center font-bold text-[#403B35]">Protects Quality</th>
+              <tr className="border-b border-[var(--color-ink)] bg-[var(--color-surface2)]">
+                <th className="px-4 py-3 font-bold text-[var(--color-ink)]">Layer</th>
+                <th className="px-3 py-3 text-center font-bold text-[var(--color-muted)]">Lowers Cost</th>
+                <th className="px-3 py-3 text-center font-bold text-[var(--color-muted)]">No Pay Twice</th>
+                <th className="px-3 py-3 text-center font-bold text-[var(--color-muted)]">Budgets</th>
+                <th className="px-3 py-3 text-center font-bold text-[var(--color-muted)]">Visibility</th>
+                <th className="px-3 py-3 text-center font-bold text-[var(--color-muted)]">Attribution</th>
+                <th className="px-3 py-3 text-center font-bold text-[var(--color-muted)]">Cuts Spend</th>
+                <th className="px-3 py-3 text-center font-bold text-[var(--color-muted)]">Shows Savings</th>
+                <th className="px-3 py-3 text-center font-bold text-[var(--color-muted)]">Protects Quality</th>
               </tr>
             </thead>
             <tbody>
               {COMPARISON_DATA.map((row, idx) => (
                 <tr
                   key={idx}
-                  className={`border-b border-[#D9CFC7] last:border-0 ${
-                    row.isAegis ? "bg-[#EFE9E3] font-bold" : "hover:bg-[#F9F8F6]"
+                  className={`border-b border-[var(--color-ink)] last:border-0 ${
+                    row.isAegis ? "bg-[var(--color-surface2)] font-bold" : "hover:bg-[var(--color-surface2)]"
                   }`}
                 >
                   <th className="px-4 py-3.5">
-                    <span className={row.isAegis ? "text-black font-black text-sm" : "text-black font-bold"}>
+                    <span className={row.isAegis ? "text-[var(--color-ink)] font-bold text-sm" : "text-[var(--color-ink)] font-bold"}>
                       {row.layer}
                     </span>
-                    <span className="block text-[10px] text-[#70685E] font-normal mt-0.5">
+                    <span className="block text-[10px] text-[var(--color-muted-light)] font-normal mt-0.5">
                       {row.subtext}
                     </span>
                   </th>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.lowersCost}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.noRepeatPay}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.safetyBudgets}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.visibility}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.attribution}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.cutsSpend}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.showsSavings}</td>
-                  <td className="px-3 py-3.5 text-center text-sm font-bold text-black">{row.protectsQuality}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[var(--color-ink)]">{row.lowersCost}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[var(--color-ink)]">{row.noRepeatPay}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[var(--color-ink)]">{row.safetyBudgets}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[var(--color-ink)]">{row.visibility}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[var(--color-ink)]">{row.attribution}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[var(--color-ink)]">{row.cutsSpend}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[var(--color-ink)]">{row.showsSavings}</td>
+                  <td className="px-3 py-3.5 text-center text-sm font-bold text-[var(--color-ink)]">{row.protectsQuality}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#70685E]">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--color-muted-light)]">
           <div className="flex items-center gap-4">
-            <span><strong className="text-black">●</strong> Core capability</span>
-            <span><strong className="text-[#B45309]">◐</strong> Partial / Some</span>
-            <span><strong className="text-[#D9CFC7]">○</strong> None</span>
+            <span><strong className="text-[var(--color-ink)]">●</strong> Core capability</span>
+            <span><strong className="text-[var(--color-amber)]">◐</strong> Partial / Some</span>
+            <span><strong className="text-[var(--color-line)]">○</strong> None</span>
           </div>
           <p className="italic text-[11px]">Only Aegis both actively cuts spend and provides verified savings audit receipts.</p>
         </div>
       </section>
 
       {/* FAQ Grid */}
-      <section className="border-t border-[#D9CFC7] pt-12">
+      <section className="border-t border-[var(--color-ink)] pt-12">
         <header className="mx-auto max-w-2xl text-center mb-8">
-          <div className="font-mono text-[11px] font-black uppercase tracking-[0.2em] text-[#70685E]">
+          <div className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-[var(--color-muted-light)]">
             FAQ
           </div>
-          <h2 className="mt-2 text-3xl font-black tracking-tight text-black">
+          <h2 className="mt-2 text-3xl font-bold tracking-tight text-[var(--color-ink)]">
             Frequently asked questions
           </h2>
-          <p className="mt-2 text-xs sm:text-sm text-[#403B35] font-semibold">
+          <p className="mt-2 text-xs sm:text-sm text-[var(--color-muted)] font-semibold">
             How intelligence, caching, and savings share billing operate.
           </p>
         </header>
@@ -196,15 +196,15 @@ export default function FaqPage() {
           {FAQS.map((faq, idx) => (
             <details
               key={idx}
-              className="group rounded-2xl border border-[#D9CFC7] bg-white p-5 shadow-xs transition-all hover:border-[#C9B59C]"
+              className="group rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface)] p-5 shadow-[3px_3px_0_var(--shadow-color)] transition-all hover:border-[var(--color-accent)]"
             >
-              <summary className="flex cursor-pointer list-none items-center justify-between font-black text-black text-sm marker:hidden">
+              <summary className="flex cursor-pointer list-none items-center justify-between font-bold text-[var(--color-ink)] text-sm marker:hidden">
                 <span>{faq.q}</span>
-                <span className="text-black font-black text-lg transition-transform group-open:rotate-45">
+                <span className="text-[var(--color-ink)] font-bold text-lg transition-transform group-open:rotate-45">
                   +
                 </span>
               </summary>
-              <p className="mt-3 text-xs text-[#403B35] font-medium leading-relaxed border-t border-[#D9CFC7] pt-3">
+              <p className="mt-3 text-xs text-[var(--color-muted)] font-medium leading-relaxed border-t border-[var(--color-ink)] pt-3">
                 {faq.a}
               </p>
             </details>
@@ -213,21 +213,21 @@ export default function FaqPage() {
       </section>
 
       {/* Help Banner */}
-      <div className="rounded-2xl border border-[#D9CFC7] bg-[#EFE9E3] p-8 text-center shadow-xs">
-        <h3 className="text-xl font-black text-black">Ready to cut your inference bill?</h3>
-        <p className="mt-2 text-xs sm:text-sm text-[#403B35] font-semibold">
+      <div className="rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface2)] p-8 text-center shadow-[3px_3px_0_var(--shadow-color)]">
+        <h3 className="text-xl font-bold text-[var(--color-ink)]">Ready to cut your inference bill?</h3>
+        <p className="mt-2 text-xs sm:text-sm text-[var(--color-muted)] font-semibold">
           Get started in under 5 minutes with zero code changes.
         </p>
         <div className="mt-5 flex justify-center gap-3">
           <Link
             href="/signup"
-            className="rounded-lg bg-[#C9B59C] px-6 py-2.5 text-xs font-bold text-[#0A0A0A] shadow-xs hover:bg-[#BFAF98] border border-[#BFAF98]"
+            className="rounded-lg bg-[var(--color-accent)] px-6 py-2.5 text-xs font-bold text-[var(--color-surface)] shadow-[3px_3px_0_var(--shadow-color)] hover:bg-[var(--color-accent-dark)] border border-[var(--color-accent-dark)]"
           >
             Request access →
           </Link>
           <Link
             href="/connect"
-            className="rounded-lg border border-black bg-white px-5 py-2.5 text-xs font-bold text-black shadow-xs hover:bg-[#F9F8F6]"
+            className="rounded-lg border border-[var(--color-ink)] bg-[var(--color-surface)] px-5 py-2.5 text-xs font-bold text-[var(--color-ink)] shadow-[3px_3px_0_var(--shadow-color)] hover:bg-[var(--color-surface2)]"
           >
             Integration Guide
           </Link>

@@ -1,57 +1,91 @@
 @import "tailwindcss";
 
 /*
- * Aegis Design System — Pure Palette from User Reference:
- * - Canvas Background: #F9F8F6 (rgb 249, 248, 246)
- * - Card Surface: #FFFFFF
- * - Secondary Surface (Stats, Tags, Table headers): #EFE9E3 (rgb 239, 233, 227)
- * - Borders & Dividers: #D9CFC7 (rgb 217, 207, 199)
- * - Warm Accent, CTAs & Footer: #C9B59C (rgb 201, 181, 156)
- * - Headings & High-contrast Text: #0A0A0A (Pure Jet Black)
- * - Body Text: #403B35
- * - Muted Text: #70685E
+ * Aegis Design System — "Deskwork"
+ * ---------------------------------------------------------------------------
+ * A warm, light canvas (the desk) carries paper content surfaces — cards a
+ * shade lighter than the desk they sit on, bordered in ink with a hard,
+ * zero-blur offset shadow. Ink is the default color everywhere; red is
+ * reserved for the agent and for events (primary actions, danger, the
+ * routing engine acting on your behalf). Nothing else gets to be loud.
+ * Three voices of type do three different jobs:
+ *
+ *   Document (Spectral)      — headlines, section heads, the wordmark
+ *   UI       (Space Grotesk) — chrome, labels, body copy, buttons
+ *   Machine  (JetBrains Mono)— ids, timestamps, money, logs, anything exact
+ *   Human    (Caveat)        — used once or twice, never as a system voice
+ *
+ * Re-skin discipline: if this ever needs to become a different product's
+ * theme, there are exactly three knobs — --red (accent), --desk (canvas),
+ * and the handwriting face. Everything else (the shadow ladder, the border
+ * grammar, the radius cap, the tracking-vs-size scale on eyebrows) stays
+ * put. Those were tuned together; changing one without the others is how
+ * "warm editorial" turns into generic SaaS.
  */
 
 @theme {
-  /* Grounds & Canvas Surfaces */
-  --color-bg: #F9F8F6;
-  --color-surface: #FFFFFF;
-  --color-surface2: #EFE9E3;
-  --color-surface-warm: #EFE9E3;
-  --color-camel: #C9B59C;
-  --color-footer: #C9B59C;
-  --color-footer-bg: #C9B59C;
-  --color-line: #D9CFC7;
-  --color-line-light: #EFE9E3;
-  --color-line-dark: #C9B59C;
+  /* Desk — the light warm canvas everything sits on (page background, nav, footer) */
+  --color-bg: #EAE3D3;
+  --color-desk-raised: #F3EEDF;
+  --color-desk-line: #DCCFAC;
 
-  /* Typography Colors — High Contrast, Punchy & Clear */
-  --color-ink: #0A0A0A;
-  --color-muted: #403B35;
-  --color-muted-light: #70685E;
+  /* Paper — content surfaces a shade lighter than the desk */
+  --color-surface: #FBF8F1;
+  --color-surface2: #F3EEDF;
+  --color-surface-warm: #F3EEDF;
+  --color-camel: #A8341E;
+  --color-footer: #F3EEDF;
+  --color-footer-bg: #EAE3D3;
+  --color-line: #DCCFAC;
+  --color-line-light: #E9DCBB;
+  --color-line-dark: #211C14;
 
-  /* Palette Accents */
-  --color-accent: #C9B59C;
-  --color-accent-dark: #A89379;
-  --color-accent-bg: rgba(201, 181, 156, 0.20);
-  --color-accent-border: #D9CFC7;
+  /* Typography Colors */
+  --color-ink: #211C14;
+  --color-muted: #55492F;
+  --color-muted-light: #8A7C5C;
+
+  /* Same three text roles, for anything that sits bare on the desk with no
+     paper card behind it (nav, footer, section heads with no wrapper) — on
+     a light desk this is just ink again, but keeping the separate token
+     names means a future dark-desk variant is still a one-place change. */
+  --color-paper-on-desk: #211C14;
+  --color-muted-on-desk: #55492F;
+  --color-faint-on-desk: #8A7C5C;
+
+  /* Palette Accents — red is the agent's color: primary action, danger, event */
+  --color-accent: #A8341E;
+  --color-accent-dark: #822712;
+  --color-accent-bg: rgba(168, 52, 30, 0.14);
+  --color-accent-border: #822712;
 
   /* Semantic Alerts */
-  --color-amber: #B45309;
-  --color-red: #DC2626;
-  /* "Good" states (low complexity, cache hit, savings) read as a deep, warm coffee
-     brown rather than green — green reads as a foreign hue against a cream/camel
-     palette built entirely from warm neutrals. */
-  --color-positive: #6B4423;
+  --color-amber: #93630F;
+  --color-amber-bg: #F1E0B4;
+  --color-red: #A8341E;
+  --color-positive: #3F6B34;
+  --color-positive-bg: #DCE6CC;
+  --color-ochre: #A07A1E;
+  --color-ochre-bg: #EEDFB6;
 
-  --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* Document / UI / Machine / Human — see next/font wiring in layout.tsx */
+  --font-sans: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-serif: "Spectral", ui-serif, Georgia, "Times New Roman", serif;
+  --font-hand: "Caveat", "Segoe Script", cursive;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
-  --radius-sm: 8px;
-  --radius: 12px;
-  --radius-lg: 18px;
-  --radius-2xl: 24px;
-  --radius-3xl: 32px;
+  /* Radius discipline — nothing rounder than 11px, except pills/circles */
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 9px;
+  --radius-xl: 10px;
+  --radius-2xl: 11px;
+  --radius-3xl: 11px;
+
+  /* Hard shadow ladder — flat offset, zero blur, always. This is the single
+     most load-bearing detail in the whole system: a blurred shadow here
+     reads as generic-SaaS instantly. */
+  --shadow-color: #211C14;
 }
 
 @layer base {
@@ -72,16 +106,17 @@
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    background-image: 
-      radial-gradient(680px 320px at 80% -5%, rgba(201, 181, 156, 0.28), transparent 60%),
-      radial-gradient(520px 280px at -5% 105%, rgba(217, 207, 199, 0.35), transparent 60%);
+    background-image:
+      radial-gradient(900px 420px at 85% -8%, rgba(168, 52, 30, 0.08), transparent 60%),
+      radial-gradient(700px 360px at -8% 108%, rgba(220, 207, 172, 0.5), transparent 60%);
     background-attachment: fixed;
   }
 
   h1, h2, h3, h4, h5, h6 {
-    color: #0A0A0A !important;
-    font-weight: 800;
-    letter-spacing: -0.025em;
+    font-family: var(--font-serif);
+    color: var(--color-ink);
+    font-weight: 600;
+    letter-spacing: -0.01em;
   }
 
   .tabular,
@@ -92,49 +127,94 @@
   }
 
   ::selection {
-    background-color: rgba(201, 181, 156, 0.4);
-    color: #0A0A0A;
+    background-color: rgba(168, 52, 30, 0.22);
+    color: var(--color-ink);
   }
 
   :focus-visible {
-    outline: 2px solid #0A0A0A;
+    outline: 2px solid var(--color-accent);
     outline-offset: 2px;
     border-radius: var(--radius-sm);
   }
 }
 
 @layer components {
+  /* -------------------------------------------------------------------
+   * Shadow ladder — hard offset, zero blur. Five stops; 2 and 3 cover
+   * almost everything (resting card, hovered/raised card). 4–5 are for
+   * modals and the rare "this really matters" surface.
+   * ----------------------------------------------------------------- */
+  .shadow-hard-1 { box-shadow: 2px 2px 0 var(--shadow-color); }
+  .shadow-hard-2 { box-shadow: 3px 3px 0 var(--shadow-color); }
+  .shadow-hard-3 { box-shadow: 4px 4px 0 var(--shadow-color); }
+  .shadow-hard-4 { box-shadow: 6px 6px 0 var(--shadow-color); }
+  .shadow-hard-5 { box-shadow: 8px 8px 0 var(--shadow-color); }
+
+  /* -------------------------------------------------------------------
+   * Border grammar — line style carries meaning, not just weight.
+   *   solid   = structure (default)
+   *   dashed  = pending / human-editable / staged
+   *   double  = ceremonial (rare — plan highlight, signed document)
+   *   left rail = severity/outcome, used on decision cards & alerts
+   * ----------------------------------------------------------------- */
+  .border-pending {
+    border-style: dashed;
+    border-color: var(--color-amber);
+  }
+
+  .border-ceremonial {
+    border-style: double;
+    border-width: 3px;
+    border-color: var(--color-ink);
+  }
+
+  .rail-agent { border-left: 3px solid var(--color-accent); }
+  .rail-pending { border-left: 3px solid var(--color-amber); }
+  .rail-verdict { border-left: 3px solid var(--color-positive); }
+  .rail-muted { border-left: 3px solid var(--color-muted-light); }
+  .rail-other { border-left: 3px solid var(--color-ochre); }
+
+  /* -------------------------------------------------------------------
+   * Core surfaces
+   * ----------------------------------------------------------------- */
   .btn-accent {
-    background-color: #C9B59C;
-    color: #0A0A0A;
-    font-weight: 800;
-    border-radius: var(--radius);
+    background-color: var(--color-accent);
+    color: var(--color-surface);
+    font-weight: 700;
+    border: 1.5px solid var(--color-accent-dark);
+    border-radius: var(--radius-xl);
     padding: 0.75rem 1.75rem;
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-    box-shadow: 0 2px 8px rgba(201, 181, 156, 0.3);
+    transition: transform 0.12s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.12s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: 3px 3px 0 var(--color-ink);
   }
 
   .btn-accent:hover {
-    background-color: #BFAF98;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 14px rgba(201, 181, 156, 0.4);
+    transform: translate(-1px, -1px);
+    box-shadow: 4px 4px 0 var(--color-ink);
+  }
+
+  .btn-accent:active {
+    transform: translate(1px, 1px);
+    box-shadow: 1px 1px 0 var(--color-ink);
   }
 
   .card-surface {
     background-color: var(--color-surface);
-    border: 1px solid var(--color-line);
+    border: 1.5px solid var(--color-ink);
     border-radius: var(--radius-2xl);
     padding: 1.5rem;
-    transition: all 0.2s ease;
+    box-shadow: 3px 3px 0 var(--color-ink);
+    transition: transform 0.12s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.12s cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .card-surface:hover {
-    border-color: var(--color-camel);
+    transform: translate(-1px, -1px);
+    box-shadow: 4px 4px 0 var(--color-ink);
   }
 
   .card-surface2 {
     background-color: var(--color-surface2);
-    border: 1px solid var(--color-line);
+    border: 1.5px solid var(--color-ink);
     border-radius: var(--radius-2xl);
     padding: 1.5rem;
   }
@@ -144,7 +224,54 @@
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.2em;
-    font-weight: 800;
-    color: #70685E;
+    font-weight: 700;
+    color: var(--color-muted-light);
   }
+
+  /* -------------------------------------------------------------------
+   * Stamp — a rotated, bordered severity/reason chip. Used to badge a
+   * routing reason, a cache outcome, a plan tier. Never used for more
+   * than one word.
+   * ----------------------------------------------------------------- */
+  .stamp {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35em;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    padding: 0.3rem 0.6rem;
+    border: 1.5px solid currentColor;
+    border-radius: var(--radius-sm);
+    background-color: var(--color-surface);
+    transform: rotate(-1.5deg);
+  }
+
+  /* -------------------------------------------------------------------
+   * Scan bar — an ambient sweep while the agent is working. Respects
+   * prefers-reduced-motion via the guard below.
+   * ----------------------------------------------------------------- */
+  .scan-bar {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .scan-bar::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(168, 52, 30, 0.16), transparent);
+    transform: translateX(-100%);
+    animation: scan-sweep 1.8s ease-in-out infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .scan-bar::after { animation: none; display: none; }
+  }
+}
+
+@keyframes scan-sweep {
+  100% { transform: translateX(100%); }
 }

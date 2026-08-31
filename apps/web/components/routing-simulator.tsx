@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { AttributionChip, Stamp, type StampTone } from "@/components/ui";
 
 interface Scenario {
   id: string;
@@ -121,18 +122,15 @@ export function RoutingSimulator() {
     }, 450);
   }
 
-  const complexityBarColor =
-    current.complexityLabel === "Low"
-      ? "bg-[var(--color-positive)]"
-      : current.complexityLabel === "Medium"
-        ? "bg-[#B45309]"
-        : "bg-black";
+  const complexityTone: StampTone =
+    current.complexityLabel === "Low" ? "verdict" : current.complexityLabel === "Medium" ? "pending" : "agent";
+  const cacheTone: StampTone = current.cacheStatus === "miss" ? "pending" : "verdict";
 
   return (
-    <div className="rounded-3xl border border-[#D9CFC7] bg-white p-6 sm:p-8 shadow-xs text-black">
+    <div className="rounded-3xl border-[1.5px] border-[var(--color-ink)] bg-[var(--color-surface)] p-6 sm:p-8 shadow-[4px_4px_0_var(--shadow-color)] text-[var(--color-ink)]">
       {/* Scenario Selector Pills */}
-      <div className="flex flex-wrap items-center gap-2 mb-6">
-        <span className="text-[11px] font-black uppercase tracking-wider text-black mr-2">
+      <div className={`flex flex-wrap items-center gap-2 mb-6 ${simulating ? "scan-bar" : ""}`}>
+        <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--color-ink)] mr-2">
           Select Workload:
         </span>
         {SCENARIOS.map((s) => {
@@ -145,8 +143,8 @@ export function RoutingSimulator() {
               disabled={simulating}
               className={`rounded-lg px-3.5 py-1.5 text-xs font-bold transition-all ${
                 isSelected
-                  ? "bg-[#C9B59C] text-[#0A0A0A] shadow-xs border border-[#BFAF98]"
-                  : "bg-[#EFE9E3] text-[#403B35] hover:bg-[#D9CFC7] hover:text-black border border-[#D9CFC7]"
+                  ? "bg-[var(--color-accent)] text-[var(--color-surface)] shadow-[2px_2px_0_var(--shadow-color)] border border-[var(--color-accent-dark)]"
+                  : "bg-[var(--color-surface2)] text-[var(--color-muted)] hover:bg-[var(--color-line)] hover:text-[var(--color-ink)] border border-[var(--color-ink)]"
               }`}
             >
               {s.name}
@@ -159,21 +157,19 @@ export function RoutingSimulator() {
         {/* Left column: Pipeline Execution */}
         <div className="lg:col-span-7 space-y-4">
           {/* Inbound Prompt */}
-          <div className="rounded-2xl border border-[#D9CFC7] bg-[#F9F8F6] p-4">
-            <div className="flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-black mb-1.5">
+          <div className="rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface2)] p-4">
+            <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-[var(--color-ink)] mb-1.5">
               <span>Inbound Client Prompt</span>
-              <span className="font-mono text-[10px] text-black bg-[#EFE9E3] px-2 py-0.5 rounded-full border border-[#D9CFC7] font-bold">
-                Requested: {current.requestedModel}
-              </span>
+              <AttributionChip actor="you" label={`Requested: ${current.requestedModel}`} />
             </div>
-            <p className="text-xs text-[#403B35] font-mono leading-relaxed bg-white p-3 rounded-xl border border-[#D9CFC7]">
+            <p className="text-xs text-[var(--color-muted)] font-mono leading-relaxed bg-[var(--color-surface)] p-3 rounded-xl border border-[var(--color-line)]">
               &ldquo;{current.prompt}&rdquo;
             </p>
           </div>
 
           {/* Microsecond Pipeline */}
-          <div className="rounded-2xl border border-[#D9CFC7] bg-[#F9F8F6] p-4 space-y-3">
-            <div className="text-[11px] font-black uppercase tracking-wider text-black">
+          <div className="rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface2)] p-4 space-y-3">
+            <div className="text-[11px] font-bold uppercase tracking-wider text-[var(--color-ink)]">
               Deterministic Microsecond Pipeline
             </div>
 
@@ -182,25 +178,28 @@ export function RoutingSimulator() {
               <div
                 className={`rounded-xl border p-3.5 transition-all ${
                   activeStep >= 2
-                    ? "border-[#D9CFC7] bg-white shadow-xs"
-                    : "border-dashed border-[#D9CFC7] opacity-40 bg-[#F9F8F6]"
+                    ? "border-[var(--color-ink)] bg-[var(--color-surface)] shadow-[2px_2px_0_var(--shadow-color)]"
+                    : "border-pending opacity-40 bg-[var(--color-surface2)]"
                 }`}
               >
-                <div className="text-[10px] font-black uppercase tracking-wider text-[#70685E]">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-muted-light)]">
                   1. Complexity
                 </div>
-                <div className="mt-1 flex items-baseline justify-between">
-                  <span className="text-xs font-black text-black">
-                    {current.complexityLabel}
-                  </span>
-                  <span className="text-[10px] font-mono text-[#70685E] font-bold">
-                    {(current.complexityScore * 100).toFixed(0)}%
-                  </span>
+                <div className="mt-1.5">
+                  <Stamp tone={complexityTone}>{current.complexityLabel}</Stamp>
                 </div>
-                <div className="mt-2 w-full h-1.5 bg-[#EFE9E3] rounded-full overflow-hidden">
+                <div className="mt-2 w-full h-1.5 bg-[var(--color-surface2)] rounded-full overflow-hidden border border-[var(--color-line)]">
                   <div
-                    className={`h-full ${complexityBarColor} rounded-full transition-all duration-300`}
-                    style={{ width: `${current.complexityScore * 100}%` }}
+                    className="h-full rounded-full transition-all duration-300"
+                    style={{
+                      width: `${current.complexityScore * 100}%`,
+                      backgroundColor:
+                        complexityTone === "verdict"
+                          ? "var(--color-positive)"
+                          : complexityTone === "pending"
+                            ? "var(--color-amber)"
+                            : "var(--color-accent)",
+                    }}
                   />
                 </div>
               </div>
@@ -209,32 +208,17 @@ export function RoutingSimulator() {
               <div
                 className={`rounded-xl border p-3.5 transition-all ${
                   activeStep >= 3
-                    ? "border-[#D9CFC7] bg-white shadow-xs"
-                    : "border-dashed border-[#D9CFC7] opacity-40 bg-[#F9F8F6]"
+                    ? "border-[var(--color-ink)] bg-[var(--color-surface)] shadow-[2px_2px_0_var(--shadow-color)]"
+                    : "border-pending opacity-40 bg-[var(--color-surface2)]"
                 }`}
               >
-                <div className="text-[10px] font-black uppercase tracking-wider text-[#70685E]">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-muted-light)]">
                   2. Semantic Cache
                 </div>
-                <div className="mt-1 flex items-center gap-1.5">
-                  <span
-                    className={`inline-block h-2.5 w-2.5 rounded-full ${
-                      current.cacheStatus === "miss"
-                        ? "bg-[#B45309]"
-                        : "bg-[var(--color-positive)]"
-                    }`}
-                  />
-                  <span
-                    className={`text-xs font-black capitalize ${
-                      current.cacheStatus === "miss"
-                        ? "text-[#B45309]"
-                        : "text-[var(--color-positive)]"
-                    }`}
-                  >
-                    {current.cacheStatus.replace("_", " ")}
-                  </span>
+                <div className="mt-1.5">
+                  <Stamp tone={cacheTone}>{current.cacheStatus.replace("_", " ")}</Stamp>
                 </div>
-                <div className="mt-1.5 text-[10px] text-[#70685E] font-medium truncate">
+                <div className="mt-1.5 text-[10px] text-[var(--color-muted-light)] font-medium truncate">
                   {current.cacheStatus === "miss" ? "Forward to engine" : "0.19ms instant hit"}
                 </div>
               </div>
@@ -243,17 +227,17 @@ export function RoutingSimulator() {
               <div
                 className={`rounded-xl border p-3.5 transition-all ${
                   activeStep >= 4
-                    ? "border-[#C9B59C] bg-[#EFE9E3] shadow-xs"
-                    : "border-dashed border-[#D9CFC7] opacity-40 bg-[#F9F8F6]"
+                    ? "border-[var(--color-accent)] bg-[var(--color-accent-bg)] shadow-[2px_2px_0_var(--shadow-color)]"
+                    : "border-pending opacity-40 bg-[var(--color-surface2)]"
                 }`}
               >
-                <div className="text-[10px] font-black uppercase tracking-wider text-black">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-ink)]">
                   3. Optimal Model
                 </div>
-                <div className="mt-1 text-xs font-black text-black truncate">
-                  {current.routedModel.split("/")[1] || current.routedModel}
+                <div className="mt-1.5">
+                  <AttributionChip actor="agent" label={current.routedModel.split("/")[1] || current.routedModel} />
                 </div>
-                <div className="mt-1.5 text-[10px] font-bold text-black">
+                <div className="mt-1.5 text-[10px] font-bold text-[var(--color-ink)]">
                   {current.qualityPreserved}
                 </div>
               </div>
@@ -262,58 +246,58 @@ export function RoutingSimulator() {
         </div>
 
         {/* Right column: Auditable Live Receipt */}
-        <div className="lg:col-span-5 flex flex-col justify-between rounded-2xl border border-[#38332D] bg-[#141210] text-[#F9F8F6] p-6 shadow-sm">
+        <div className="lg:col-span-5 flex flex-col justify-between rounded-2xl border-[1.5px] border-[#3C3324] bg-[#201B14] text-[#F7F1E4] p-6 shadow-[4px_4px_0_var(--shadow-color)]">
           <div>
             {/* Window control header */}
-            <div className="flex items-center justify-between border-b border-[#2E2A25] pb-3 mb-4">
+            <div className="flex items-center justify-between border-b border-[#3C3324] pb-3 mb-4">
               <div className="flex items-center gap-2">
                 <div className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-[#FF5F56] border border-[#E0443E]" />
-                  <span className="w-2.5 h-2.5 rounded-full bg-[#FFBD2E] border border-[#DEA123]" />
-                  <span className="w-2.5 h-2.5 rounded-full bg-[#27C93F] border border-[#1AAB29]" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#A8341E] border border-[#822712]" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#B8912E] border border-[#93630F]" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#5B8A4E] border border-[#3F6B34]" />
                 </div>
-                <span className="ml-1 text-[11px] font-mono uppercase tracking-wider text-[#F9F8F6] font-bold">
+                <span className="ml-1 text-[11px] font-mono uppercase tracking-wider text-[#F7F1E4] font-bold">
                   Audit Header Receipt
                 </span>
               </div>
-              <span className="text-[10px] font-mono bg-[#2C2823] text-[#C9B59C] px-2 py-0.5 rounded border border-[#403B33] font-bold">
+              <span className="text-[10px] font-mono bg-[#3C3324] text-[#D9855E] px-2 py-0.5 rounded border border-[#4A3F2C] font-bold">
                 RFC-9110
               </span>
             </div>
 
             <div className="space-y-2 text-xs font-mono">
               <div className="flex justify-between">
-                <span className="text-[#A8A29E]">X-Aegis-Requested:</span>
-                <span className="text-[#F9F8F6] font-bold">{current.requestedModel}</span>
+                <span className="text-[#B8AC8E]">X-Aegis-Requested:</span>
+                <span className="text-[#F7F1E4] font-bold">{current.requestedModel}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[#A8A29E]">X-Aegis-Served-By:</span>
-                <span className="text-[#C9B59C] font-bold">{current.routedModel}</span>
+                <span className="text-[#B8AC8E]">X-Aegis-Served-By:</span>
+                <span className="text-[#D9855E] font-bold">{current.routedModel}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[#A8A29E]">X-Aegis-Baseline-Cost:</span>
-                <span className="text-[#F9F8F6]">{current.baselineCost}</span>
+                <span className="text-[#B8AC8E]">X-Aegis-Baseline-Cost:</span>
+                <span className="text-[#F7F1E4]">{current.baselineCost}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[#A8A29E]">X-Aegis-Actual-Cost:</span>
-                <span className="text-[#C9B59C] font-bold">{current.actualCost}</span>
+                <span className="text-[#B8AC8E]">X-Aegis-Actual-Cost:</span>
+                <span className="text-[#D9855E] font-bold">{current.actualCost}</span>
               </div>
-              <div className="flex justify-between border-t border-[#2E2A25] pt-2 mt-2">
-                <span className="text-[#A8A29E]">X-Aegis-Savings:</span>
-                <span className="text-[#C9B59C] font-black text-sm">{current.savings} ({current.savingsPercent})</span>
+              <div className="flex justify-between border-t border-[#3C3324] pt-2 mt-2">
+                <span className="text-[#B8AC8E]">X-Aegis-Savings:</span>
+                <span className="text-[#D9855E] font-bold text-sm">{current.savings} ({current.savingsPercent})</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[#A8A29E]">X-Aegis-Overhead:</span>
-                <span className="text-[#F9F8F6]">{current.overhead}</span>
+                <span className="text-[#B8AC8E]">X-Aegis-Overhead:</span>
+                <span className="text-[#F7F1E4]">{current.overhead}</span>
               </div>
             </div>
           </div>
 
-          <div className="mt-6 pt-4 border-t border-[#2E2A25] flex items-center justify-between">
-            <span className="text-[11px] text-[#A8A29E]">
-              Total Latency: <strong className="text-[#F9F8F6]">{current.latency}</strong>
+          <div className="mt-6 pt-4 border-t border-[#3C3324] flex items-center justify-between">
+            <span className="text-[11px] text-[#B8AC8E]">
+              Total Latency: <strong className="text-[#F7F1E4]">{current.latency}</strong>
             </span>
-            <span className="text-[10px] font-bold uppercase tracking-wider text-[#0A0A0A] bg-[#C9B59C] px-2.5 py-1 rounded-full shadow-2xs">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-[#F7F1E4] bg-[#A8341E] px-2.5 py-1 rounded-full">
               ✓ Audited Micro-Cents
             </span>
           </div>

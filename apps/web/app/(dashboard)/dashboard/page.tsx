@@ -61,7 +61,7 @@ export default function DashboardPage() {
   }, []);
 
   if (loading) {
-    return <p className="text-sm text-[var(--color-muted-light)]">Loading…</p>;
+    return <p className="text-sm text-[var(--color-muted-on-desk)]">Loading…</p>;
   }
 
   if (error) {
@@ -91,7 +91,7 @@ export default function DashboardPage() {
             action={
               <Link
                 href="/keys"
-                className="inline-block rounded-[var(--radius)] bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[#04140c]"
+                className="inline-block rounded-[var(--radius)] bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-surface)]"
               >
                 Create an API key
               </Link>

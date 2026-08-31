@@ -151,7 +151,7 @@ export default function ProvidersPage() {
                 id="provider"
                 value={provider}
                 onChange={(event) => setProvider(event.target.value)}
-                className="mt-1.5 w-full rounded-[var(--radius)] border border-[var(--color-line-dark)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-ink)]"
+                className="mt-1.5 w-full rounded-[var(--radius)] border border-[var(--color-line-dark)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-ink)]"
               >
                 {PROVIDERS.map((id) => (
                   <option key={id} value={id}>
@@ -186,7 +186,7 @@ export default function ProvidersPage() {
                 rows={8}
                 spellCheck={false}
                 placeholder={'{\n  "type": "service_account",\n  "project_id": "...",\n  "private_key": "-----BEGIN PRIVATE KEY-----...",\n  "client_email": "...@....iam.gserviceaccount.com"\n}'}
-                className="mt-1.5 w-full rounded-[var(--radius)] border border-[var(--color-line-dark)] bg-[var(--color-bg)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
+                className="mt-1.5 w-full rounded-[var(--radius)] border border-[var(--color-line-dark)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs text-[var(--color-ink)]"
               />
               <p className="mt-1.5 text-xs text-[var(--color-muted)]">
                 Paste the full contents of the key file downloaded from your GCP service

@@ -12,6 +12,7 @@ import {
   Badge,
   Button,
   Card,
+  DisclosureMeter,
   EmptyState,
   ErrorState,
   SectionHeader,
@@ -152,35 +153,54 @@ export default function BudgetsPage() {
               {anomaly.is_anomalous ? "Unusual spend" : "Spend normal"}
             </Badge>
             <div className="min-w-0 flex-1">
-              <p className="text-xs font-medium leading-relaxed text-[#403B35]">
+              <p className="text-xs font-medium leading-relaxed text-[var(--color-muted)]">
                 {anomaly.explanation}
               </p>
               <dl className="mt-3 flex flex-wrap gap-x-8 gap-y-2">
                 <div>
-                  <dt className="text-[10px] font-black uppercase tracking-wider text-[#70685E]">
+                  <dt className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-muted-light)]">
                     Today
                   </dt>
-                  <dd className="font-mono text-sm font-black text-black">
+                  <dd className="font-mono text-sm font-bold text-[var(--color-ink)]">
                     {formatUsd(anomaly.observed_mc)}
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-[10px] font-black uppercase tracking-wider text-[#70685E]">
+                  <dt className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-muted-light)]">
                     Usual daily
                   </dt>
-                  <dd className="font-mono text-sm font-bold text-[#403B35]">
+                  <dd className="font-mono text-sm font-bold text-[var(--color-muted)]">
                     {formatUsd(anomaly.baseline_mean_mc)}
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-[10px] font-black uppercase tracking-wider text-[#70685E]">
+                  <dt className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-muted-light)]">
                     Deviation
                   </dt>
-                  <dd className="font-mono text-sm font-bold text-[#403B35]">
+                  <dd className="font-mono text-sm font-bold text-[var(--color-muted)]">
                     {anomaly.z_score.toFixed(1)}&sigma;
                   </dd>
                 </div>
               </dl>
+              <div className="mt-4 max-w-xs">
+                <DisclosureMeter
+                  label="Today vs. usual daily spend"
+                  tone={anomaly.is_anomalous ? "pending" : "verdict"}
+                  committedPct={
+                    anomaly.observed_mc > 0
+                      ? Math.min(100, (Math.min(anomaly.observed_mc, anomaly.baseline_mean_mc) / anomaly.observed_mc) * 100)
+                      : 100
+                  }
+                  reservedPct={
+                    anomaly.observed_mc > anomaly.baseline_mean_mc
+                      ? ((anomaly.observed_mc - anomaly.baseline_mean_mc) / anomaly.observed_mc) * 100
+                      : 0
+                  }
+                />
+                <p className="mt-1 text-[10px] text-[var(--color-muted-light)]">
+                  Solid = normal range. Hatched = spend above the usual baseline.
+                </p>
+              </div>
             </div>
           </div>
         </Card>
@@ -192,7 +212,7 @@ export default function BudgetsPage() {
             <div>
               <label
                 htmlFor="scope"
-                className="block text-sm font-medium text-[#403B35]"
+                className="block text-sm font-medium text-[var(--color-muted)]"
               >
                 Applies to
               </label>
@@ -200,7 +220,7 @@ export default function BudgetsPage() {
                 id="scope"
                 value={scope}
                 onChange={(event) => setScope(event.target.value)}
-                className="mt-1.5 w-full rounded-[12px] border border-[#C9B59C] bg-[#F9F8F6] px-3 py-2 text-sm text-[#0A0A0A]"
+                className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
               >
                 <option value="org">Whole organisation</option>
                 {teams.map((team) => (
@@ -214,7 +234,7 @@ export default function BudgetsPage() {
             <div>
               <label
                 htmlFor="period"
-                className="block text-sm font-medium text-[#403B35]"
+                className="block text-sm font-medium text-[var(--color-muted)]"
               >
                 Period
               </label>
@@ -222,7 +242,7 @@ export default function BudgetsPage() {
                 id="period"
                 value={period}
                 onChange={(event) => setPeriod(event.target.value)}
-                className="mt-1.5 w-full rounded-[12px] border border-[#C9B59C] bg-[#F9F8F6] px-3 py-2 text-sm capitalize text-[#0A0A0A]"
+                className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm capitalize text-[var(--color-ink)]"
               >
                 {PERIODS.map((option) => (
                   <option key={option} value={option}>
@@ -235,7 +255,7 @@ export default function BudgetsPage() {
             <div>
               <label
                 htmlFor="limit"
-                className="block text-sm font-medium text-[#403B35]"
+                className="block text-sm font-medium text-[var(--color-muted)]"
               >
                 Limit (USD)
               </label>
@@ -246,7 +266,7 @@ export default function BudgetsPage() {
                 step="1"
                 value={limitUsd}
                 onChange={(event) => setLimitUsd(event.target.value)}
-                className="mt-1.5 w-full rounded-[12px] border border-[#C9B59C] bg-[#F9F8F6] px-3 py-2 font-mono text-sm text-[#0A0A0A]"
+                className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)]"
               />
             </div>
           </div>
@@ -256,10 +276,10 @@ export default function BudgetsPage() {
               type="checkbox"
               checked={hardLimit}
               onChange={(event) => setHardLimit(event.target.checked)}
-              className="mt-0.5 h-3.5 w-3.5 accent-[#C9B59C]"
+              className="mt-0.5 h-3.5 w-3.5 accent-[var(--color-accent)]"
             />
-            <span className="text-xs font-medium leading-relaxed text-[#403B35]">
-              <span className="font-black text-black">Hard limit.</span> Reject requests
+            <span className="text-xs font-medium leading-relaxed text-[var(--color-muted)]">
+              <span className="font-bold text-[var(--color-ink)]">Hard limit.</span> Reject requests
               with HTTP 402 once the limit is reached. Leave this off to keep serving and
               only record the breach — safer for production traffic, more expensive when
               something goes wrong.
@@ -275,7 +295,7 @@ export default function BudgetsPage() {
       </Card>
 
       {loading ? (
-        <Card className="p-10 text-center text-xs font-bold text-[#70685E]">
+        <Card className="p-10 text-center text-xs font-bold text-[var(--color-muted-light)]">
           Loading budgets…
         </Card>
       ) : budgets.length === 0 ? (

@@ -177,7 +177,7 @@ export default function PoliciesPage() {
             <div>
               <label
                 htmlFor="preset"
-                className="block text-sm font-medium text-[#403B35]"
+                className="block text-sm font-medium text-[var(--color-muted)]"
               >
                 Start from
               </label>
@@ -185,7 +185,7 @@ export default function PoliciesPage() {
                 id="preset"
                 value={preset}
                 onChange={(event) => selectPreset(event.target.value)}
-                className="mt-1.5 w-full rounded-[12px] border border-[#C9B59C] bg-[#F9F8F6] px-3 py-2 text-sm text-[#0A0A0A]"
+                className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
               >
                 {PRESETS.map((entry) => (
                   <option key={entry.id} value={entry.id}>
@@ -197,7 +197,7 @@ export default function PoliciesPage() {
           </div>
 
           {selected && (
-            <p className="rounded-xl border border-[#D9CFC7] bg-[#F9F8F6] px-3 py-2 text-xs font-medium leading-relaxed text-[#403B35]">
+            <p className="rounded-xl border border-[var(--color-ink)] bg-[var(--color-surface2)] px-3 py-2 text-xs font-medium leading-relaxed text-[var(--color-muted)]">
               {selected.description}
             </p>
           )}
@@ -205,7 +205,7 @@ export default function PoliciesPage() {
           <div>
             <label
               htmlFor="rules"
-              className="block text-sm font-medium text-[#403B35]"
+              className="block text-sm font-medium text-[var(--color-muted)]"
             >
               Rules
             </label>
@@ -220,16 +220,16 @@ export default function PoliciesPage() {
               spellCheck={false}
               aria-invalid={jsonError !== null}
               aria-describedby={jsonError ? "rules-error" : undefined}
-              className={`mt-1.5 w-full rounded-[12px] border bg-[#F9F8F6] px-3 py-2 font-mono text-xs text-[#0A0A0A] ${
-                jsonError ? "border-[#DC2626]" : "border-[#C9B59C]"
+              className={`mt-1.5 w-full rounded-[12px] border bg-[var(--color-surface2)] px-3 py-2 font-mono text-xs text-[var(--color-ink)] ${
+                jsonError ? "border-[var(--color-accent)]" : "border-[var(--color-accent)]"
               }`}
             />
             {jsonError ? (
-              <p id="rules-error" className="mt-1.5 text-xs font-bold text-[#DC2626]">
+              <p id="rules-error" className="mt-1.5 text-xs font-bold text-[var(--color-accent)]">
                 {jsonError}
               </p>
             ) : (
-              <p className="mt-1.5 text-xs font-medium text-[#70685E]">
+              <p className="mt-1.5 text-xs font-medium text-[var(--color-muted-light)]">
                 Edit freely — the presets are a starting point, not a limit.
               </p>
             )}
@@ -244,7 +244,7 @@ export default function PoliciesPage() {
       </Card>
 
       {loading ? (
-        <Card className="p-10 text-center text-xs font-bold text-[#70685E]">
+        <Card className="p-10 text-center text-xs font-bold text-[var(--color-muted-light)]">
           Loading policies…
         </Card>
       ) : policies.length === 0 ? (
@@ -259,12 +259,12 @@ export default function PoliciesPage() {
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-black text-black">{policy.name}</h3>
+                    <h3 className="text-sm font-bold text-[var(--color-ink)]">{policy.name}</h3>
                     <Badge tone={policy.is_active ? "accent" : "neutral"} size="sm">
                       {policy.is_active ? "active" : "inactive"}
                     </Badge>
                   </div>
-                  <p className="mt-0.5 text-[11px] font-medium text-[#70685E]">
+                  <p className="mt-0.5 text-[11px] font-medium text-[var(--color-muted-light)]">
                     Created {formatRelative(policy.created_at)}
                   </p>
                 </div>
@@ -273,7 +273,7 @@ export default function PoliciesPage() {
                 </Button>
               </div>
 
-              <pre className="mt-3 overflow-x-auto rounded-xl border border-[#D9CFC7] bg-[#F9F8F6] p-3 font-mono text-[11px] leading-relaxed text-[#403B35]">
+              <pre className="mt-3 overflow-x-auto rounded-xl border border-[var(--color-ink)] bg-[var(--color-surface2)] p-3 font-mono text-[11px] leading-relaxed text-[var(--color-muted)]">
                 {JSON.stringify(policy.rules, null, 2)}
               </pre>
             </Card>

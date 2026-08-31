@@ -2,7 +2,8 @@ import Link from "next/link";
 import { AegisLogo } from "@/components/ui";
 
 /**
- * Aegis Marketing Shell — Pure Neutral Palette (#F9F8F6, #EFE9E3, #D9CFC7, #C9B59C).
+ * Aegis Marketing Shell — dark desk chrome (header, footer), warm paper
+ * content sections below. See app/globals.css and docs/design.md.
  */
 export default function MarketingLayout({
   children,
@@ -10,19 +11,19 @@ export default function MarketingLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-10 text-black">
+    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-10 text-[var(--color-paper-on-desk)]">
       {/* Header with Aegis Sleek Minimalist Logo */}
-      <header className="mb-8 border-b border-[#D9CFC7] pb-4">
+      <header className="mb-8 border-b border-[var(--color-desk-line)] pb-4">
         <div className="relative flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
           <Link
             href="/"
-            className="flex items-center gap-2.5 text-lg font-black tracking-tight text-black group"
+            className="flex items-center gap-2.5 text-lg font-bold tracking-tight text-[var(--color-paper-on-desk)] group"
           >
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#EFE9E3] border border-[#D9CFC7] text-black transition-transform group-hover:scale-105 shadow-2xs">
-              <AegisLogo className="w-5 h-5 text-black" />
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[var(--color-surface2)] border-[1.5px] border-[var(--color-ink)] text-[var(--color-ink)] transition-transform group-hover:scale-105">
+              <AegisLogo className="w-5 h-5 text-[var(--color-accent)]" />
             </div>
-            <span className="text-black font-black text-xl tracking-tight">Aegis</span>
-            <span className="hidden sm:inline-block text-[10px] uppercase font-black tracking-wider text-black bg-[#EFE9E3] px-2.5 py-0.5 rounded-full border border-[#D9CFC7]">
+            <span className="font-serif text-[var(--color-paper-on-desk)] font-semibold text-xl tracking-tight">Aegis</span>
+            <span className="hidden sm:inline-block text-[10px] uppercase font-bold tracking-wider text-[var(--color-muted-on-desk)] bg-[var(--color-desk-raised)] px-2.5 py-0.5 rounded-full border border-[var(--color-desk-line)]">
               AI Gateway
             </span>
           </Link>
@@ -30,31 +31,31 @@ export default function MarketingLayout({
           <div className="flex items-center gap-x-4 gap-y-2 text-sm sm:gap-x-6">
             <div className="hidden items-center gap-x-6 md:flex font-bold text-xs uppercase tracking-wide">
               <Link
-                className="text-[#403B35] hover:text-black transition-colors"
+                className="text-[var(--color-muted-on-desk)] hover:text-[var(--color-paper-on-desk)] transition-colors"
                 href="/connect"
               >
                 How to use
               </Link>
               <Link
-                className="text-[#403B35] hover:text-black transition-colors"
+                className="text-[var(--color-muted-on-desk)] hover:text-[var(--color-paper-on-desk)] transition-colors"
                 href="/pricing"
               >
                 Pricing
               </Link>
               <Link
-                className="text-[#403B35] hover:text-black transition-colors"
+                className="text-[var(--color-muted-on-desk)] hover:text-[var(--color-paper-on-desk)] transition-colors"
                 href="/faq"
               >
                 FAQ
               </Link>
               <Link
-                className="text-[#403B35] hover:text-black transition-colors"
+                className="text-[var(--color-muted-on-desk)] hover:text-[var(--color-paper-on-desk)] transition-colors"
                 href="/docs"
               >
                 Docs
               </Link>
               <Link
-                className="text-[#403B35] hover:text-black transition-colors"
+                className="text-[var(--color-muted-on-desk)] hover:text-[var(--color-paper-on-desk)] transition-colors"
                 href="/login"
               >
                 Sign in
@@ -63,7 +64,7 @@ export default function MarketingLayout({
 
             <Link
               href="/signup"
-              className="rounded-lg bg-[#C9B59C] px-4 py-2 text-xs font-bold text-[#0A0A0A] transition-all hover:bg-[#BFAF98] shadow-xs active:scale-95 border border-[#BFAF98]"
+              className="rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-bold text-[var(--color-surface)] transition-all hover:bg-[var(--color-accent-dark)] active:scale-95 border border-[var(--color-accent-dark)] shadow-[2px_2px_0_var(--color-desk-line)]"
             >
               Request access →
             </Link>
@@ -74,27 +75,27 @@ export default function MarketingLayout({
       {/* Main Content */}
       <main>{children}</main>
 
-      {/* Footer using the 4th Swatch #C9B59C (Warm Camel / Light Taupe) */}
-      <footer className="mt-16 flex flex-wrap items-center justify-between gap-4 border-t border-[#D9CFC7] bg-[#C9B59C] rounded-2xl p-6 text-xs text-[#2A241E] font-bold shadow-xs">
+      {/* Footer — a raised desk panel, not another paper surface */}
+      <footer className="mt-16 flex flex-wrap items-center justify-between gap-4 border border-[var(--color-desk-line)] bg-[var(--color-desk-raised)] rounded-2xl p-6 text-xs text-[var(--color-muted-on-desk)] font-bold">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <AegisLogo className="w-4 h-4 text-black" />
-            <span className="font-black text-black">Aegis</span>
+            <AegisLogo className="w-4 h-4 text-[var(--color-accent)]" />
+            <span className="font-bold text-[var(--color-paper-on-desk)]">Aegis</span>
           </div>
-          <span className="text-[#8F7D67]">·</span>
+          <span className="text-[var(--color-faint-on-desk)]">·</span>
           <span>The control plane for AI cost and governance</span>
         </div>
         <div className="flex items-center gap-5">
-          <Link className="hover:text-black transition-colors" href="/connect">
+          <Link className="hover:text-[var(--color-paper-on-desk)] transition-colors" href="/connect">
             How to use
           </Link>
-          <Link className="hover:text-black transition-colors" href="/pricing">
+          <Link className="hover:text-[var(--color-paper-on-desk)] transition-colors" href="/pricing">
             Pricing
           </Link>
-          <Link className="hover:text-black transition-colors" href="/faq">
+          <Link className="hover:text-[var(--color-paper-on-desk)] transition-colors" href="/faq">
             FAQ
           </Link>
-          <Link className="hover:text-black transition-colors" href="/docs">
+          <Link className="hover:text-[var(--color-paper-on-desk)] transition-colors" href="/docs">
             API Docs
           </Link>
         </div>

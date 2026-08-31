@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { api, ApiError } from "@/lib/api";
-import { Button, Card, Field } from "@/components/ui";
+import { Button, Card, ErrorState, Field } from "@/components/ui";
 
 const MIN_PASSWORD_LENGTH = 12;
 
@@ -42,11 +42,11 @@ export default function SignupPage() {
   }
 
   return (
-    <Card className="p-7 shadow-xs">
-      <h1 className="text-xl font-extrabold tracking-tight text-[#0A0A0A]">
+    <Card className="p-7">
+      <h1 className="font-serif text-xl font-semibold tracking-tight text-[var(--color-ink)]">
         Create free account
       </h1>
-      <p className="mt-1 text-xs text-[#262320] font-medium">
+      <p className="mt-1 text-xs text-[var(--color-muted)] font-medium">
         10,000 free requests per month. No credit card required.
       </p>
 
@@ -84,23 +84,16 @@ export default function SignupPage() {
           }
         />
 
-        {error && (
-          <div
-            role="alert"
-            className="rounded-[var(--radius)] border border-[#FECACA] bg-[#FEF2F2] px-3.5 py-2 text-xs font-semibold text-[#DC2626]"
-          >
-            {error}
-          </div>
-        )}
+        {error && <ErrorState message={error} />}
 
         <Button type="submit" disabled={submitting} className="w-full mt-2">
           {submitting ? "Creating account…" : "Get Started Free"}
         </Button>
       </form>
 
-      <p className="mt-6 text-center text-xs text-[#262320] font-medium">
+      <p className="mt-6 text-center text-xs text-[var(--color-muted)] font-medium">
         Already have an account?{" "}
-        <Link href="/login" className="font-extrabold text-[#0A0A0A] underline hover:text-[var(--color-accent-dark)]">
+        <Link href="/login" className="font-bold text-[var(--color-ink)] underline hover:text-[var(--color-accent)]">
           Sign in
         </Link>
       </p>

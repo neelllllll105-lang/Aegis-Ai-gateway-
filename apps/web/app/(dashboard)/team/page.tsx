@@ -178,13 +178,13 @@ export default function TeamPage() {
       )}
 
       {notice && (
-        <div className="mb-6 rounded-2xl border border-[#D9CFC7] bg-[#EFE9E3] px-4 py-3 text-xs font-bold text-black">
+        <div className="mb-6 rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface2)] px-4 py-3 text-xs font-bold text-[var(--color-ink)]">
           {notice}
         </div>
       )}
 
       <Card className="mb-8 p-5">
-        <h3 className="mb-4 text-sm font-black text-black">Invite a member</h3>
+        <h3 className="mb-4 text-sm font-bold text-[var(--color-ink)]">Invite a member</h3>
         <form
           onSubmit={handleInvite}
           className="grid gap-4 sm:grid-cols-[1fr_auto_auto] sm:items-end"
@@ -202,7 +202,7 @@ export default function TeamPage() {
           <div>
             <label
               htmlFor="invite-role"
-              className="block text-sm font-medium text-[#403B35]"
+              className="block text-sm font-medium text-[var(--color-muted)]"
             >
               Role
             </label>
@@ -210,7 +210,7 @@ export default function TeamPage() {
               id="invite-role"
               value={inviteRole}
               onChange={(event) => setInviteRole(event.target.value)}
-              className="mt-1.5 w-full rounded-[12px] border border-[#C9B59C] bg-[#F9F8F6] px-3 py-2 text-sm text-[#0A0A0A]"
+              className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
             >
               {ROLES.map((role) => (
                 <option key={role.id} value={role.id}>
@@ -225,15 +225,15 @@ export default function TeamPage() {
           </Button>
         </form>
 
-        <p className="mt-3 text-xs font-medium leading-relaxed text-[#70685E]">
+        <p className="mt-3 text-xs font-medium leading-relaxed text-[var(--color-muted-light)]">
           {ROLES.find((role) => role.id === inviteRole)?.description}
         </p>
       </Card>
 
       <div className="mb-10">
-        <h3 className="mb-3 text-sm font-black text-black">Members</h3>
+        <h3 className="mb-3 text-sm font-bold text-[var(--color-ink)]">Members</h3>
         {loading ? (
-          <Card className="p-10 text-center text-xs font-bold text-[#70685E]">
+          <Card className="p-10 text-center text-xs font-bold text-[var(--color-muted-light)]">
             Loading members…
           </Card>
         ) : members.length === 0 ? (
@@ -257,11 +257,11 @@ export default function TeamPage() {
               {members.map((member) => (
                 <tr key={member.user_id}>
                   <Td>
-                    <div className="font-bold text-black">
+                    <div className="font-bold text-[var(--color-ink)]">
                       {member.name ?? member.email}
                     </div>
                     {member.name && (
-                      <div className="text-[11px] text-[#70685E]">{member.email}</div>
+                      <div className="text-[11px] text-[var(--color-muted-light)]">{member.email}</div>
                     )}
                   </Td>
                   <Td>
@@ -288,7 +288,7 @@ export default function TeamPage() {
       </div>
 
       <Card className="mb-6 p-5">
-        <h3 className="mb-4 text-sm font-black text-black">Create a team</h3>
+        <h3 className="mb-4 text-sm font-bold text-[var(--color-ink)]">Create a team</h3>
         <form
           onSubmit={handleCreateTeam}
           className="grid gap-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end"

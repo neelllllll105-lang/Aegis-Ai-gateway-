@@ -106,7 +106,7 @@ export default function UsagePage() {
   );
 
   if (loading) {
-    return <p className="text-sm text-[var(--color-muted-light)]">Loading…</p>;
+    return <p className="text-sm text-[var(--color-muted-on-desk)]">Loading…</p>;
   }
   if (error) {
     return <ErrorState message={error} />;

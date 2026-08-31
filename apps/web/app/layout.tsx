@@ -1,10 +1,28 @@
 import type { Metadata, Viewport } from "next";
-import { Plus_Jakarta_Sans, JetBrains_Mono } from "next/font/google";
+import { Space_Grotesk, Spectral, Caveat, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
-const sans = Plus_Jakarta_Sans({
+// Four voices: UI chrome (Space Grotesk), documents & headings (Spectral),
+// exact/machine values (JetBrains Mono), and the human voice (Caveat) —
+// used sparingly, never as a system font.
+const sans = Space_Grotesk({
   subsets: ["latin"],
   variable: "--font-sans",
+  display: "swap",
+});
+
+const serif = Spectral({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+  style: ["normal", "italic"],
+  variable: "--font-serif",
+  display: "swap",
+});
+
+const hand = Caveat({
+  subsets: ["latin"],
+  weight: ["500", "600", "700"],
+  variable: "--font-hand",
   display: "swap",
 });
 
@@ -54,7 +72,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#F9F8F6",
+  themeColor: "#EAE3D3",
   colorScheme: "light",
 };
 
@@ -62,8 +80,8 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
-      <body className="min-h-screen bg-[var(--color-bg)] text-[var(--color-ink)] font-sans antialiased selection:bg-[var(--color-accent-bg)] selection:text-[var(--color-accent-dark)]">
+    <html lang="en" className={`${sans.variable} ${serif.variable} ${hand.variable} ${mono.variable}`}>
+      <body className="min-h-screen bg-[var(--color-bg)] text-[var(--color-paper-on-desk)] font-sans antialiased selection:bg-[var(--color-accent-bg)] selection:text-[var(--color-accent-dark)]">
         {children}
       </body>
     </html>

@@ -112,7 +112,7 @@ export default function BillingPage() {
     return (
       <>
         <SectionHeader eyebrow="Account" title="Billing" />
-        <Card className="p-10 text-center text-xs font-bold text-[#70685E]">
+        <Card className="p-10 text-center text-xs font-bold text-[var(--color-muted-light)]">
           Loading billing…
         </Card>
       </>
@@ -141,14 +141,14 @@ export default function BillingPage() {
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-lg font-black capitalize text-black">
+                <h3 className="text-lg font-bold capitalize text-[var(--color-ink)]">
                   {plan.plan} plan
                 </h3>
                 <Badge tone="accent" size="sm">
                   {plan.savings_share_percent}% of savings
                 </Badge>
               </div>
-              <p className="mt-1 text-xs font-medium leading-relaxed text-[#403B35]">
+              <p className="mt-1 text-xs font-medium leading-relaxed text-[var(--color-muted)]">
                 {plan.subscription_mc > 0
                   ? `${formatUsd(plan.subscription_mc)} per month, plus ${plan.savings_share_percent}% of verified savings.`
                   : `No subscription fee. You pay ${plan.savings_share_percent}% of verified savings and nothing else.`}
@@ -156,28 +156,28 @@ export default function BillingPage() {
             </div>
             <dl className="flex gap-8">
               <div>
-                <dt className="text-[10px] font-black uppercase tracking-wider text-[#70685E]">
+                <dt className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-muted-light)]">
                   Rate limit
                 </dt>
-                <dd className="font-mono text-sm font-bold text-black">
+                <dd className="font-mono text-sm font-bold text-[var(--color-ink)]">
                   {formatCount(plan.limits.requests_per_minute)}/min
                 </dd>
               </div>
               <div>
-                <dt className="text-[10px] font-black uppercase tracking-wider text-[#70685E]">
+                <dt className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-muted-light)]">
                   Monthly allowance
                 </dt>
-                <dd className="font-mono text-sm font-bold text-black">
+                <dd className="font-mono text-sm font-bold text-[var(--color-ink)]">
                   {plan.limits.monthly_request_allowance === null
                     ? "unlimited"
                     : formatCount(plan.limits.monthly_request_allowance)}
                 </dd>
               </div>
               <div>
-                <dt className="text-[10px] font-black uppercase tracking-wider text-[#70685E]">
+                <dt className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-muted-light)]">
                   BYOK
                 </dt>
-                <dd className="font-mono text-sm font-bold text-black">
+                <dd className="font-mono text-sm font-bold text-[var(--color-ink)]">
                   {plan.limits.byok ? "included" : "not on this plan"}
                 </dd>
               </div>
@@ -216,18 +216,18 @@ export default function BillingPage() {
         <Card className="mb-8 p-5">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
-              <h3 className="text-sm font-black text-black">Referral credit</h3>
-              <p className="mt-1 max-w-xl text-xs font-medium leading-relaxed text-[#403B35]">
+              <h3 className="text-sm font-bold text-[var(--color-ink)]">Referral credit</h3>
+              <p className="mt-1 max-w-xl text-xs font-medium leading-relaxed text-[var(--color-muted)]">
                 {credits.terms} Each side receives{" "}
                 {formatUsd(credits.credit_per_referral_mc)}, applied against future Aegis
                 fees.
               </p>
             </div>
             <div className="text-right">
-              <div className="text-[10px] font-black uppercase tracking-wider text-[#70685E]">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-muted-light)]">
                 Available credit
               </div>
-              <div className="font-mono text-2xl font-black text-black">
+              <div className="font-mono text-2xl font-bold text-[var(--color-ink)]">
                 {formatUsd(credits.balance_mc)}
               </div>
             </div>
@@ -235,11 +235,11 @@ export default function BillingPage() {
 
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <div>
-              <div className="mb-1.5 text-xs font-bold text-[#403B35]">
+              <div className="mb-1.5 text-xs font-bold text-[var(--color-muted)]">
                 Your referral link
               </div>
               <div className="flex gap-2">
-                <code className="min-w-0 flex-1 truncate rounded-xl border border-[#D9CFC7] bg-[#F9F8F6] px-3 py-2 font-mono text-[11px] text-[#403B35]">
+                <code className="min-w-0 flex-1 truncate rounded-xl border border-[var(--color-ink)] bg-[var(--color-surface2)] px-3 py-2 font-mono text-[11px] text-[var(--color-muted)]">
                   {credits.referral_url}
                 </code>
                 <Button variant="secondary" onClick={copyReferral}>
@@ -251,7 +251,7 @@ export default function BillingPage() {
             <form onSubmit={handleClaim}>
               <label
                 htmlFor="referral-code"
-                className="mb-1.5 block text-xs font-bold text-[#403B35]"
+                className="mb-1.5 block text-xs font-bold text-[var(--color-muted)]"
               >
                 Have a code?
               </label>
@@ -261,7 +261,7 @@ export default function BillingPage() {
                   value={referralCode}
                   onChange={(event) => setReferralCode(event.target.value)}
                   placeholder="their-org-slug"
-                  className="min-w-0 flex-1 rounded-xl border border-[#C9B59C] bg-[#F9F8F6] px-3 py-2 font-mono text-[11px] text-[#0A0A0A]"
+                  className="min-w-0 flex-1 rounded-xl border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 font-mono text-[11px] text-[var(--color-ink)]"
                 />
                 <Button
                   type="submit"
@@ -272,7 +272,7 @@ export default function BillingPage() {
                 </Button>
               </div>
               {claimNotice && (
-                <p className="mt-1.5 text-[11px] font-bold text-[#403B35]">
+                <p className="mt-1.5 text-[11px] font-bold text-[var(--color-muted)]">
                   {claimNotice}
                 </p>
               )}
@@ -283,15 +283,15 @@ export default function BillingPage() {
 
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h3 className="text-sm font-black text-black">Chargeback by cost center</h3>
-          <p className="mt-0.5 text-xs font-medium text-[#70685E]">
+          <h3 className="text-sm font-bold text-[var(--color-ink)]">Chargeback by cost center</h3>
+          <p className="mt-0.5 text-xs font-medium text-[var(--color-muted-light)]">
             Spend attributed to teams, for internal recharge. Export as CSV for a finance
             system.
           </p>
         </div>
         <a
           href={api.chargebackCsvUrl()}
-          className="inline-flex items-center gap-2 rounded-xl border border-[#D9CFC7] bg-white px-5 py-2.5 text-xs font-bold text-black shadow-xs transition-all hover:bg-[#EFE9E3]"
+          className="inline-flex items-center gap-2 rounded-xl border border-[var(--color-ink)] bg-[var(--color-surface)] px-5 py-2.5 text-xs font-bold text-[var(--color-ink)] shadow-[3px_3px_0_var(--shadow-color)] transition-all hover:bg-[var(--color-surface2)]"
         >
           Download CSV
         </a>
@@ -340,7 +340,7 @@ export default function BillingPage() {
           </TableShell>
 
           {chargeback.unattributed_mc > 0 && (
-            <p className="mt-3 text-[11px] font-medium leading-relaxed text-[#70685E]">
+            <p className="mt-3 text-[11px] font-medium leading-relaxed text-[var(--color-muted-light)]">
               {formatUsd(chargeback.unattributed_mc)} of spend could not be attributed to
               a cost center, because the API keys behind it are not assigned to a team. It
               is reported separately rather than spread across the lines above.

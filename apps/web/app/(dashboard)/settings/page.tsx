@@ -42,7 +42,7 @@ export default function SettingsPage() {
   }, []);
 
   if (loading) {
-    return <p className="text-sm text-[var(--color-muted-light)]">Loading…</p>;
+    return <p className="text-sm text-[var(--color-muted-on-desk)]">Loading…</p>;
   }
   if (error) {
     return <ErrorState message={error} />;
@@ -157,7 +157,7 @@ export default function SettingsPage() {
             />
           </dl>
 
-          <p className="mt-5 rounded-[var(--radius)] border border-[var(--color-line)] bg-[var(--color-bg)] p-3 text-xs leading-relaxed text-[var(--color-muted-light)]">
+          <p className="mt-5 rounded-[var(--radius)] border border-[var(--color-line)] bg-[var(--color-surface2)] p-3 text-xs leading-relaxed text-[var(--color-muted-light)]">
             Changing either setting invalidates your cache and is recorded in the audit
             log. Contact support to change them, or use{" "}
             <code className="text-[var(--color-muted)]">PATCH /api/org</code>.

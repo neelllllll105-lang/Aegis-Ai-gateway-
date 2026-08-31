@@ -3,14 +3,17 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, type RequestLogRow } from "@/lib/api";
 import {
+  AttributionChip,
   Badge,
   Card,
   EmptyState,
   ErrorState,
   SectionHeader,
+  Stamp,
   TableShell,
   Td,
   Th,
+  type StampTone,
 } from "@/components/ui";
 import {
   bareModelName,
@@ -92,18 +95,15 @@ export default function RequestsPage() {
               <tbody>
                 {rows.map((row) => (
                   <tr key={row.request_id}>
-                    <Td muted>{formatTimestamp(row.created_at)}</Td>
-                    <Td mono>{bareModelName(row.requested_model)}</Td>
-                    <Td mono>
-                      <span
-                        className={
-                          row.served_model !== row.requested_model
-                            ? "text-[var(--color-accent)]"
-                            : undefined
-                        }
-                      >
-                        {bareModelName(row.served_model)}
-                      </span>
+                    <Td muted mono>{formatTimestamp(row.created_at)}</Td>
+                    <Td>
+                      <AttributionChip actor="you" label={bareModelName(row.requested_model)} />
+                    </Td>
+                    <Td>
+                      <AttributionChip
+                        actor="agent"
+                        label={bareModelName(row.served_model)}
+                      />
                     </Td>
                     <Td>
                       <RoutingBadge
@@ -119,7 +119,7 @@ export default function RequestsPage() {
                     </Td>
                     <Td align="right" mono>
                       {row.gross_savings_mc > 0 ? (
-                        <span className="text-[var(--color-accent)]">
+                        <span className="text-[var(--color-positive)] font-bold">
                           {formatUsd(row.gross_savings_mc)}
                         </span>
                       ) : (
@@ -151,20 +151,23 @@ function RoutingBadge({
   cacheType: string | null;
 }) {
   if (cacheType) {
-    return <Badge tone="accent">cache · {cacheType}</Badge>;
+    return <Stamp tone="verdict">cache · {cacheType}</Stamp>;
   }
-  switch (reason) {
-    case "complexity":
-      return <Badge tone="accent">routed</Badge>;
-    case "policy":
-      return <Badge tone="info">policy</Badge>;
-    case "fallback":
-      return <Badge tone="warn">fallback</Badge>;
-    case "user_override":
-      return <Badge>override</Badge>;
-    default:
-      return <Badge>passthrough</Badge>;
-  }
+  const REASON_TONE: Record<string, StampTone> = {
+    complexity: "muted",
+    policy: "other",
+    fallback: "pending",
+    user_override: "agent",
+  };
+  const REASON_LABEL: Record<string, string> = {
+    complexity: "routed",
+    policy: "policy",
+    fallback: "fallback",
+    user_override: "override",
+  };
+  return (
+    <Stamp tone={REASON_TONE[reason] ?? "muted"}>{REASON_LABEL[reason] ?? "passthrough"}</Stamp>
+  );
 }
 
 function StatusBadge({ status }: { status: number }) {
