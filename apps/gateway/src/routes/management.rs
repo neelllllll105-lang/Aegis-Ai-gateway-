@@ -2335,6 +2335,34 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
+    #[tokio::test]
+    async fn signup_without_a_database_returns_503_not_a_bare_500() {
+        // Found live: testing the actual dashboard against a gateway with no
+        // DATABASE_URL configured, signup returned a generic 500 "internal_error" with no
+        // actionable signal — the one gap in an otherwise-consistent 401-or-503 pattern
+        // the rest of the management API already followed for a missing dependency.
+        // `AppState::for_tests()` has `db: None` by construction, so this needs no real
+        // database absent to reproduce — it's the default test state.
+        let state = AppState::for_tests();
+        let response = signup(
+            State(state),
+            HeaderMap::new(),
+            Json(SignupRequest {
+                email: "new-user@example.com".into(),
+                password: "a-perfectly-fine-password".into(),
+                name: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a missing database must read as 'temporarily unavailable, retry', not a bare \
+             500 that sends an on-call engineer looking for a code bug"
+        );
+    }
+
     #[test]
     fn email_validation_accepts_real_addresses() {
         for email in [

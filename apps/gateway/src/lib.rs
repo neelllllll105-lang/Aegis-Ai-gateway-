@@ -90,8 +90,16 @@ impl AppState {
     /// The database pool, or a 503-shaped error when running without persistence.
     pub fn db(&self) -> error::Result<&sqlx::PgPool> {
         self.db.as_ref().ok_or_else(|| {
-            error::AegisError::Internal(
-                "this endpoint requires a database; DATABASE_URL is not configured".into(),
+            // 503, not 500: no database configured is a known, anticipated operational
+            // state — the same one `/health` already reports clearly — not a bug in this
+            // request. Found live, testing the dashboard against a database-less gateway:
+            // signup returned a bare 500 "internal_error" with no actionable signal,
+            // instead of the 401-or-503 pattern the rest of the management API already
+            // followed for a missing dependency.
+            error::AegisError::ServiceUnavailable(
+                "This service is temporarily unavailable — the database is not reachable. \
+                 Please try again shortly."
+                    .into(),
             )
         })
     }

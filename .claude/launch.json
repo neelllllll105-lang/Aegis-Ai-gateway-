@@ -11,6 +11,17 @@
       "cwd": "apps/web",
       "port": 3000,
       "autoPort": true
+    },
+    {
+      "name": "gateway",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": [
+        "run",
+        "--bin",
+        "aegis-gateway"
+      ],
+      "cwd": "apps/gateway",
+      "port": 8080
     }
   ]
 }

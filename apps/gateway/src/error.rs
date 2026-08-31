@@ -78,6 +78,20 @@ pub enum AegisError {
     #[error("all providers unavailable: {0}")]
     AllProvidersFailed(String),
 
+    /// A dependency this endpoint needs (the database, most often) is not currently
+    /// configured or reachable.
+    ///
+    /// Deliberately distinct from `Internal`: this is a known, anticipated operational
+    /// state — `/health` and `/ready` already detect and report it clearly — not "something
+    /// genuinely unexpected broke." A caller retrying later is the correct response to a
+    /// 503; retrying the exact same request against a 500 "internal_error" is not, and a
+    /// generic 500 sends whoever is triaging looking for a code bug instead of a missing
+    /// `DATABASE_URL`. Found live: `/api/auth/signup` with no database configured returned
+    /// a bare 500 with no actionable signal, the one gap in an otherwise-consistent
+    /// 401-or-503 pattern the rest of the management API already followed.
+    #[error("{0}")]
+    ServiceUnavailable(String),
+
     /// The upstream provider timed out.
     #[error("provider timeout after {0}s")]
     ProviderTimeout(u64),
@@ -118,6 +132,7 @@ impl AegisError {
             AegisError::TotpRequired => "totp_required",
             AegisError::Provider { .. } => "provider_error",
             AegisError::AllProvidersFailed(_) => "all_providers_failed",
+            AegisError::ServiceUnavailable(_) => "service_unavailable",
             AegisError::ProviderTimeout(_) => "provider_timeout",
             AegisError::Database(_) => "internal_error",
             AegisError::Store(_) => "internal_error",
@@ -147,6 +162,7 @@ impl AegisError {
                 StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY)
             }
             AegisError::AllProvidersFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
+            AegisError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             AegisError::ProviderTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -208,6 +224,7 @@ impl AegisError {
                 | AegisError::Internal(_)
                 | AegisError::Store(_)
                 | AegisError::AllProvidersFailed(_)
+                | AegisError::ServiceUnavailable(_)
         )
     }
 }
@@ -313,6 +330,27 @@ mod tests {
             AegisError::AllProvidersFailed("x".into()).status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
+        // A missing dependency (no database configured, most often) is 503, not 500 —
+        // found live, testing signup against a database-less gateway, where it used to
+        // fall through the catch-all to a bare 500 with no actionable signal.
+        assert_eq!(
+            AegisError::ServiceUnavailable("x".into()).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn service_unavailable_is_our_fault_and_carries_its_own_message() {
+        let err = AegisError::ServiceUnavailable("the database is not reachable".into());
+        assert_eq!(err.error_type(), "service_unavailable");
+        assert!(err.is_our_fault());
+        // Unlike Database/Crypto/Config/Internal, this one is not opaqued to a generic
+        // string — a caller retrying later needs to know *that* it's transient, and this
+        // project's own /health endpoint already exposes the same "not configured" fact
+        // publicly and unauthenticated, so there is nothing more sensitive being revealed
+        // here than is already public.
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
