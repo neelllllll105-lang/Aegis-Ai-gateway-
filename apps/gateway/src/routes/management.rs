@@ -1324,9 +1324,9 @@ pub async fn test_provider(
         let mut ok = false;
         let mut last_err = None;
 
-        for model in candidates {
+        for model in &candidates {
             let probe = crate::types::NormalizedRequest {
-                max_tokens: Some(1),
+                max_tokens: Some(10),
                 ..crate::types::NormalizedRequest::simple(model, "ping")
             };
 
@@ -1341,6 +1341,13 @@ pub async fn test_provider(
                 )
                 .await;
 
+            tracing::info!(
+                provider = %credential.provider,
+                model = %model,
+                ok = result.is_ok(),
+                "credential test probe attempt"
+            );
+
             match result {
                 Ok(_) => {
                     ok = true;
@@ -1348,6 +1355,12 @@ pub async fn test_provider(
                     break;
                 }
                 Err(e) => {
+                    tracing::warn!(
+                        provider = %credential.provider,
+                        model = %model,
+                        error = %e,
+                        "credential test probe model failed"
+                    );
                     last_err = Some(e);
                 }
             }
