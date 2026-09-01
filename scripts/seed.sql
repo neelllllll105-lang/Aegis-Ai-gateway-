@@ -127,9 +127,9 @@ INSERT INTO model_pricing (
 -- ---------------- Google (ai.google.dev/gemini-api/docs/pricing, base tier) ----------------
 ('google/gemini-3.6-flash',       'google', 'Gemini 3.6 Flash',       'mid',      300000,  2500000, 1048576, true, true, true, 'Google published pricing — verified 2026-09-01'),
 ('google/gemini-3.1-pro-preview', 'google', 'Gemini 3.1 Pro Preview', 'premium', 1250000, 10000000, 1048576, true, true, true, 'Google published pricing — verified 2026-09-01'),
-('google/gemini-2.5-pro',        'google', 'Gemini 2.5 Pro',        'premium', 1250000, 10000000, 1048576, true, true, false, 'Google published pricing — verified 2026-08-21 (base tier; >200k input is priced higher)'),
-('google/gemini-2.5-flash',      'google', 'Gemini 2.5 Flash',      'mid',      300000,  2500000, 1048576, true, true, false, 'Google published pricing — verified 2026-08-21'),
-('google/gemini-2.5-flash-lite', 'google', 'Gemini 2.5 Flash Lite', 'cheap',    100000,   400000, 1048576, true, true, false, 'Google published pricing — verified 2026-08-21'),
+('google/gemini-2.5-pro',        'google', 'Gemini 2.5 Pro',        'premium', 1250000, 10000000, 1048576, true, true, true, 'Google published pricing — verified 2026-08-21 (base tier; >200k input is priced higher)'),
+('google/gemini-2.5-flash',      'google', 'Gemini 2.5 Flash',      'mid',      300000,  2500000, 1048576, true, true, true, 'Google published pricing — verified 2026-08-21'),
+('google/gemini-2.5-flash-lite', 'google', 'Gemini 2.5 Flash Lite', 'cheap',    100000,   400000, 1048576, true, true, true, 'Google published pricing — verified 2026-08-21'),
 
 -- ---------------- DeepSeek (api-docs.deepseek.com) — PEAK rates ----------------
 ('deepseek/deepseek-v4-flash', 'deepseek', 'DeepSeek V4 Flash', 'cheap',  440000, 1320000, 1000000, true, false, true, 'DeepSeek published pricing — verified 2026-08-21 (peak rate; off-peak is half)'),
@@ -157,9 +157,15 @@ INSERT INTO model_aliases (alias, model_id) VALUES
 ('claude-3-5-sonnet',          'anthropic/claude-sonnet-4-5'),
 ('claude-sonnet-4-5-20250929', 'anthropic/claude-sonnet-4-5'),
 ('claude-opus-4-5-20251101',   'anthropic/claude-opus-4-5'),
-('gemini-flash',               'google/gemini-2.5-flash'),
+('gemini-flash',               'google/gemini-3.6-flash'),
+('gemini-3.6-flash',           'google/gemini-3.6-flash'),
 ('deepseek-chat',              'deepseek/deepseek-v4-flash'),
-('deepseek-reasoner',          'deepseek/deepseek-v4-pro')
+('deepseek-reasoner',          'deepseek/deepseek-v4-pro'),
+('mistral-small-latest',       'mistral/mistral-small-latest'),
+('mistral-large-latest',       'mistral/mistral-large-latest'),
+('llama-3.1-8b-instant',       'groq/llama-3.1-8b-instant'),
+('llama-3.3-70b-versatile',    'groq/llama-3.3-70b-versatile'),
+('kimi-latest',                'moonshot/kimi-k2')
 ON CONFLICT (alias) DO UPDATE SET model_id = EXCLUDED.model_id;
 
 COMMIT;
