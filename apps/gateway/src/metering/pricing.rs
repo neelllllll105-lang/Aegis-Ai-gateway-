@@ -1073,12 +1073,18 @@ impl PricingTable {
         }
 
         // Aliases callers actually send.
+        table.add_alias("auto", "google/gemini-2.5-flash");
         table.add_alias("gpt-4o-latest", "openai/gpt-4o");
         table.add_alias("chatgpt-4o-latest", "openai/gpt-4o");
         table.add_alias("claude-3-5-sonnet", "anthropic/claude-sonnet-4-5");
         table.add_alias("claude-sonnet-4-5-20250929", "anthropic/claude-sonnet-4-5");
         table.add_alias("claude-opus-4-5-20251101", "anthropic/claude-opus-4-5");
         table.add_alias("gemini-flash", "google/gemini-2.5-flash");
+        table.add_alias("mistral-7b-instruct-v0.1", "mistral/mistral-small-latest");
+        table.add_alias("mistral-7b-instruct-v0.2", "mistral/mistral-small-latest");
+        table.add_alias("mistral-7b-instruct-v0.3", "mistral/mistral-small-latest");
+        table.add_alias("mistral-7b", "mistral/mistral-small-latest");
+        table.add_alias("mistral-small", "mistral/mistral-small-latest");
         // DeepSeek renamed its whole lineup. These keep an existing integration working
         // instead of failing with an unknown model.
         table.add_alias("deepseek-chat", "deepseek/deepseek-v4-flash");

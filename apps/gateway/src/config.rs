@@ -194,7 +194,7 @@ impl Config {
 
             default_rate_limit_per_minute: num("AEGIS_DEFAULT_RATE_LIMIT", 60)?,
             cache_ttl: Duration::from_secs(num("AEGIS_CACHE_TTL_SECS", 86_400)?),
-            semantic_similarity_threshold: fnum("AEGIS_SEMANTIC_THRESHOLD", 0.95)?,
+            semantic_similarity_threshold: fnum("AEGIS_SEMANTIC_THRESHOLD", 0.80)?,
             durable_cache_ttl_days: num("AEGIS_DURABLE_CACHE_TTL_DAYS", 30)?,
             max_tokens_per_request: num("AEGIS_MAX_TOKENS_PER_REQUEST", 16_384)?,
 
