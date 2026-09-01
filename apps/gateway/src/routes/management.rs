@@ -1314,30 +1314,45 @@ pub async fn test_provider(
             None => crate::providers::Credential::new(key),
         };
 
-        let model = provider
+        let candidates: Vec<&str> = provider
             .supported_models()
-            .first()
+            .iter()
             .copied()
-            .unwrap_or("gpt-4o-mini");
-        let probe = crate::types::NormalizedRequest {
-            max_tokens: Some(1),
-            ..crate::types::NormalizedRequest::simple(model, "ping")
-        };
+            .filter(|m| !m.contains("embed"))
+            .collect();
 
-        let result = provider
-            .chat(
-                &state.http,
-                &probe,
-                model,
-                &live,
-                std::time::Duration::from_secs(15),
-                // A one-shot connectivity probe, never retried — nothing here can double
-                // charge, so no key is needed.
-                None,
-            )
-            .await;
+        let mut ok = false;
+        let mut last_err = None;
 
-        let ok = result.is_ok();
+        for model in candidates {
+            let probe = crate::types::NormalizedRequest {
+                max_tokens: Some(1),
+                ..crate::types::NormalizedRequest::simple(model, "ping")
+            };
+
+            let result = provider
+                .chat(
+                    &state.http,
+                    &probe,
+                    model,
+                    &live,
+                    std::time::Duration::from_secs(10),
+                    None,
+                )
+                .await;
+
+            match result {
+                Ok(_) => {
+                    ok = true;
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+
         let _ = repo::record_credential_test(pool, context.org_id, credential_id, ok).await;
 
         Ok::<_, AegisError>(respond(
@@ -1345,7 +1360,7 @@ pub async fn test_provider(
             serde_json::json!({
                 "ok": ok,
                 "provider": credential.provider,
-                "error": result.err().map(|e| e.to_string()),
+                "error": last_err.map(|e| e.to_string()),
             }),
         ))
     }
