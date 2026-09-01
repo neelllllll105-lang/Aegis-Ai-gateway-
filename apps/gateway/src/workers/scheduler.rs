@@ -22,27 +22,26 @@ use crate::error::Result;
 use crate::metering::pricing::PricingTable;
 use crate::store::KvStore;
 use crate::AppState;
-use chrono::{Datelike, Timelike, Utc};
+use chrono::{Datelike, FixedOffset, Timelike, Utc};
 use std::time::Duration;
 
 /// How often the scheduler wakes to consider its jobs.
-///
-/// One minute. The jobs themselves decide whether it is their turn, so this only bounds
-/// how late a job can be, and a digest that goes out at 09:00:47 instead of 09:00:00 has
-/// never mattered to anyone.
 const TICK: Duration = Duration::from_secs(60);
 
 /// How long a claim is held.
-///
-/// Longer than any job takes, shorter than the shortest gap between runs. Two hours fits
-/// both: no job here runs for hours, and no job runs twice within two hours.
 const CLAIM_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 
+/// Indian Standard Time (IST) offset: UTC+05:30.
+pub fn ist_offset() -> FixedOffset {
+    FixedOffset::east_opt(5 * 3600 + 30 * 60).expect("valid IST offset (+05:30)")
+}
+
+/// Convert UTC datetime to IST.
+pub fn to_ist(now: chrono::DateTime<Utc>) -> chrono::DateTime<FixedOffset> {
+    now.with_timezone(&ist_offset())
+}
+
 /// Try to claim `job` for `period`. Returns true for exactly one caller.
-///
-/// `period` is a coarse timestamp — `"2026-W34"` for a weekly job, `"2026-08-21"` for a
-/// nightly one. Including it in the key is what makes the claim expire naturally: next
-/// period is a different key, so nothing has to be cleaned up.
 pub async fn claim(store: &dyn KvStore, job: &str, period: &str) -> bool {
     let key = format!("aegis:sched:{job}:{period}");
 
@@ -51,44 +50,37 @@ pub async fn claim(store: &dyn KvStore, job: &str, period: &str) -> bool {
         Ok(1) => true,
         Ok(_) => false,
         Err(e) => {
-            // A store failure must not become a duplicate send. Declining the claim means
-            // the job is skipped this period, which is recoverable; assuming the claim
-            // means every replica proceeds, which is not.
             tracing::warn!(job, period, error = %e, "could not claim scheduled job; skipping");
             false
         }
     }
 }
 
-/// ISO-week identifier, e.g. `2026-W34`.
+/// ISO-week identifier in IST, e.g. `2026-W34`.
 fn week_key(now: chrono::DateTime<Utc>) -> String {
-    let iso = now.iso_week();
+    let iso = to_ist(now).iso_week();
     format!("{}-W{:02}", iso.year(), iso.week())
 }
 
-/// Day identifier, e.g. `2026-08-21`.
+/// Day identifier in IST, e.g. `2026-08-21`.
 fn day_key(now: chrono::DateTime<Utc>) -> String {
-    now.format("%Y-%m-%d").to_string()
+    to_ist(now).format("%Y-%m-%d").to_string()
 }
 
-/// Whether it is time to attempt the weekly digest.
-///
-/// Monday, 09:00 UTC. Checked as an inequality rather than an equality so a replica that
-/// was asleep, restarting, or briefly partitioned at exactly 09:00 still sends it — the
-/// claim is what prevents a duplicate, so being generous here is free.
+/// Whether it is time to attempt the weekly digest (Monday 09:00 AM IST onwards).
 fn is_digest_window(now: chrono::DateTime<Utc>) -> bool {
-    now.weekday() == chrono::Weekday::Mon && now.hour() >= 9
+    let local = to_ist(now);
+    local.weekday() == chrono::Weekday::Mon && local.hour() >= 9
 }
 
-/// Whether it is time to attempt the nightly pricing check. 03:00 UTC onwards.
+/// Whether it is time to attempt the nightly pricing check (03:00 AM IST onwards).
 fn is_pricing_window(now: chrono::DateTime<Utc>) -> bool {
-    now.hour() >= 3
+    to_ist(now).hour() >= 3
 }
 
-/// Whether it is time to purge expired sessions. 04:00 UTC, an hour clear of the pricing
-/// window, so the two never compete for the same slow moment.
+/// Whether it is time to purge expired sessions (04:00 AM IST onwards).
 fn is_session_purge_window(now: chrono::DateTime<Utc>) -> bool {
-    now.hour() >= 4
+    to_ist(now).hour() >= 4
 }
 
 /// Run the scheduler until the process stops.
@@ -315,7 +307,10 @@ mod tests {
     use chrono::TimeZone;
 
     fn at(year: i32, month: u32, day: u32, hour: u32) -> chrono::DateTime<Utc> {
-        Utc.with_ymd_and_hms(year, month, day, hour, 0, 0).unwrap()
+        let ist = ist_offset();
+        ist.with_ymd_and_hms(year, month, day, hour, 0, 0)
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     #[tokio::test]
