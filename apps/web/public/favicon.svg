@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="aegis-facet-left" x1="6" y1="5" x2="16" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#A8341E" />
+      <stop offset="100%" stop-color="#822712" />
+    </linearGradient>
+    <linearGradient id="aegis-facet-right" x1="26" y1="5" x2="16" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#211C14" />
+      <stop offset="100%" stop-color="#55492F" />
+    </linearGradient>
+    <linearGradient id="aegis-core-glow" x1="16" y1="8" x2="16" y2="24" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#A07A1E" />
+      <stop offset="100%" stop-color="#A8341E" />
+    </linearGradient>
+  </defs>
+  <path d="M16 2.5L5 6.5V14C5 21.2 9.7 27.8 16 30C22.3 27.8 27 21.2 27 14V6.5L16 2.5Z" stroke="#211C14" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="#EAE3D3" />
+  <path d="M16 4.8L7.2 8.2V13.8C7.2 19.6 10.9 24.8 16 26.8V16L16 4.8Z" fill="url(#aegis-facet-left)" fill-opacity="0.9" />
+  <path d="M16 4.8L24.8 8.2V13.8C24.8 19.6 21.1 24.8 16 26.8V16L16 4.8Z" fill="url(#aegis-facet-right)" fill-opacity="0.85" />
+  <path d="M16 8.5L20.8 14.8L16 23.2L11.2 14.8L16 8.5Z" fill="#FBF8F1" stroke="#211C14" stroke-width="1.5" stroke-linejoin="round" />
+  <path d="M16 11.2L18.8 15L16 19.8L13.2 15L16 11.2Z" fill="url(#aegis-core-glow)" />
+  <circle cx="16" cy="15" r="1.25" fill="#FBF8F1" />
+</svg>

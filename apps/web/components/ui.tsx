@@ -3,53 +3,101 @@
 import { useState, type ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
-// Aegis Sleek Minimalist Logo
+// Aegis Bespoke Sentinel Prism Logo
+// Handcrafted editorial vector emblem: dual-faceted architectural shield,
+// interlocking routing prism keystone, and precision gold/terracotta core.
 // ---------------------------------------------------------------------------
 
-export function AegisLogo({ className = "w-6 h-6" }: { className?: string }) {
+export function AegisLogo({
+  className = "w-6 h-6",
+}: {
+  className?: string;
+}) {
   return (
     <svg
-      viewBox="0 0 24 24"
+      viewBox="0 0 32 32"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
       className={className}
       aria-hidden="true"
     >
-      {/* Outer Protective Aegis Shield */}
+      <defs>
+        {/* Editorial Linear Gradients tailored to the Aegis Deskwork Palette */}
+        <linearGradient
+          id="aegis-facet-left"
+          x1="6"
+          y1="5"
+          x2="16"
+          y2="28"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop offset="0%" stopColor="var(--color-accent, #A8341E)" />
+          <stop offset="100%" stopColor="var(--color-accent-dark, #822712)" />
+        </linearGradient>
+        <linearGradient
+          id="aegis-facet-right"
+          x1="26"
+          y1="5"
+          x2="16"
+          y2="28"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop offset="0%" stopColor="var(--color-ink, #211C14)" />
+          <stop offset="100%" stopColor="var(--color-muted, #55492F)" />
+        </linearGradient>
+        <linearGradient
+          id="aegis-core-glow"
+          x1="16"
+          y1="8"
+          x2="16"
+          y2="24"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop offset="0%" stopColor="var(--color-ochre, #A07A1E)" />
+          <stop offset="100%" stopColor="var(--color-accent, #A8341E)" />
+        </linearGradient>
+      </defs>
+
+      {/* Outer Faceted Shield Frame */}
       <path
-        d="M12 2.2L4.2 5.4V11.6C4.2 16.9 7.5 21.6 12 23C16.5 21.6 19.8 16.9 19.8 11.6V5.4L12 2.2Z"
+        d="M16 2.5L5 6.5V14C5 21.2 9.7 27.8 16 30C22.3 27.8 27 21.2 27 14V6.5L16 2.5Z"
         stroke="currentColor"
-        strokeWidth="1.7"
+        strokeWidth="2"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      {/* Right Shading Facet for Chiseled Editorial Depth */}
+
+      {/* Left Facet Wing - Architectural Terracotta Plane */}
       <path
-        d="M12 2.5L19.5 5.6V11.6C19.5 16.6 16.3 21.2 12 22.7V2.5Z"
-        fill="currentColor"
-        fillOpacity="0.12"
+        d="M16 4.8L7.2 8.2V13.8C7.2 19.6 10.9 24.8 16 26.8V16L16 4.8Z"
+        fill="url(#aegis-facet-left)"
+        fillOpacity="0.88"
       />
-      {/* Stylized Architectural 'A' / Gateway Keystone */}
+
+      {/* Right Facet Wing - Architectural Ink/Ochre Plane */}
       <path
-        d="M12 6.5L7.2 16.8H9.6L10.8 14.1H13.2L14.4 16.8H16.8L12 6.5Z"
-        fill="currentColor"
-        fillOpacity="0.22"
+        d="M16 4.8L24.8 8.2V13.8C24.8 19.6 21.1 24.8 16 26.8V16L16 4.8Z"
+        fill="url(#aegis-facet-right)"
+        fillOpacity="0.82"
+      />
+
+      {/* The Central Geometric Nexus Prism (The Routing Diamond) */}
+      <path
+        d="M16 8.5L20.8 14.8L16 23.2L11.2 14.8L16 8.5Z"
+        fill="var(--color-surface, #FBF8F1)"
         stroke="currentColor"
-        strokeWidth="1.3"
+        strokeWidth="1.5"
         strokeLinejoin="round"
       />
-      {/* Inner Apex Portal */}
+
+      {/* The Core Intelligent Pulse Spark (The Sentinel Nexus) */}
       <path
-        d="M12 9.4L12.8 12.3H11.2L12 9.4Z"
-        fill="currentColor"
+        d="M16 11.2L18.8 15L16 19.8L13.2 15L16 11.2Z"
+        fill="url(#aegis-core-glow)"
       />
-      {/* Gateway Nexus Node */}
-      <circle
-        cx="12"
-        cy="19"
-        r="1.15"
-        fill="currentColor"
-      />
+
+      {/* Center Keystone Focus */}
+      <circle cx="16" cy="15" r="1.25" fill="var(--color-surface, #FBF8F1)" />
     </svg>
   );
 }
