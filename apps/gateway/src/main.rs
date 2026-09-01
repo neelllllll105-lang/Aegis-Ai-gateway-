@@ -201,7 +201,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let tokenizer_path = std::env::var("AEGIS_ONNX_TOKENIZER_PATH")
             .unwrap_or_else(|_| "models/bge-small-en-v1.5/tokenizer.json".to_string());
 
-        if std::path::Path::new(&model_path).exists() && std::path::Path::new(&tokenizer_path).exists() {
+        if std::path::Path::new(&model_path).exists()
+            && std::path::Path::new(&tokenizer_path).exists()
+        {
             match cache::onnx_embed::OnnxEmbedder::load(
                 &model_path,
                 &tokenizer_path,

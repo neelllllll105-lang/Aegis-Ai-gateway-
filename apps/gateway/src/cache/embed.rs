@@ -115,9 +115,7 @@ impl Embedder for ProviderEmbedder {
         }
 
         // Try all embedding models in order of cost, using whichever has an available credential.
-        let embedding_models: Vec<_> = self.pricing.all()
-            .filter(|m| !m.supports_chat)
-            .collect();
+        let embedding_models: Vec<_> = self.pricing.all().filter(|m| !m.supports_chat).collect();
 
         for model_pricing in &embedding_models {
             let model = &model_pricing.model_id;
@@ -172,7 +170,6 @@ impl Embedder for ProviderEmbedder {
         None
     }
 }
-
 
 /// Pull the first embedding vector out of an OpenAI-shaped `/embeddings` response.
 ///
