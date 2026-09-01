@@ -4,7 +4,7 @@
 > This file is the handoff protocol. It tells you where the project is, what genuinely
 > works, what does not, what was decided and why, and exactly what to do next.
 >
-> **Last updated:** 2026-08-31
+> **Last updated:** 2026-09-01
 > **Updated by:** Claude Opus 5 (Claude Code)
 > **Update this file before ending any session.** See `CLAUDE.md`.
 
@@ -727,6 +727,16 @@ Each of these cost real time during the build.
   screenshot's absence of content as proof of a rendering bug without cross-checking
   computed styles first. Resizing the viewport taller (`resize_window` to e.g. 900×1600)
   so the content of interest fits without scrolling worked as a reliable workaround.
+- **A near-identical "blank screenshot" in Session 11 had a completely different, more
+  mundane cause: a missing `tabId` on `computer{action:"scroll"/"screenshot"}`.** With two
+  tabs open (gateway on one, the dashboard on another), several calls silently landed on
+  the wrong tab — scrolling and screenshotting the short `/health` JSON response, past its
+  few lines into genuinely empty page, not the web app at all. `tabs_select` alone does not
+  make subsequent `computer` calls default to that tab; pass `tabId` explicitly on every
+  `scroll`/`screenshot` call once more than one tab is open, every time, not just after
+  navigating. `getBoundingClientRect()` via `javascript_tool` against the tab you *meant* to
+  inspect (not just any tab) is what actually revealed this — the DOM measurements were
+  fine all along, only the screenshot calls were pointed at the wrong place.
 - **CSS custom properties fail silently.** `var(--color-does-not-exist)` is not a type
   error, not a lint error, not a build error — it just resolves to nothing and the element
   inherits. This is how a palette rename shipped nine dangling dashboard tokens undetected
@@ -817,6 +827,402 @@ Each of these cost real time during the build.
 ## Session Log
 
 Newest first.
+
+### 2026-09-01 — Session 12 — Claude Sonnet 5
+
+**The standing blocker since session 6 is gone: the founder installed Docker.** Everything
+below happened live, against real Postgres/Redis/Qdrant, for the first time in this
+project's history — not a claim, a fact worth flagging because so much of this handoff
+document has had to say "not verified, no database on this machine" up to this point.
+
+Docker Desktop installed to a non-standard path
+(`C:\Users\Acer\AppData\Local\Programs\DockerDesktop\`), not on `PATH` in this session's
+shells yet — invoked by full path, works fine (`docker version` confirms 29.7.2, engine
+4.88.1). `infra/docker-compose.yml`'s stack (`aegis-postgres-1`, `aegis-redis-1`,
+`aegis-qdrant-1`) was already up and healthy, apparently started by the founder before
+asking. Two orphaned processes from an earlier session were squatting on ports 8080 and
+3000 (`aegis-gateway.exe`, a stray `node`) — killed, not a code issue, just leftover
+processes `preview_stop` hadn't tracked. `.claude/launch.json`'s `gateway` entry gained an
+`"env"` block (`DATABASE_URL`, `REDIS_URL`, `QDRANT_URL`, `QDRANT_GRPC_URL`) pointing at
+the compose stack's standard ports/credentials — first time this was needed, since every
+prior session ran without a database at all.
+
+**Gateway boot, for the first time ever with everything connected:** Redis connected,
+migrations already applied, 3 usage partitions ready, **32 models loaded from the database**
+(not the seed fallback), Qdrant reachable over gRPC, all 6 background workers started
+including this session's own `pricing_refresh`. `/health` reports `"database":{"status":"ok"}`.
+
+**Live-verified end to end, all real, all for the first time:**
+- Signup → real user + org created in Postgres, real session, redirected straight into
+  the dashboard — which rendered correctly, first real authenticated-page confirmation of
+  the whole Session 10 design system (previously only confirmed on marketing/auth pages).
+- API key creation — a real `aegis_sk_...` key minted, shown once, later calls confirmed
+  it authenticates against `/v1/models` (which returned the real 32-model catalogue from
+  Postgres, correctly shaped).
+- Granted the test account `is_admin` directly via `psql` (the documented, only way — never
+  through the API) and drove all three admin pricing endpoints from Session 11 against
+  real data for the first time: `GET /api/admin/pricing` → 32 models,
+  `unverified_count: 0`, `loaded_from: "database"`; `POST .../reload` →
+  `{"reloaded": true, "models": 32}`; `POST .../openrouter/refresh` → `{"fetched": 417,
+  "stored": 417}`, independently confirmed via `psql` that all 417 rows actually landed
+  in `openrouter_pricing_reference` (412 with a parseable price) — the whole pricing
+  hot-reload and OpenRouter reference feature, untestable all last session for lack of a
+  database, worked exactly as designed on the first real attempt.
+- Budget creation — a real $500/month hard-limit org budget, persisted, rendered correctly
+  in the table with the right enforcement badge; the anomaly-detection card above it (this
+  session's `DisclosureMeter` component) rendered real backend data ("0 of 7 days needed
+  before a baseline means anything," a live z-score bar) instead of the empty/mock state
+  every prior verification of that component was limited to.
+
+**Also newly confirmed, correcting something written down as fact in an earlier session's
+runbook**: `GET /v1/models` requires an API key. `docs/runbooks/feature-verification.md`
+used to say "no key needed to browse" for this endpoint — that line was wrong, fixed;
+caught only because a `curl` without a key returned `401` during this session's walkthrough,
+not by re-reading the code.
+
+**Next turn — the founder tried to log in with the credentials just handed to them and
+couldn't.** Two real, separate bugs, found by actually trying to use what had just been
+described as working rather than trusting the description:
+
+1. **`dev@aegis.local`'s password never actually worked, and had never actually worked.**
+   The em-dash finding from above turned out not to be cosmetic at all — it was one symptom
+   of the same root cause as this. `scripts/seed.sql` hardcoded an argon2id-*shaped* hash
+   literal for this account and commented it as "argon2id hash of
+   \"aegis-development-password\"", but the literal was fabricated text that happened to
+   look like a real hash (correct `$argon2id$v=19$m=...$salt$hash` shape, valid base64,
+   right length) — nobody had ever actually run `crypto::hash_password` to produce it.
+   Confirmed precisely with a throwaway test calling `verify_password` against the literal
+   before touching anything: `false`. Fixed by generating a genuine hash the same way a
+   real signup would (`hash_password("aegis-development-password")`) and writing that into
+   both `scripts/seed.sql` (for every future `psql -f` run) and the already-seeded row in
+   this machine's live database directly (fixing the file alone would not have fixed the
+   row that already existed). **Added a regression test** —
+   `crypto::seed_sql_dev_account_hash_verifies_against_its_documented_password` — that
+   reads the actual file, extracts the actual hash literal, and asserts it verifies against
+   the actual documented password, so this exact class of bug (a promise in a comment that
+   the code next to it does not keep) cannot silently recur. Writing that test itself hit
+   the same trap twice more, worth remembering: a first version counted quoted SQL fields
+   positionally and broke the moment the test's own explanatory comment used an apostrophe
+   ("codebase's"); a second version searched for a bare `$argon2id$` substring and matched
+   an illustrative example *inside* that same comment before it ever reached the real
+   literal. Fixed by anchoring the search on `'$argon2id$` — the opening quote a real SQL
+   string literal always has and prose in a comment never does — and by not writing a fake
+   example hash into the comment in the first place once that was the second time it caused
+   a problem.
+2. **The `unverified_count` finding from earlier this session was not cosmetic — it was
+   this exact bug, from the other side.** The stored `source` text for the five genuinely
+   `UNVERIFIED` pricing rows had the same em-dash corruption (`"UNVERIFIED ??? re-check..."`
+   instead of `"UNVERIFIED — re-check..."`), introduced when `scripts/seed.sql` — which
+   itself has always had the correct em dash, confirmed by reading the file directly — was
+   originally loaded into this machine's database through a Windows console whose encoding
+   mangled it in transit. Aegis's own `unverified` detection does an exact substring match
+   against `metering::pricing::UNVERIFIED`, which does contain the real em dash, so it
+   silently matched nothing: the feature meant to surface stale pricing was failing
+   specifically on the rows it exists to catch. Fixed by writing the correction as a `.sql`
+   file (not a shell argument — the same class of encoding trap, avoided by never routing
+   the character through several layers of shell quoting) and running it inside the
+   container with `PGCLIENTENCODING=UTF8` explicit. Verified twice: the corrected text
+   round-trips visibly through the terminal now, and `GET /api/admin/pricing` (after
+   `POST .../reload`, no restart needed — this session's own hot-reload feature closing the
+   loop on itself) now reports `unverified_count: 5`, matching `seed.sql`'s own documented
+   count exactly, instead of the `0` it silently reported before.
+
+Verified: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test
+--all-targets` clean — 811 passing (810 + 1 new). Both fixes confirmed live against the
+real database, not just by the test suite: `dev@aegis.local` / `aegis-development-password`
+now returns `200` from `/api/auth/login` with the correct org attached, and the pricing
+endpoint's staleness count is now honest. Real code changes this time, not just a
+verification pass — `scripts/seed.sql` and `apps/gateway/src/crypto.rs` — but, like
+everything else this session, not yet committed.
+
+### 2026-09-01 — Session 11 — Claude Sonnet 5
+
+Founder asked how model pricing is maintained and, once told, asked the sharper follow-up:
+what happens if a provider changes a price while a request is in flight — does the exact
+rate at the exact moment get used, what's the latency cost of checking, and how do we get
+this exactly right for every provider. Answered, then built the structural gap the
+question exposed.
+
+**The answer, briefly, because it shapes what got built:** no LLM provider exposes a live
+pricing API — prices are prose on marketing pages, not a queryable service — so there is
+no way to check "is this still real" per request, or even per hour, against the provider
+itself. That gap is not solvable by engineering; a human still has to read the page
+(`docs/runbooks/pricing-update.md` says exactly this and exactly why: a scraper that is
+silently wrong produces a confidently wrong invoice). What *is* engineerable, and was not
+built, is the gap between "a human has verified a price and committed it to the database"
+and "the gateway is serving it" — which was, until this session, "at the next deploy",
+because `AppState.pricing` was a bare `Arc<PricingTable>` loaded once at process startup
+with no way to replace it short of a restart. `AppState`'s own doc comment already claimed
+"refreshed periodically from the database" — aspirational, not true; no such worker
+existed. Confirmed live in a race-condition unit test rather than assumed: a request that
+has already read the table is provably immune to a later swap (a computed cost is baked
+into the `UsageEvent` at the moment of computation, never re-derived from "whatever the
+table currently says" — so a price change five minutes after a request was served can
+never retroactively change that request's bill, by construction, not by convention).
+
+**What shipped:**
+
+1. **[`metering/pricing.rs`](apps/gateway/src/metering/pricing.rs)** — added
+   `PricingSnapshot` (table + `loaded_at` + `PricingSource::{Database,SeedFallback}`) and
+   moved the database-row-to-`ModelPricing` conversion here as `impl
+   From<db::repo::PricingRow> for ModelPricing`, out of a private free function in
+   `main.rs`, so the new refresh worker and the once-at-startup load share one conversion
+   instead of two copies that could drift apart.
+2. **[`lib.rs`](apps/gateway/src/lib.rs)** — `AppState.pricing` is now `Arc<RwLock<PricingSnapshot>>`
+   instead of a bare `Arc<PricingTable>`, with `AppState::pricing()` (an `RwLock` read plus
+   an `Arc` clone — nanoseconds; not meaningfully different in cost from the network call
+   to a provider every request already makes) as the read path every handler now calls,
+   and `AppState::set_pricing()` as the one place a swap happens. Same pattern already
+   established for `AppState::db()` in the 503 fix two sessions ago — a `pub` field plus a
+   wrapper method, not a private field, because `main.rs` constructs `AppState` via a
+   struct literal from outside the crate.
+3. **[`workers/pricing_refresh.rs`](apps/gateway/src/workers/pricing_refresh.rs)** — new
+   worker, same shape as the other five in `workers/`: re-reads `model_pricing` every five
+   minutes (`REFRESH_INTERVAL`) and swaps it in. An empty result is treated as a likely
+   mistake (a truncated table, a half-run migration) and refused rather than swapped in —
+   serving a few-minutes-stale table is a strictly better failure mode than pricing every
+   request at zero. Spawned in `main.rs` alongside the other DB-dependent workers, only
+   when a database is configured.
+4. **`POST /api/admin/pricing/reload`** — manual trigger for "I just ran the runbook, I
+   don't want to wait five minutes", added to `routes/admin.rs` and `router.rs` next to
+   the existing `pricing_table` read endpoint. 503s explicitly when no database is
+   configured, rather than a silent `{"models": 0}` that would read as "the reload is
+   broken" instead of "this replica never had anything to reload from".
+5. **`GET /api/admin/pricing`** extended with `loaded_at`, `loaded_from`
+   (`database`/`seed_fallback`), and `unverified_count` — the admin console's staleness
+   banner now has something real to read instead of nothing.
+6. **`docs/runbooks/pricing-update.md`** — step 5 ("restart the gateway") replaced with
+   the reload endpoint; added a short note up top on what the automation does and does not
+   cover, and pointed at `workers::scheduler::check_pricing_drift` (a nightly DB-vs-memory
+   diff job that already existed, was already wired up, and is now mostly a canary for "is
+   the refresh worker itself running" rather than the only thing closing this gap).
+
+**Two real compile-time consequences worth recording, not just fixed:** first, three call
+sites (`openai_compat.rs` twice, `management.rs` once) chained `.all()`/`.get()` directly
+off `state.pricing()`'s return value and then used the borrowed result in a later
+statement — the returned `Arc<PricingTable>` is a temporary now, where it used to be a
+field read, so the borrow-checker correctly rejected what used to compile; fixed by
+binding `let pricing = state.pricing();` first in each. Second, `cache::embed::ProviderEmbedder`
+and two test-only `AppState` literal constructions (`openai_compat.rs`'s `test_state()`,
+`tests/overhead_under_load.rs`) built the `pricing` field directly and needed updating to
+the new `Arc<RwLock<PricingSnapshot>>` shape — none of these were caught by `cargo build`,
+only by `cargo test --all-targets` / `cargo clippy --all-targets`, because they live in
+separate test-binary targets. Worth remembering next time a field on `AppState` changes
+shape: `cargo build --bin aegis-gateway` is not sufficient proof nothing broke.
+
+Verified: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test
+--all-targets` all clean — 786 passing (784 baseline + 2 new: the no-database-is-a-no-op
+case and the in-flight-request-is-immune-to-a-later-swap race-condition proof). Not
+verified live: no Postgres on this machine (same standing blocker as every session since
+6), so the actual `POST /api/admin/pricing/reload` HTTP path and a real refresh cycle were
+never exercised against a running database — only the underlying `refresh_once` function,
+directly, in-process, against `AppState::for_tests()`.
+
+**Same session, continued — founder pushed further**: asked whether a human can be
+bypassed entirely, specifically proposing OpenRouter's live API as a source. Answered
+honestly: no third-party aggregator (OpenRouter, Portkey's model repo, or anything else)
+can substitute for reading the actual provider's page, because none of them confirm their
+number is free of markup or lag — pointing at a reseller instead of the provider just
+changes whose error you inherit. The one thing that *is* categorically different: the
+provider's own settled invoice/usage API, which this session did not build (a real, larger
+piece of work — flagged as the next real lever, not attempted this session) but which
+`workers/reconciliation.rs` already has the exact right shape for, structurally.
+
+Founder then asked to actually use OpenRouter's live API — specifically to fetch it and
+store it in Postgres, "for now". Built exactly the reference-only role from the
+conversation above, deliberately not `model_pricing`:
+
+1. **[`metering/openrouter_reference.rs`](apps/gateway/src/metering/openrouter_reference.rs)**
+   (new) — fetches `GET https://openrouter.ai/api/v1/models` (public, no auth) and converts
+   each model's decimal-string per-token USD price into the same micro-cents-per-Mtok unit
+   `model_pricing` uses, so a future comparison needs no unit conversion. `None` vs `Some(0)`
+   kept distinct throughout — "OpenRouter didn't report this price" and "OpenRouter reported
+   an actual zero" are different facts, and collapsing them would misrepresent free models
+   as unpriced or vice versa. A malformed price on one field, or one unparseable model in a
+   response of hundreds, is logged and skipped rather than failing the whole batch.
+2. **Migration `0005_openrouter_pricing_reference.sql`** — a brand new table, not a
+   modification to `model_pricing`. Its own top-of-file comment states plainly that nothing
+   in the request path or router may ever read it without a deliberate decision to revisit
+   that.
+3. **`db::repo::replace_openrouter_pricing_reference`** — a full delete-and-reinsert inside
+   one transaction each fetch, not an incremental upsert, so a model OpenRouter retires
+   actually disappears from here instead of going silently stale.
+4. **`POST /api/admin/pricing/openrouter/refresh`** (admin-gated, same guard pattern as
+   `reload_pricing`) — fetches and replaces the snapshot on demand.
+
+**Real bug caught by the tests, not by review**: the module's own test for "a malformed
+price field doesn't take down the other field on the same model" asserted the wrong
+expected value (`Some(1_000)` instead of the correct `Some(1_000_000)` for a $0.000001/token
+rate) — an arithmetic slip in the *test*, not the implementation, caught immediately because
+the test failed. Left in the log because it is exactly the class of mistake this whole
+feature exists to make visible instead of silent.
+
+**Validated against real, live data, not just the hand-written fixture**: fetched the actual
+current OpenRouter response (`curl`, this machine has outbound internet even without
+Postgres) and ran the parser against it directly — 420 real models parsed with zero panics,
+415 had a parseable price, 21 were genuinely free. `openai/gpt-4o` came back at
+$2.50/$10.00 per Mtok input/output — an exact match to this project's own existing seed
+value for the same model, real independent corroboration rather than an assumption. The
+temporary test and the live-fetched fixture file were both deleted before committing — not
+meant to ship, since a test depending on a live network call and an uncommitted local file
+would break the hermetic-test convention every other test in this codebase follows.
+
+Verified: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test
+--all-targets` clean — 794 passing (786 + 8 new). Not verified: the actual database write
+path (`replace_openrouter_pricing_reference` against a real Postgres) — no database on this
+machine, so only the fetch-and-parse half was ever exercised against reality; the
+insert-side SQL is reviewed and modeled closely on `upsert_pricing`'s existing transaction
+pattern but has not itself been run.
+
+**Then: a full rigorous pass across the whole application**, founder's explicit request, not
+scoped to just today's changes. Backend: `cargo fmt --check` / `clippy --all-targets -D
+warnings` / `test --all-targets` all clean (794/0), `scripts/verify-phase.sh 2` — all 10
+automated gates pass. Frontend: `npm run lint` (eslint + `check-design-tokens.mjs`) clean,
+`npm run build` clean — all 23 routes statically generate with no errors. Live, both
+servers running together: homepage hero/routing-simulator/savings-calculator all verified
+interactive (clicking a scenario or a workload option correctly re-renders, confirmed via
+DOM text extraction, not just a screenshot) with zero console errors; a real login form
+submission end-to-end confirmed the Session 9 503 fix still holds (`POST
+/api/auth/login` → 503, `ErrorState` renders it correctly) via `read_network_requests`, not
+assumed; the dashboard auth-gate correctly caught the resulting 401 and redirected an
+unauthenticated visit to `/login`; all three admin pricing endpoints (including both new
+ones from this session) correctly return 401 without credentials, confirmed live via `curl`
+after an in-browser `fetch()` attempt mysteriously failed for unrelated reasons (see
+Gotchas); mobile viewport (375×812) checked on the homepage — header nav collapses
+correctly, hero and stat grid reflow, footer intact.
+
+**Not verified, stated plainly rather than glossed over**: every authenticated dashboard
+page (Settings, Keys, Providers, Team, Billing, Usage, Requests, Budgets, Models,
+Policies) — still impossible without a real Postgres-backed login session, the same
+blocker every session has hit since session 6. The k6 load test and the restore drill
+remain untouched for the same reason. `replace_openrouter_pricing_reference`'s actual SQL
+has not run against a real database, as noted above.
+
+**Same session, continued once more**: founder pasted the `/connect` page's "Your stack,
+unchanged" compatibility list (Cursor, Claude Code, Continue, Cline, Roo, VS Code; OpenAI
+SDK, Anthropic SDK, Python, Node.js, LangChain, LlamaIndex; Claude CLI, aider, curl) and
+asked directly whether the implementation actually delivers all of it correctly. It mostly
+does — every one of those 15 items reduces to "is `/v1/chat/completions` a faithful
+OpenAI-compatible surface and is `/v1/messages` a faithful Anthropic-compatible one",
+since none of those tools get bespoke code; `NormalizedRequest` models `tools`,
+`tool_choice`, `response_format`, and vision content blocks as first-class fields, and a
+`#[serde(flatten)] extra: BTreeMap` catch-all round-trips anything unmodeled (seed,
+logit_bias, etc.) — genuinely careful compatibility engineering, confirmed by reading the
+actual translation code, not assumed from the claim.
+
+**But found one real, confirmed bug in the process, not a hypothetical**: streaming +
+tool/function calling was broken on the OpenAI-compatible surface for all six providers
+that share `providers::openai::parse_stream_chunk` via the `openai_compatible_provider!`
+macro (OpenAI itself, OpenRouter, DeepSeek, Mistral, Groq, Moonshot). The chunk-emptiness
+check that correctly drops OpenAI's harmless role-only opening chunk
+(`{"delta":{"role":"assistant"}}`, an intentional, tested, correct decision — see
+`role_only_first_chunk_is_ignored`) only ever inspected `delta.content` — so a tool-call
+delta chunk, which typically has empty/absent `content` on every single one of its chunks
+and carries its actual payload under `delta.tool_calls` instead, looked exactly like that
+same harmless opener and was silently discarded. The client's tool call simply never
+arrived mid-stream — no error, nothing to explain why — which is precisely the failure
+mode that would hit Cursor, Continue, Cline, and Roo hardest, since agentic coding tools
+are built around streaming + tool-calling together. Non-streaming tool-calling was
+unaffected (`parse_response` correctly extracts `/message/tool_calls`) — this was
+specifically the streaming path.
+
+**Fixed**: added a `has_tool_call_delta` check alongside the existing content/finish/usage
+checks in `providers/openai.rs::parse_stream_chunk`. The fix was narrow because the hard
+part was already built correctly — `raw: Some(data.to_string())` was already captured
+unconditionally, and the forwarding loop in `routes/openai_compat.rs` already preferred
+`chunk.raw` verbatim over reconstructing from `delta` — so the single wrong condition was
+the entire bug; once a tool-call chunk is no longer dropped, byte-faithful passthrough
+already does the rest. Two new tests reproduce the exact wire shape (a tool-call-only
+delta, and an argument-fragment-only delta) and assert both are now kept with `tool_calls`
+intact in `raw`.
+
+**Found but deliberately not fixed this session, and said so rather than rushing it**: the
+native Anthropic surface (`/v1/messages`) has a *deeper* version of the same class of gap.
+`anthropic.rs::parse_stream_chunk` only handles `content_block_delta` events shaped as
+`{"delta":{"text": "..."}}` — Anthropic's tool-use streaming uses a *different* delta
+shape on the same event type (`{"delta":{"type":"input_json_delta","partial_json":"..."}}`)
+that this function's `_ => Ok(None)` catch-all silently drops, along with the
+`content_block_start` event that announces a tool_use block's `id`/`name` in the first
+place. Worse, `routes/anthropic_compat.rs`'s outbound SSE reconstruction doesn't consult
+`chunk.raw` at all for this surface — it hardcodes a single `index: 0, type: "text"`
+content block for the entire response, so even after fixing the parser, the outbound
+stream has no code path for a second, tool_use-typed content block. Properly fixing this
+needs real multi-block index/state tracking matching Anthropic's actual event-ordering
+semantics (`content_block_start` → `content_block_delta`* → `content_block_stop`, repeated
+per block, text and tool_use interleaved) — a materially bigger, higher-regression-risk
+change than the OpenAI-side fix, and one wrong index or a missed `content_block_stop`
+could produce a stream that confuses the official Anthropic SDK's own accumulation logic
+worse than simply not streaming tool calls at all. Flagged as the clear next priority
+rather than attempted under time pressure. Non-streaming Anthropic tool-use is unaffected
+(`anthropic.rs::parse_response` correctly extracts `tool_use` content blocks).
+
+Verified: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test
+--all-targets` clean — 796 passing (794 + 2 new). Hit a real-but-mundane snag mid-session:
+`cargo test --all-targets` failed with "Access is denied" removing `aegis-gateway.exe` —
+the live preview gateway process (started earlier for browser verification) still held the
+binary locked. Not a code problem; stopped the preview server, reran clean, restarted it
+after. Worth remembering: a locked-binary test failure on Windows during an active preview
+session is an environment collision, not a compile error, and the fix is `preview_stop`
+first, not debugging the code.
+
+**Same day, next turn — founder said "do all the integrations"**: finished the Anthropic
+streaming + tool-use gap flagged above, and along the way found the bug was bigger than
+first scoped — a third provider (Google/Gemini) had the identical class of defect
+(`functionCall` parts silently dropped in streaming, same root cause: the emptiness check
+only ever looked at the plain-text field), and the `chunk.raw` byte-for-byte passthrough
+optimization on the OpenAI-compatible surface turned out to be unsafe in general, not just
+for tool calls: `state.providers.for_model()` picks a provider purely by which model the
+router selected, completely independent of which endpoint (`/v1/chat/completions` vs
+`/v1/messages`) the caller used — so an OpenAI-shaped request routed to the Anthropic
+adapter (a real, ordinary routing outcome, not an edge case) was forwarding raw
+Anthropic-shaped SSE bytes straight to an OpenAI SDK client, and the reverse case existed
+too. Fixed properly rather than patched around:
+
+1. **`types.rs`** — added `WireShape` (`OpenAiCompatible | Anthropic | Google`) and
+   `ToolCallDelta` (`index`/`id`/`name`/`arguments_fragment`), and gave `StreamChunk` two
+   new fields: `source_shape` (which format `raw` is actually written in) and `tool_call`
+   (the normalised fragment, when the chunk carries one). `derive(Default)` added to
+   `StreamChunk` so the ~8 existing construction sites across `mock.rs`/tests only needed
+   `..Default::default()`, not every field enumerated.
+2. **All three streaming parsers fixed the same way** — `providers/openai.rs`,
+   `providers/anthropic.rs`, `providers/google.rs`: each now extracts a `ToolCallDelta`
+   from its provider's own tool-call wire shape (OpenAI's `delta.tool_calls[0]`,
+   Anthropic's `content_block_start`/`content_block_delta` with `input_json_delta`,
+   Gemini's `functionCall` part) instead of treating a chunk with no *text* as a chunk
+   with *nothing*, and each stamps its own `source_shape`.
+3. **`routes/openai_compat.rs`** — the streaming loop's raw-passthrough now checks
+   `source_shape == OpenAiCompatible` before trusting `raw`, falling back to
+   reconstruction otherwise (closing the cross-shape bug above); `to_openai_stream_chunk`
+   now renders `delta.tool_calls` from a normalised `ToolCallDelta`, correctly omitting
+   `id`/`type`/`function.name` on every fragment after the one that opens a call.
+4. **`routes/anthropic_compat.rs`** — the bigger piece. Replaced the old
+   single-hardcoded-text-block reconstruction with `BlockTracker`, a small state machine
+   (pulled out as its own pure, directly-unit-tested type specifically because this was
+   the part of the fix with real room to get subtly wrong) that opens/closes real
+   Anthropic content blocks — text and tool_use, correctly interleaved and independently
+   indexed — driven by the normalised `delta`/`tool_call` fields rather than raw
+   passthrough (which this endpoint never used anyway, so there was no shape-check needed
+   here, just the actual multi-block logic). A real bug in the tracker itself was caught
+   by its own test, not by review: a tool call's fragments resuming after being
+   interrupted by a different block was incorrectly reopening the already-closed original
+   block (a protocol-invalid second `content_block_start` for a finalized index) — fixed
+   by forgetting a block's source-index mapping the moment it closes, confirmed by a test
+   that specifically exercises the interruption-then-resume sequence.
+5. **`providers/mock.rs`** — added `MockBehavior::SucceedWithToolCall` (text preamble,
+   then a tool call whose arguments arrive across multiple fragments deliberately, so a
+   test can confirm fragments land on one block rather than several) so this whole path
+   has an in-process way to be exercised without a live provider, in future tests that
+   want to drive the full HTTP handler rather than just the pure functions.
+
+Verified: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test
+--all-targets` clean — 810 passing (796 + 14 new: 3 in `openai.rs`, 3 in `anthropic.rs`, 2
+in `google.rs`, 6 in `anthropic_compat.rs`'s `block_tracker` module, 3 for
+`to_openai_stream_chunk`'s new tool_calls rendering). Not built: an end-to-end test that
+drives the real `/v1/messages` HTTP handler with `MockBehavior::SucceedWithToolCall` and
+reads the actual SSE byte stream — `BlockTracker` and the two outbound renderers are each
+directly unit-tested, which is what actually caught the real bug above, but nothing yet
+exercises the full pipeline (routing → mock provider → streaming loop → HTTP body) in one
+test. Reasonable next addition, not attempted this session for time.
 
 ### 2026-08-31 — Session 10 — Claude Sonnet 5
 

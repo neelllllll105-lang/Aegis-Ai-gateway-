@@ -34,13 +34,13 @@ pub use router::build_router;
 use crate::config::Config;
 use crate::engine::bandit::RoutingBandit;
 use crate::engine::fallback::ProviderHealth;
-use crate::metering::pricing::PricingTable;
+use crate::metering::pricing::{PricingSnapshot, PricingSource, PricingTable};
 use crate::metrics::Metrics;
 use crate::middleware::auth::KeyCache;
 use crate::providers::pool::SharedKeyPool;
 use crate::providers::ProviderRegistry;
 use crate::store::KvStore;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 /// Everything a request handler needs, shared immutably across all workers.
@@ -62,8 +62,15 @@ pub struct AppState {
 
     /// Read replica for analytics queries. `None` means "use the primary".
     pub db_replica: Option<sqlx::PgPool>,
-    /// Model pricing, refreshed periodically from the database.
-    pub pricing: Arc<PricingTable>,
+    /// Model pricing. Loaded at startup and re-read from the database every
+    /// [`workers::pricing_refresh::REFRESH_INTERVAL`] by a background worker, so a price
+    /// a human has just verified and committed reaches every replica within minutes
+    /// rather than at the next deploy. Behind a lock rather than a bare `Arc<PricingTable>`
+    /// so that refresh is possible at all; reads are a lock acquisition plus one `Arc`
+    /// clone, which is not meaningfully different in cost from the network call to an
+    /// upstream model provider that every request already makes. Use [`AppState::pricing`]
+    /// to read it — the field itself holds the swappable cell.
+    pub pricing: Arc<RwLock<PricingSnapshot>>,
     /// Provider adapters, keyed by provider id.
     pub providers: Arc<ProviderRegistry>,
     /// In-process LRU in front of Redis for API key lookups.
@@ -104,6 +111,42 @@ impl AppState {
         })
     }
 
+    /// The current pricing table. What every request handler calls.
+    ///
+    /// A lock acquisition plus an `Arc` clone — nanoseconds, and no request ever blocks
+    /// on it for longer than that, since [`AppState::set_pricing`] holds the write lock
+    /// only long enough to swap one pointer.
+    pub fn pricing(&self) -> Arc<PricingTable> {
+        self.pricing
+            .read()
+            .expect("pricing lock poisoned")
+            .table
+            .clone()
+    }
+
+    /// The full snapshot — table plus when and where it was loaded from. What the admin
+    /// console's staleness banner and `GET /api/admin/pricing` read; ordinary request
+    /// handling never needs this, only [`AppState::pricing`].
+    pub fn pricing_snapshot(&self) -> PricingSnapshot {
+        self.pricing.read().expect("pricing lock poisoned").clone()
+    }
+
+    /// Atomically replace the pricing table.
+    ///
+    /// Called by the periodic refresh worker and the manual `POST
+    /// /api/admin/pricing/reload` endpoint. A request that already read a table via
+    /// [`AppState::pricing`] keeps using that `Arc` to completion — nothing is
+    /// invalidated mid-request, so a price update can never change the bill for a request
+    /// already in flight. See `docs/runbooks/pricing-update.md`.
+    pub fn set_pricing(&self, table: PricingTable, source: PricingSource) {
+        let mut guard = self.pricing.write().expect("pricing lock poisoned");
+        *guard = PricingSnapshot {
+            table: Arc::new(table),
+            loaded_at: chrono::Utc::now(),
+            source,
+        };
+    }
+
     /// The pool analytics queries should use.
     ///
     /// The replica when one is configured, the primary otherwise. Callers do not branch
@@ -127,7 +170,7 @@ impl AppState {
             metrics: Arc::new(Metrics::new()),
             db: None,
             db_replica: None,
-            pricing: Arc::new(PricingTable::with_seed_data()),
+            pricing: Arc::new(RwLock::new(PricingSnapshot::seed())),
             providers: Arc::new(ProviderRegistry::with_builtins()),
             key_cache: Arc::new(KeyCache::default()),
             health: Arc::new(ProviderHealth::new()),

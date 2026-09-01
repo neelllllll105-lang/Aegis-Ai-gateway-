@@ -1997,7 +1997,8 @@ pub async fn model_catalogue(State(state): State<AppState>, headers: HeaderMap) 
     match async {
         require_reader(&state, &headers).await?;
 
-        let all: Vec<_> = state.pricing.all().collect();
+        let pricing = state.pricing();
+        let all: Vec<_> = pricing.all().collect();
 
         // Cheapest blended price within each tier — this is the number the router is
         // actually comparing against when it considers a downgrade.

@@ -18,9 +18,9 @@ const TIERS = [
     summary: "For side projects & initial traffic benchmarking.",
     features: [
       "10,000 requests per month",
-      "Shared models (GPT-4o mini, Flash)",
+      "Capped to cost-efficient models — Aegis's shared keys, cheap tier only",
       "Full savings dashboard & metrics",
-      "Exact-match vector caching",
+      "Exact-match request caching",
       "Community Discord support",
     ],
     cta: "Start free",
@@ -36,8 +36,8 @@ const TIERS = [
     summary: "For production SaaS apps, indie hackers, and growing startups.",
     features: [
       "Unlimited monthly requests",
+      "No model-tier cap — cheap through frontier, same classifier, no ceiling",
       "Bring your own provider keys",
-      "Quality-aware routing classifier",
       "Multi-tier semantic caching",
       "Custom routing policies",
       "Standard email support",

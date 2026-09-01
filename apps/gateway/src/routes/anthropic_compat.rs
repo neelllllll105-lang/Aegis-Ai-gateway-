@@ -373,6 +373,148 @@ fn sse_event(event: &str, data: &serde_json::Value) -> String {
     format!("event: {event}\ndata: {data}\n\n")
 }
 
+/// Which Anthropic content block — if any — the streaming loop currently has open.
+#[derive(Default, PartialEq)]
+enum OpenBlock {
+    #[default]
+    None,
+    Text,
+    /// Holds the *upstream* tool-call index (OpenAI's `delta.tool_calls[].index`, or
+    /// whatever a translating adapter assigned) — not the Anthropic block index, which
+    /// `BlockTracker` assigns separately and may not match it.
+    Tool(u32),
+}
+
+/// Tracks which Anthropic content block is open while a stream renders, and decides what
+/// SSE events one incoming [`crate::types::StreamChunk`] should produce.
+///
+/// Pulled out of the streaming loop itself specifically so this state machine — the part
+/// of the fix with real room to get subtly wrong: block indices, when to close one block
+/// and open the next, matching a tool call's later fragments to the block its first
+/// fragment opened — is unit-testable on its own, independent of the HTTP plumbing
+/// around it. See the `block_tracker` tests below.
+#[derive(Default)]
+struct BlockTracker {
+    open: OpenBlock,
+    current_index: u32,
+    next_index: u32,
+    tool_source_to_index: std::collections::HashMap<u32, u32>,
+}
+
+impl BlockTracker {
+    /// `(event name, data)` pairs to emit for this chunk, in order. Ignores
+    /// `finish_reason`/`usage` — the caller handles those separately, as it always did.
+    fn events_for(
+        &mut self,
+        chunk: &crate::types::StreamChunk,
+        request_id: &uuid::Uuid,
+    ) -> Vec<(&'static str, serde_json::Value)> {
+        let mut events = Vec::new();
+
+        if let Some(tc) = &chunk.tool_call {
+            let continuing = matches!(self.open, OpenBlock::Tool(source) if source == tc.index);
+            if !continuing {
+                events.extend(self.close());
+                // Reuses the same assigned index for every later fragment of this same
+                // upstream call, so a call whose arguments arrive in several chunks
+                // renders as one block with several deltas, not several blocks.
+                let assigned = *self
+                    .tool_source_to_index
+                    .entry(tc.index)
+                    .or_insert_with(|| {
+                        let i = self.next_index;
+                        self.next_index += 1;
+                        i
+                    });
+                // Anthropic and OpenAI both supply a real id/name on the fragment that
+                // opens a call; Gemini supplies only a name. A synthesized id is scoped
+                // to this response and this block, so it can never collide with a real
+                // one from any provider.
+                let id = tc
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| format!("toolu_{}_{assigned}", request_id.simple()));
+                events.push((
+                    "content_block_start",
+                    serde_json::json!({
+                        "type": "content_block_start",
+                        "index": assigned,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": id,
+                            "name": tc.name.clone().unwrap_or_default(),
+                            "input": {}
+                        }
+                    }),
+                ));
+                self.open = OpenBlock::Tool(tc.index);
+                self.current_index = assigned;
+            }
+            if !tc.arguments_fragment.is_empty() {
+                events.push((
+                    "content_block_delta",
+                    serde_json::json!({
+                        "type": "content_block_delta",
+                        "index": self.current_index,
+                        "delta": {"type": "input_json_delta", "partial_json": tc.arguments_fragment}
+                    }),
+                ));
+            }
+        } else if !chunk.delta.is_empty() {
+            if self.open != OpenBlock::Text {
+                events.extend(self.close());
+                let assigned = self.next_index;
+                self.next_index += 1;
+                events.push((
+                    "content_block_start",
+                    serde_json::json!({
+                        "type": "content_block_start",
+                        "index": assigned,
+                        "content_block": {"type": "text", "text": ""}
+                    }),
+                ));
+                self.open = OpenBlock::Text;
+                self.current_index = assigned;
+            }
+            events.push((
+                "content_block_delta",
+                serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": self.current_index,
+                    "delta": {"type": "text_delta", "text": chunk.delta}
+                }),
+            ));
+        }
+
+        events
+    }
+
+    /// The closing event for whatever block is open, if any — and marks nothing open.
+    /// Called both mid-stream (switching blocks) and once at the very end.
+    fn close(&mut self) -> Option<(&'static str, serde_json::Value)> {
+        if self.open == OpenBlock::None {
+            return None;
+        }
+        let index = self.current_index;
+        // A block, once closed, is finished for the rest of the response — Anthropic's
+        // protocol has no way to reopen index N after content_block_stop has fired for
+        // it. If the block that just closed was a tool call, forget its source-index
+        // mapping: a later fragment claiming the same source index (a real provider is
+        // not expected to interleave a call's fragments with a different call's and then
+        // resume the first, but this must still not produce a protocol-invalid second
+        // content_block_start for an index that already closed) gets a genuinely new
+        // block and a new index, not a reopening of this one.
+        if let OpenBlock::Tool(source) = self.open {
+            self.tool_source_to_index.remove(&source);
+        }
+        self.open = OpenBlock::None;
+        Some((
+            "content_block_stop",
+            serde_json::json!({"type": "content_block_stop", "index": index}),
+        ))
+    }
+}
+
 /// Streaming variant of `/v1/messages`.
 ///
 /// Reuses the same routing decision and metering as the non-streaming path; only the wire
@@ -407,7 +549,7 @@ async fn stream_messages(
         bandit: Some(state.bandit.as_ref()),
     };
     let router = Router::with_classifier(Classifier::new());
-    let decision = router.route(&request, &state.pricing, &state.health, &inputs)?;
+    let decision = router.route(&request, &state.pricing(), &state.health, &inputs)?;
 
     // Retry and fail over while opening the stream, exactly as the OpenAI-compatible
     // endpoint does. Until the first byte reaches the client nothing is observable, so a
@@ -477,29 +619,28 @@ async fn stream_messages(
             }),
         )));
 
-        yield Ok(axum::body::Bytes::from(sse_event(
-            "content_block_start",
-            &serde_json::json!({
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""}
-            }),
-        )));
+        // Anthropic's real stream can carry several content blocks in one response — a
+        // text preamble, then one or more tool_use blocks, each independently numbered
+        // and each with its own start/delta/stop lifecycle. The old version of this loop
+        // hardcoded a single text block at index 0 for the entire response and never
+        // considered any other shape; every tool_use content_block_start/delta this
+        // gateway received from an upstream provider was already being dropped before it
+        // got this far (see providers/anthropic.rs and providers/openai.rs), so nothing
+        // downstream had ever needed to render a tool_use block until now. `BlockTracker`
+        // (above) is the fix — opens a new block whenever what's arriving doesn't match
+        // what's currently open, closes the previous one first, and remembers which
+        // locally-assigned index belongs to which upstream tool call so later fragments
+        // for the same call land on the same block instead of opening a new one each
+        // time. Never assumes there is exactly one block, or that it's text.
+        let mut tracker = BlockTracker::default();
 
         let mut upstream = upstream;
         while let Some(chunk) = upstream.next().await {
             match chunk {
                 Ok(chunk) => {
-                    if !chunk.delta.is_empty() {
-                        output_chars += chunk.delta.chars().count() as u64;
-                        yield Ok(axum::body::Bytes::from(sse_event(
-                            "content_block_delta",
-                            &serde_json::json!({
-                                "type": "content_block_delta",
-                                "index": 0,
-                                "delta": {"type": "text_delta", "text": chunk.delta}
-                            }),
-                        )));
+                    output_chars += chunk.delta.chars().count() as u64;
+                    for (event, data) in tracker.events_for(&chunk, &request_id) {
+                        yield Ok(axum::body::Bytes::from(sse_event(event, &data)));
                     }
                     if let Some(usage) = chunk.usage {
                         if usage.input_tokens > 0 {
@@ -529,10 +670,11 @@ async fn stream_messages(
             }
         }
 
-        yield Ok(axum::body::Bytes::from(sse_event(
-            "content_block_stop",
-            &serde_json::json!({"type": "content_block_stop", "index": 0}),
-        )));
+        // Close whatever block was still open when the stream ended — there may be none
+        // at all (an empty response), exactly one (the common case), or several.
+        if let Some((event, data)) = tracker.close() {
+            yield Ok(axum::body::Bytes::from(sse_event(event, &data)));
+        }
 
         let final_output = if output_tokens > 0 {
             output_tokens
@@ -564,11 +706,11 @@ async fn stream_messages(
         };
 
         let actual_cost = state_for_stream
-            .pricing
+            .pricing()
             .cost_of(&served_model, &tokens)
             .unwrap_or(MicroCents::ZERO);
         let baseline_cost = state_for_stream
-            .pricing
+            .pricing()
             .cost_of(&requested_model, &tokens)
             .unwrap_or(actual_cost);
         let savings = SavingsBreakdown::compute(
@@ -684,6 +826,186 @@ mod tests {
         serde_json::from_value::<AnthropicRequest>(json)
             .unwrap()
             .normalize()
+    }
+
+    mod block_tracker {
+        use super::*;
+        use crate::types::{StreamChunk, ToolCallDelta};
+
+        fn text_chunk(text: &str) -> StreamChunk {
+            StreamChunk {
+                delta: text.to_string(),
+                ..Default::default()
+            }
+        }
+
+        fn tool_chunk(index: u32, id: Option<&str>, name: Option<&str>, args: &str) -> StreamChunk {
+            StreamChunk {
+                tool_call: Some(ToolCallDelta {
+                    index,
+                    id: id.map(str::to_string),
+                    name: name.map(str::to_string),
+                    arguments_fragment: args.to_string(),
+                }),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn a_plain_text_stream_opens_exactly_one_block() {
+            let request_id = Uuid::new_v4();
+            let mut tracker = BlockTracker::default();
+
+            let first = tracker.events_for(&text_chunk("Hello"), &request_id);
+            assert_eq!(
+                first.len(),
+                2,
+                "expected content_block_start + content_block_delta"
+            );
+            assert_eq!(first[0].0, "content_block_start");
+            assert_eq!(first[0].1["index"], 0);
+            assert_eq!(first[0].1["content_block"]["type"], "text");
+            assert_eq!(first[1].0, "content_block_delta");
+            assert_eq!(first[1].1["delta"]["text"], "Hello");
+
+            // A second text chunk continues the same block — no second start.
+            let second = tracker.events_for(&text_chunk(" world"), &request_id);
+            assert_eq!(second.len(), 1, "continuing text must not reopen the block");
+            assert_eq!(second[0].0, "content_block_delta");
+            assert_eq!(second[0].1["index"], 0);
+
+            let close = tracker.close().expect("a block was left open");
+            assert_eq!(close.0, "content_block_stop");
+            assert_eq!(close.1["index"], 0);
+
+            assert!(
+                tracker.close().is_none(),
+                "closing twice must be a no-op, not a second event"
+            );
+        }
+
+        #[test]
+        fn a_tool_call_opens_its_own_block_with_id_and_name_on_the_first_fragment_only() {
+            let request_id = Uuid::new_v4();
+            let mut tracker = BlockTracker::default();
+
+            let opening = tracker.events_for(
+                &tool_chunk(0, Some("call_abc"), Some("get_weather"), ""),
+                &request_id,
+            );
+            assert_eq!(
+                opening.len(),
+                1,
+                "an empty first fragment emits only content_block_start"
+            );
+            assert_eq!(opening[0].0, "content_block_start");
+            assert_eq!(opening[0].1["content_block"]["type"], "tool_use");
+            assert_eq!(opening[0].1["content_block"]["id"], "call_abc");
+            assert_eq!(opening[0].1["content_block"]["name"], "get_weather");
+
+            // A later fragment for the SAME call (same source index) must not reopen the
+            // block, and must not repeat id/name.
+            let continued = tracker.events_for(&tool_chunk(0, None, None, "{\"loc"), &request_id);
+            assert_eq!(continued.len(), 1, "a continuing fragment is delta-only");
+            assert_eq!(continued[0].0, "content_block_delta");
+            assert_eq!(continued[0].1["index"], 0);
+            assert_eq!(continued[0].1["delta"]["type"], "input_json_delta");
+            assert_eq!(continued[0].1["delta"]["partial_json"], "{\"loc");
+        }
+
+        #[test]
+        fn text_then_a_tool_call_closes_the_text_block_before_opening_the_tool_block() {
+            let request_id = Uuid::new_v4();
+            let mut tracker = BlockTracker::default();
+
+            tracker.events_for(&text_chunk("Let me check that."), &request_id);
+            let transition = tracker.events_for(
+                &tool_chunk(0, Some("call_1"), Some("get_weather"), ""),
+                &request_id,
+            );
+
+            assert_eq!(
+                transition.len(),
+                2,
+                "expected a stop for the text block, then a start for the tool block"
+            );
+            assert_eq!(transition[0].0, "content_block_stop");
+            assert_eq!(
+                transition[0].1["index"], 0,
+                "closes the text block, index 0"
+            );
+            assert_eq!(transition[1].0, "content_block_start");
+            assert_eq!(
+                transition[1].1["index"], 1,
+                "the tool block gets the next index, not 0 again"
+            );
+        }
+
+        #[test]
+        fn two_different_tool_calls_get_two_different_blocks() {
+            let request_id = Uuid::new_v4();
+            let mut tracker = BlockTracker::default();
+
+            tracker.events_for(
+                &tool_chunk(0, Some("call_a"), Some("get_weather"), ""),
+                &request_id,
+            );
+            let switch = tracker.events_for(
+                &tool_chunk(1, Some("call_b"), Some("get_time"), ""),
+                &request_id,
+            );
+
+            assert_eq!(
+                switch.len(),
+                2,
+                "switching to a different source index closes the first block"
+            );
+            assert_eq!(switch[0].0, "content_block_stop");
+            assert_eq!(switch[0].1["index"], 0);
+            assert_eq!(switch[1].0, "content_block_start");
+            assert_eq!(switch[1].1["index"], 1);
+            assert_eq!(switch[1].1["content_block"]["id"], "call_b");
+
+            // A later fragment claiming source index 0 again — after it was already
+            // closed by the switch to call 1 above — must NOT reopen block 0. Anthropic's
+            // protocol has no way to resume a block once content_block_stop has fired for
+            // it, so this has to become a genuinely new block with a new index instead.
+            let back = tracker.events_for(&tool_chunk(0, None, None, "more args"), &request_id);
+            assert_eq!(
+                back.len(),
+                3,
+                "closes block 1, opens a fresh block, then the non-empty argument fragment delta"
+            );
+            assert_eq!(back[0].0, "content_block_stop");
+            assert_eq!(back[0].1["index"], 1);
+            assert_eq!(back[1].0, "content_block_start");
+            assert_eq!(back[1].1["index"], 2, "a new index, never a reopened 0");
+            assert_eq!(back[2].0, "content_block_delta");
+            assert_eq!(back[2].1["index"], 2);
+            assert_eq!(back[2].1["delta"]["partial_json"], "more args");
+        }
+
+        #[test]
+        fn no_id_at_all_still_produces_a_stable_synthesized_one() {
+            // Gemini's functionCall parts carry a name but never an id.
+            let request_id = Uuid::new_v4();
+            let mut tracker = BlockTracker::default();
+
+            let opening =
+                tracker.events_for(&tool_chunk(0, None, Some("get_weather"), ""), &request_id);
+            let id = opening[0].1["content_block"]["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(!id.is_empty());
+            assert_ne!(id, "null");
+        }
+
+        #[test]
+        fn closing_with_nothing_open_is_a_silent_no_op() {
+            let mut tracker = BlockTracker::default();
+            assert!(tracker.close().is_none());
+        }
     }
 
     #[test]

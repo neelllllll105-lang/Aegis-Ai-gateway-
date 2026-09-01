@@ -92,7 +92,9 @@ fn load_test_state() -> AppState {
 
     AppState {
         config: Arc::new(config),
-        pricing: Arc::new(pricing),
+        pricing: Arc::new(std::sync::RwLock::new(
+            aegis_gateway::metering::pricing::PricingSnapshot::from_table(pricing),
+        )),
         providers: Arc::new(registry),
         ..AppState::for_tests()
     }

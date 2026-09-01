@@ -154,6 +154,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/metrics", get(admin::system_metrics))
         .route("/api/admin/routing", get(admin::routing_intelligence))
         .route("/api/admin/pricing", get(admin::pricing_table))
+        .route("/api/admin/pricing/reload", post(admin::reload_pricing))
+        .route(
+            "/api/admin/pricing/openrouter/refresh",
+            post(admin::refresh_openrouter_reference),
+        )
         .route("/api/admin/audit", get(admin::audit_log))
         .route(
             "/api/admin/providers/{provider}/reset",

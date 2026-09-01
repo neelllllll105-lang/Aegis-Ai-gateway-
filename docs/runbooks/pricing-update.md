@@ -16,6 +16,26 @@ penny-wrong invoice destroys trust.
 
 So the reading is done by a human, and the tooling only checks arithmetic and flags drift.
 
+**`openrouter_pricing_reference`**: a separate table, populated by `POST
+/api/admin/pricing/openrouter/refresh`, holding a live snapshot of OpenRouter's public
+`/api/v1/models` pricing. Nothing in the request path or the router reads it — it exists
+so a future comparison against `model_pricing` has real, structured data to compare
+against instead of nothing. It is not itself a source for step 1 below: OpenRouter is a
+reseller, and nothing confirms their number is free of markup over what Aegis's own
+direct provider account is actually billed. See `metering::openrouter_reference`'s module
+doc for the full reasoning.
+
+**What the tooling actually automates, and what it deliberately does not:**
+`workers::pricing_refresh` keeps every replica's in-memory table in sync with whatever
+`model_pricing` currently holds, within five minutes, so this runbook's old "restart the
+gateway" step is gone (§5 below). `workers::scheduler`'s nightly `check_pricing_drift` job
+compares the same two things again on its own schedule and logs a warning on any mismatch
+— now mostly a canary for "is the refresh worker itself actually running", since the two
+should almost never disagree once it's live. **Neither of these ever writes a price.**
+Both compare the database against memory; nothing in this codebase compares a price
+against what a provider currently publishes, and nothing ever will without a human
+reading the page — see the reasoning above.
+
 ---
 
 ## ⚠️ Open launch blocker
@@ -129,14 +149,32 @@ All three should return zero rows. The third catches transposed input and output
 which is the single most common data-entry error here and produces routing decisions that
 are exactly backwards.
 
-### 5. Restart the gateway
+### 5. Reload the gateway's in-memory table
 
-Pricing is cached in memory and refreshed at startup:
+A restart is no longer required. `workers::pricing_refresh` re-reads `model_pricing` every
+five minutes on its own, so the update reaches every replica on its own within that
+window — but for right now:
 
 ```bash
-docker compose -f infra/docker-compose.yml restart gateway
-curl -s https://api.aegis.dev/api/admin/pricing | head -40
+curl -s -X POST -H "Authorization: Bearer <admin token>" \
+  https://api.aegis.dev/api/admin/pricing/reload
+# {"reloaded": true, "models": 28}
 ```
+
+Call it once per replica (or fan it out) if there is more than one behind the load
+balancer — it only reloads the process it lands on. Then confirm what is actually being
+served, including that this row no longer carries the `UNVERIFIED` marker:
+
+```bash
+curl -s -H "Authorization: Bearer <admin token>" \
+  https://api.aegis.dev/api/admin/pricing | head -40
+```
+
+`GET /api/admin/pricing`'s response also carries `loaded_at`, `loaded_from`
+(`"database"` or `"seed_fallback"` — the latter means this replica has no database
+configured at all and this whole procedure does not apply to it), and
+`unverified_count` — the fast way to confirm step 4's zero-rows check actually landed,
+without a `psql` session.
 
 ### 6. Record it
 

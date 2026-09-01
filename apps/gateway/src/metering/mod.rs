@@ -4,6 +4,7 @@
 //! [`usage::UsageEvent`] priced by [`pricing::PricingTable`] and attributed by
 //! [`savings::SavingsBreakdown`].
 
+pub mod openrouter_reference;
 pub mod pricing;
 pub mod savings;
 pub mod usage;

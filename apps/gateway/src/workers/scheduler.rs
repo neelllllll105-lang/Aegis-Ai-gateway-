@@ -243,7 +243,7 @@ async fn send_weekly_digests(state: &AppState) -> Result<()> {
 async fn check_pricing_drift(state: &AppState) -> Result<()> {
     let pool = state.db()?;
     let stored = crate::db::repo::load_pricing(pool).await?;
-    let report = diff_pricing(&state.pricing, &stored);
+    let report = diff_pricing(&state.pricing(), &stored);
 
     if report.is_empty() {
         tracing::info!("nightly pricing check: no drift");

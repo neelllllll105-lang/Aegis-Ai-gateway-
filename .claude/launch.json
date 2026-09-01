@@ -21,7 +21,13 @@
         "aegis-gateway"
       ],
       "cwd": "apps/gateway",
-      "port": 8080
+      "port": 8080,
+      "env": {
+        "DATABASE_URL": "postgres://aegis:aegis_dev_password@localhost:5432/aegis",
+        "REDIS_URL": "redis://localhost:6379",
+        "QDRANT_URL": "http://localhost:6333",
+        "QDRANT_GRPC_URL": "http://localhost:6334"
+      }
     }
   ]
 }

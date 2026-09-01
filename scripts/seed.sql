@@ -33,9 +33,16 @@ VALUES (
     '00000000-0000-0000-0000-000000000001',
     'dev@aegis.local',
     'Development User',
-    -- argon2id hash of "aegis-development-password". Development only; this account
-    -- cannot exist in production because the seed is never run there.
-    '$argon2id$v=19$m=19456,t=2,p=1$c2VlZHNlZWRzZWVkc2VlZA$Zx8Qb4hMhLxJmYq0dJZ7lGkVn3wCmQZ4rXqJ8xNvB1E',
+    -- A genuine argon2id hash of "aegis-development-password", produced by calling this
+    -- codebase's own crypto::hash_password with that exact string — not hand-written.
+    -- The value that lived here before did not verify against the password the comment
+    -- claimed it hashed: it had a plausible-looking argon2id shape but
+    -- was fabricated text, not a real hash of anything, so `dev@aegis.local` with the
+    -- documented password had never actually been able to log in. Found live, the first
+    -- time this account was used against a real database — not by inspecting the file.
+    -- Development only; this account cannot exist in production because the seed is
+    -- never run there.
+    '$argon2id$v=19$m=19456,t=2,p=1$tRLEzu4N8hVf8/YSu877Dg$qGCbZIrgAa69kb6toeKhLxBsHnAnvo8+dCRjo37mkEo',
     NOW(),
     true
 )

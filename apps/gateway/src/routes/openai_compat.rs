@@ -29,7 +29,6 @@ use crate::engine::policy::RoutingPolicy;
 use crate::engine::router::{Router, RoutingInputs};
 use crate::enterprise::residency;
 use crate::error::{AegisError, Result};
-use crate::metering::pricing::PricingTable;
 use crate::metering::savings::SavingsBreakdown;
 use crate::metering::usage::{self, UsageEvent};
 use crate::middleware::auth::{self, AuthContext};
@@ -244,7 +243,7 @@ fn cache_hit_outcome(
     explanation: String,
     clock: &OverheadClock,
 ) -> PipelineOutcome {
-    let pricing: &PricingTable = &state.pricing;
+    let pricing = state.pricing();
     let baseline = pricing.baseline_of(&requested_model, &response.usage, MicroCents::ZERO);
     let savings = SavingsBreakdown::cache_hit(baseline, savings_share_bp);
 
@@ -512,11 +511,11 @@ pub async fn execute_with_headroom(
     };
 
     let router = Router::with_classifier(Classifier::new());
-    let decision = router.route(&request, &state.pricing, &state.health, &inputs)?;
+    let decision = router.route(&request, &state.pricing(), &state.health, &inputs)?;
 
     // ---- [7] Provider execution with fallback -------------------------------------
     let requested_provider = state
-        .pricing
+        .pricing()
         .get(&requested_model)
         .map(|m| m.provider.clone())
         .unwrap_or_else(|| decision.provider.clone());
@@ -539,11 +538,11 @@ pub async fn execute_with_headroom(
     let tokens = resolve_usage(&response, &request);
 
     let actual_cost = state
-        .pricing
+        .pricing()
         .cost_of(&served_model, &tokens)
         .unwrap_or(MicroCents::ZERO);
     let baseline_cost = state
-        .pricing
+        .pricing()
         .cost_of(&requested_model, &tokens)
         .unwrap_or(actual_cost);
 
@@ -767,7 +766,7 @@ pub(crate) async fn open_stream_for(
     requested_model: &str,
 ) -> Result<StreamAttempt> {
     let requested_provider = state
-        .pricing
+        .pricing()
         .get(requested_model)
         .map(|m| m.provider.clone())
         .unwrap_or_else(|| decision.provider.clone());
@@ -921,7 +920,8 @@ fn alternates_for(
     request: &NormalizedRequest,
     decision: &crate::engine::router::RoutingDecision,
 ) -> Vec<(String, String)> {
-    let Some(selected) = state.pricing.get(&decision.served_model) else {
+    let pricing = state.pricing();
+    let Some(selected) = pricing.get(&decision.served_model) else {
         return Vec::new();
     };
     let requirements = crate::metering::pricing::Requirements {
@@ -931,8 +931,7 @@ fn alternates_for(
         chat: true,
     };
 
-    let mut candidates: Vec<&crate::metering::pricing::ModelPricing> = state
-        .pricing
+    let mut candidates: Vec<&crate::metering::pricing::ModelPricing> = pricing
         .all()
         .filter(|m| m.provider != selected.provider)
         .filter(|m| m.tier >= selected.tier)
@@ -1302,10 +1301,10 @@ async fn stream_chat(
         bandit: Some(state.bandit.as_ref()),
     };
     let router = Router::with_classifier(Classifier::new());
-    let decision = router.route(&request, &state.pricing, &state.health, &inputs)?;
+    let decision = router.route(&request, &state.pricing(), &state.health, &inputs)?;
 
     let requested_provider = state
-        .pricing
+        .pricing()
         .get(&requested_model)
         .map(|m| m.provider.clone())
         .unwrap_or_else(|| decision.provider.clone());
@@ -1378,9 +1377,26 @@ async fn stream_chat(
                             merged.output_tokens = usage.output_tokens;
                         }
                     }
-                    let payload = chunk.raw.clone().unwrap_or_else(|| {
-                        to_openai_stream_chunk(&request_id, &served_model, &chunk).to_string()
-                    });
+                    // `raw` is the literal bytes the *serving* provider sent, in that
+                    // provider's own wire format — safe to forward verbatim only when the
+                    // router happened to pick a provider that already speaks the shape
+                    // this caller connected with (OpenAI-compatible). The router chooses a
+                    // model independently of which endpoint the caller used, so a request
+                    // to this OpenAI-shaped endpoint can just as easily be served by the
+                    // Anthropic adapter or Gemini — forwarding *their* raw SSE bytes here
+                    // would hand an OpenAI-SDK client JSON it cannot parse. Reconstruct
+                    // from the normalised fields instead whenever the shapes don't match.
+                    let payload = match chunk.source_shape {
+                        Some(crate::types::WireShape::OpenAiCompatible) => chunk
+                            .raw
+                            .clone()
+                            .unwrap_or_else(|| {
+                                to_openai_stream_chunk(&request_id, &served_model, &chunk)
+                                    .to_string()
+                            }),
+                        _ => to_openai_stream_chunk(&request_id, &served_model, &chunk)
+                            .to_string(),
+                    };
                     yield Ok::<_, std::convert::Infallible>(
                         axum::body::Bytes::from(format!("data: {payload}\n\n"))
                     );
@@ -1408,11 +1424,11 @@ async fn stream_chat(
         });
 
         let actual_cost = state_for_stream
-            .pricing
+            .pricing()
             .cost_of(&served_model, &tokens)
             .unwrap_or(MicroCents::ZERO);
         let baseline_cost = state_for_stream
-            .pricing
+            .pricing()
             .cost_of(&requested_model, &tokens)
             .unwrap_or(actual_cost);
         let savings = SavingsBreakdown::compute(
@@ -1539,7 +1555,7 @@ pub(crate) async fn reserve_budget(
 ) -> Result<std::result::Result<(budget::Reservation, Option<i64>), AegisError>> {
     let region = Some(state.config.region.as_str());
     let limits = budget::load_limits(state.store.as_ref(), state.db.as_ref(), auth, region).await;
-    let projected = budget::project_cost(request, &state.pricing);
+    let projected = budget::project_cost(request, &state.pricing());
 
     match budget::check_and_reserve(
         state.store.as_ref(),
@@ -1647,12 +1663,41 @@ pub fn to_openai_response(outcome: &PipelineOutcome) -> serde_json::Value {
     })
 }
 
-/// Render a chunk in OpenAI streaming shape when the provider gave us no raw payload.
+/// Render a chunk in OpenAI streaming shape — when the served provider's own raw payload
+/// isn't safe to forward verbatim (see the shape check at the call site), or gave us none
+/// at all.
 fn to_openai_stream_chunk(
     request_id: &Uuid,
     model: &str,
     chunk: &crate::types::StreamChunk,
 ) -> serde_json::Value {
+    let mut delta = serde_json::json!({});
+    if !chunk.delta.is_empty() {
+        delta["content"] = serde_json::json!(chunk.delta);
+    }
+    if let Some(tc) = &chunk.tool_call {
+        // `id`/`type`/`function.name` belong only on the fragment that opens a call — a
+        // later fragment for the same call (arriving from Anthropic or Gemini, which
+        // don't index tool calls the way OpenAI does, or from OpenAI's own later
+        // fragments) has neither, and repeating them would tell the client a second call
+        // just started. `id.is_some() || name.is_some()` is what an opening fragment
+        // looks like regardless of which provider produced it — Anthropic supplies both,
+        // Gemini supplies only a name, OpenAI supplies both on its own opening fragment.
+        let mut entry = serde_json::json!({
+            "index": tc.index,
+            "function": {"arguments": tc.arguments_fragment},
+        });
+        if tc.id.is_some() || tc.name.is_some() {
+            entry["id"] = serde_json::json!(tc
+                .id
+                .clone()
+                .unwrap_or_else(|| format!("call_{}_{}", request_id, tc.index)));
+            entry["type"] = serde_json::json!("function");
+            entry["function"]["name"] = serde_json::json!(tc.name.clone().unwrap_or_default());
+        }
+        delta["tool_calls"] = serde_json::json!([entry]);
+    }
+
     serde_json::json!({
         "id": format!("chatcmpl-{request_id}"),
         "object": "chat.completion.chunk",
@@ -1660,7 +1705,7 @@ fn to_openai_stream_chunk(
         "model": model,
         "choices": [{
             "index": 0,
-            "delta": {"content": chunk.delta},
+            "delta": delta,
             "finish_reason": chunk.finish_reason,
         }]
     })
@@ -1684,7 +1729,7 @@ pub async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> R
     let allowlist = auth_context.allowed_models.clone();
 
     let mut models: Vec<serde_json::Value> = state
-        .pricing
+        .pricing()
         .all()
         .filter(|m| ceiling.is_none_or(|ceiling| m.tier <= ceiling))
         .filter(|m| match &allowlist {
@@ -1759,7 +1804,7 @@ pub async fn embeddings(
     };
 
     let model = state
-        .pricing
+        .pricing()
         .cheapest_embedding_model()
         .map(|m| m.model_id.clone())
         .unwrap_or_else(|| "openai/text-embedding-3-small".to_string());
@@ -1821,8 +1866,77 @@ mod tests {
     use crate::db::repo::KeyContext;
     use crate::providers::mock::MockProvider;
     use crate::providers::ProviderRegistry;
-    use crate::types::ModelTier;
+    use crate::types::{ModelTier, ToolCallDelta};
     use std::sync::Arc;
+
+    #[test]
+    fn to_openai_stream_chunk_renders_a_tool_call_delta() {
+        // The outbound half of the fix: whatever provider actually produced this chunk
+        // (Anthropic, Gemini, or an OpenAI-shaped one whose raw bytes weren't safe to
+        // forward verbatim — see the shape check at the streaming loop's call site), a
+        // normalised ToolCallDelta must render as real OpenAI delta.tool_calls shape.
+        let request_id = Uuid::new_v4();
+        let chunk = crate::types::StreamChunk {
+            tool_call: Some(ToolCallDelta {
+                index: 0,
+                id: Some("call_1".to_string()),
+                name: Some("get_weather".to_string()),
+                arguments_fragment: "{\"city\":".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let rendered = to_openai_stream_chunk(&request_id, "gpt-4o", &chunk);
+        let delta = &rendered["choices"][0]["delta"];
+        assert_eq!(delta["tool_calls"][0]["index"], 0);
+        assert_eq!(delta["tool_calls"][0]["id"], "call_1");
+        assert_eq!(delta["tool_calls"][0]["type"], "function");
+        assert_eq!(delta["tool_calls"][0]["function"]["name"], "get_weather");
+        assert_eq!(
+            delta["tool_calls"][0]["function"]["arguments"],
+            "{\"city\":"
+        );
+        assert!(
+            delta.get("content").is_none(),
+            "no text on a tool-only chunk"
+        );
+    }
+
+    #[test]
+    fn a_continuing_tool_call_fragment_omits_id_and_name() {
+        // Repeating id/name on every fragment would tell an OpenAI SDK a new call started
+        // each time — only the opening fragment gets them.
+        let request_id = Uuid::new_v4();
+        let chunk = crate::types::StreamChunk {
+            tool_call: Some(ToolCallDelta {
+                index: 0,
+                id: None,
+                name: None,
+                arguments_fragment: "\"Paris\"}".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let rendered = to_openai_stream_chunk(&request_id, "gpt-4o", &chunk);
+        let entry = &rendered["choices"][0]["delta"]["tool_calls"][0];
+        assert!(entry.get("id").is_none());
+        assert!(entry.get("type").is_none());
+        assert_eq!(entry["function"]["arguments"], "\"Paris\"}");
+    }
+
+    #[test]
+    fn a_text_only_chunk_carries_no_tool_calls_field_at_all() {
+        // The field must be genuinely absent, not present-and-empty — an SDK checking
+        // `if delta.tool_calls` would otherwise see a truthy empty array.
+        let request_id = Uuid::new_v4();
+        let chunk = crate::types::StreamChunk {
+            delta: "Hello".to_string(),
+            ..Default::default()
+        };
+        let rendered = to_openai_stream_chunk(&request_id, "gpt-4o", &chunk);
+        assert!(rendered["choices"][0]["delta"].get("tool_calls").is_none());
+        assert_eq!(rendered["choices"][0]["delta"]["content"], "Hello");
+    }
 
     /// State wired to a mock provider, with pooled credentials so the pipeline can run
     /// end to end without a database, a network, or an API key.
@@ -1880,7 +1994,9 @@ mod tests {
 
         AppState {
             config: Arc::new(config),
-            pricing: Arc::new(pricing),
+            pricing: Arc::new(std::sync::RwLock::new(
+                crate::metering::pricing::PricingSnapshot::from_table(pricing),
+            )),
             providers: Arc::new(registry),
             ..AppState::for_tests()
         }

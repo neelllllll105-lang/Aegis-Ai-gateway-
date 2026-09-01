@@ -14,7 +14,9 @@
 use super::sse::is_done;
 use super::{ChunkStream, Credential, Provider};
 use crate::error::{AegisError, Result};
-use crate::types::{NormalizedRequest, NormalizedResponse, Role, StreamChunk, TokenUsage};
+use crate::types::{
+    NormalizedRequest, NormalizedResponse, Role, StreamChunk, TokenUsage, ToolCallDelta, WireShape,
+};
 use async_trait::async_trait;
 use std::time::Duration;
 
@@ -215,7 +217,36 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
 
     let usage = json.get("usageMetadata").map(parse_usage);
 
-    if delta.is_empty() && finish_reason.is_none() && usage.is_none() {
+    // A function call arrives as its own part, `{"functionCall": {"name": ..., "args":
+    // {...}}}`, alongside (or instead of) any text parts — the `delta` above only ever
+    // joins `text` fields, so a chunk carrying nothing but a function call looked exactly
+    // as empty as one carrying nothing at all and was dropped by the check below. Unlike
+    // OpenAI and Anthropic, Gemini does not fragment a call's arguments across multiple
+    // chunks or give it a stable id — it sends the whole `args` object at once — so this
+    // is a single fragment carrying the complete arguments, not the first of several.
+    let tool_call = json
+        .pointer("/candidates/0/content/parts")
+        .and_then(|p| p.as_array())
+        .and_then(|parts| {
+            parts
+                .iter()
+                .enumerate()
+                .find_map(|(i, part)| part.get("functionCall").map(|fc| (i, fc)))
+        })
+        .map(|(index, function_call)| ToolCallDelta {
+            index: index as u32,
+            id: None,
+            name: function_call
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            arguments_fragment: function_call
+                .get("args")
+                .map(|args| args.to_string())
+                .unwrap_or_default(),
+        });
+
+    if delta.is_empty() && tool_call.is_none() && finish_reason.is_none() && usage.is_none() {
         return Ok(None);
     }
 
@@ -224,6 +255,8 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
         finish_reason,
         usage,
         raw: Some(data.to_string()),
+        source_shape: Some(WireShape::Google),
+        tool_call,
     }))
 }
 
@@ -482,6 +515,44 @@ mod tests {
         assert_eq!(final_chunk.delta, "lo");
         assert_eq!(final_chunk.finish_reason.as_deref(), Some("stop"));
         assert_eq!(final_chunk.usage.unwrap().output_tokens, 2);
+    }
+
+    #[test]
+    fn a_function_call_chunk_with_no_text_is_kept_not_dropped() {
+        // A functionCall part carries no `text` field at all — the `delta` extraction
+        // above only ever joins `.text` fields, so a chunk carrying nothing but a
+        // function call looked exactly as empty as one carrying nothing at all and was
+        // dropped by the emptiness check before this session's fix.
+        let chunk = parse_stream_chunk(
+            r#"{"candidates":[{"content":{"parts":[
+                {"functionCall":{"name":"get_weather","args":{"location":"Paris"}}}
+            ]}}]}"#,
+        )
+        .unwrap()
+        .expect("a function-call-only chunk must be kept");
+
+        assert_eq!(chunk.delta, "");
+        let tc = chunk.tool_call.expect("must carry a ToolCallDelta");
+        assert_eq!(tc.name.as_deref(), Some("get_weather"));
+        assert!(tc.arguments_fragment.contains("Paris"));
+        assert_eq!(chunk.source_shape, Some(WireShape::Google));
+    }
+
+    #[test]
+    fn a_function_call_alongside_text_in_the_same_chunk_keeps_both() {
+        let chunk = parse_stream_chunk(
+            r#"{"candidates":[{"content":{"parts":[
+                {"text":"Let me check that."},
+                {"functionCall":{"name":"get_weather","args":{"location":"Paris"}}}
+            ]}}]}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(chunk.delta, "Let me check that.");
+        assert_eq!(
+            chunk.tool_call.unwrap().name.as_deref(),
+            Some("get_weather")
+        );
     }
 
     #[test]

@@ -112,13 +112,20 @@ pub async fn routing_intelligence(State(state): State<AppState>, headers: Header
 /// `GET /api/admin/pricing` — the live pricing table with provenance.
 ///
 /// Exposed so Part 13 item 8 (every price traceable to a dated source) can be audited
-/// without a database session.
+/// without a database session. Also the staleness banner's data source: `loaded_at` is
+/// when *this table* was last read into memory (from the database, or — if
+/// `source: "seed_fallback"` — the hardcoded development bootstrap in `pricing.rs`), and
+/// `unverified_count` is how many rows still carry the `UNVERIFIED` marker
+/// `docs/runbooks/pricing-update.md` looks for. Neither of those is "how old is this
+/// price relative to what the provider actually charges" — nothing can answer that
+/// without a human reading the provider's page, which is the whole point of the runbook.
 pub async fn pricing_table(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match async {
         require_admin(&state, &headers).await?;
 
-        let mut models: Vec<serde_json::Value> = state
-            .pricing
+        let snapshot = state.pricing_snapshot();
+        let mut models: Vec<serde_json::Value> = snapshot
+            .table
             .all()
             .map(|m| {
                 serde_json::json!({
@@ -130,6 +137,7 @@ pub async fn pricing_table(State(state): State<AppState>, headers: HeaderMap) ->
                     "blended_per_mtok_mc": m.blended_per_mtok().as_i64(),
                     "context_window": m.context_window,
                     "source": m.source,
+                    "unverified": m.source.contains(crate::metering::pricing::UNVERIFIED),
                 })
             })
             .collect();
@@ -140,9 +148,96 @@ pub async fn pricing_table(State(state): State<AppState>, headers: HeaderMap) ->
                 .cmp(b["model_id"].as_str().unwrap_or_default())
         });
 
+        let unverified_count = models
+            .iter()
+            .filter(|m| m["unverified"].as_bool().unwrap_or(false))
+            .count();
         let count = models.len();
         Ok::<_, AegisError>(
-            Json(serde_json::json!({"models": models, "count": count})).into_response(),
+            Json(serde_json::json!({
+                "models": models,
+                "count": count,
+                "unverified_count": unverified_count,
+                "loaded_at": snapshot.loaded_at.to_rfc3339(),
+                "loaded_from": snapshot.source.as_str(),
+            }))
+            .into_response(),
+        )
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `POST /api/admin/pricing/reload` — re-read `model_pricing` from the database now,
+/// instead of waiting for [`crate::workers::pricing_refresh`]'s next tick.
+///
+/// For right after running `docs/runbooks/pricing-update.md`: commit the new price, hit
+/// this once, and every replica behind the same load balancer serves it — call it once
+/// per replica, or put it behind a fan-out if there is more than one. Without a database
+/// there is nothing to reload from, so this is a 503 in that configuration rather than a
+/// silent no-op; a caller who just ran the runbook and gets `200 {"models": 0}` back would
+/// reasonably conclude the reload itself is broken, when the real answer is "this
+/// deployment never had a database to reload from".
+pub async fn reload_pricing(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match async {
+        require_admin(&state, &headers).await?;
+
+        match crate::workers::pricing_refresh::refresh_once(&state).await? {
+            Some(count) => {
+                tracing::warn!(
+                    models = count,
+                    "pricing table manually reloaded via admin API"
+                );
+                Ok::<_, AegisError>(
+                    Json(serde_json::json!({"reloaded": true, "models": count})).into_response(),
+                )
+            }
+            None if state.db.is_none() => Err(AegisError::ServiceUnavailable(
+                "No database is configured, so there is nothing to reload pricing from — \
+                 this replica is serving the hardcoded seed table."
+                    .into(),
+            )),
+            None => {
+                // A configured, reachable database returned zero pricing rows.
+                // refresh_once already logged the warning and deliberately left the
+                // previous table in place; the caller just needs to know nothing changed.
+                Ok(Json(serde_json::json!({"reloaded": false, "models": 0})).into_response())
+            }
+        }
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `POST /api/admin/pricing/openrouter/refresh` — fetch OpenRouter's public model list
+/// and replace the `openrouter_pricing_reference` snapshot with it.
+///
+/// This is a **reference/cross-check dataset, not a pricing source**. It never touches
+/// `model_pricing`, the table Aegis actually bills from — see
+/// `metering::openrouter_reference`'s module doc for why: OpenRouter is a reseller, and
+/// nothing confirms their number equals what Aegis's own direct provider account is
+/// billed. This exists so that comparison can eventually be built against real,
+/// structured data instead of nothing.
+pub async fn refresh_openrouter_reference(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    match async {
+        require_admin(&state, &headers).await?;
+
+        let rows = crate::metering::openrouter_reference::fetch(&state.http).await?;
+        let fetched = rows.len();
+        repo::replace_openrouter_pricing_reference(state.db()?, &rows).await?;
+
+        tracing::info!(models = fetched, "openrouter pricing reference refreshed");
+        Ok::<_, AegisError>(
+            Json(serde_json::json!({"fetched": fetched, "stored": fetched})).into_response(),
         )
     }
     .await
@@ -258,6 +353,8 @@ mod tests {
             system_metrics(State(state.clone()), headers.clone()).await,
             routing_intelligence(State(state.clone()), headers.clone()).await,
             pricing_table(State(state.clone()), headers.clone()).await,
+            reload_pricing(State(state.clone()), headers.clone()).await,
+            refresh_openrouter_reference(State(state.clone()), headers.clone()).await,
             audit_log(
                 State(state.clone()),
                 headers.clone(),

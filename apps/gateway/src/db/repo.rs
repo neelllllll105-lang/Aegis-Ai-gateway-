@@ -1603,6 +1603,50 @@ pub async fn upsert_pricing(pool: &PgPool, row: &PricingRow) -> Result<()> {
     tx.commit().await.map_err(AegisError::Database)
 }
 
+/// Replace the entire `openrouter_pricing_reference` snapshot with `rows`.
+///
+/// Not tenant-scoped: this table holds no organisation data, only a public third-party
+/// reference dataset every org would see the same copy of regardless.
+///
+/// A full snapshot, not an incremental upsert-and-leave-the-rest: OpenRouter can retire a
+/// model, and if this only ever inserted/updated it would keep a stale reference to a
+/// model that no longer exists forever. Deleting everything and re-inserting inside one
+/// transaction means a reader never sees a half-replaced table, and a model OpenRouter
+/// dropped disappears from here too rather than silently going stale.
+pub async fn replace_openrouter_pricing_reference(
+    pool: &PgPool,
+    rows: &[crate::metering::openrouter_reference::OpenRouterPricingRow],
+) -> Result<()> {
+    let mut tx = pool.begin().await.map_err(AegisError::Database)?;
+
+    sqlx::query("DELETE FROM openrouter_pricing_reference")
+        .execute(&mut *tx)
+        .await
+        .map_err(AegisError::Database)?;
+
+    for row in rows {
+        sqlx::query(
+            "INSERT INTO openrouter_pricing_reference
+                (model_id, display_name, context_length, input_per_mtok_mc,
+                 output_per_mtok_mc, cache_read_per_mtok_mc, cache_write_per_mtok_mc, raw)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(&row.model_id)
+        .bind(&row.display_name)
+        .bind(row.context_length)
+        .bind(row.input_per_mtok_mc)
+        .bind(row.output_per_mtok_mc)
+        .bind(row.cache_read_per_mtok_mc)
+        .bind(row.cache_write_per_mtok_mc)
+        .bind(&row.raw)
+        .execute(&mut *tx)
+        .await
+        .map_err(AegisError::Database)?;
+    }
+
+    tx.commit().await.map_err(AegisError::Database)
+}
+
 /// Organisations that made at least one request in the last `days` days.
 ///
 /// The weekly digest iterates this rather than every organisation, so a dormant account

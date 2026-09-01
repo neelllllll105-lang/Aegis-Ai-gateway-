@@ -16,7 +16,7 @@ use aegis_gateway::cache;
 use aegis_gateway::config::Config;
 use aegis_gateway::engine::bandit::RoutingBandit;
 use aegis_gateway::engine::fallback::ProviderHealth;
-use aegis_gateway::metering::pricing::PricingTable;
+use aegis_gateway::metering::pricing::{PricingSnapshot, PricingTable};
 use aegis_gateway::metrics::Metrics;
 use aegis_gateway::middleware::auth::KeyCache;
 use aegis_gateway::providers::pool::SharedKeyPool;
@@ -114,17 +114,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!(?partitions, "usage partitions ready");
 
             // Database pricing is authoritative; seed data is only a bootstrap for an
-            // empty table.
+            // empty table. A background worker (workers::pricing_refresh) re-reads this
+            // same table on an interval, so a price update made after this point does not
+            // require a restart to take effect — see docs/runbooks/pricing-update.md.
             let rows = db::repo::load_pricing(&pool).await?;
             let table = if rows.is_empty() {
                 tracing::warn!(
                     "model_pricing is empty — falling back to seed data. Run \
                      scripts/seed.sql and verify prices before billing anyone."
                 );
-                PricingTable::with_seed_data()
+                PricingSnapshot::seed()
             } else {
                 tracing::info!(models = rows.len(), "loaded pricing from database");
-                PricingTable::from_models(rows.into_iter().map(into_model).collect())
+                PricingSnapshot::from_table(PricingTable::from_models(
+                    rows.into_iter().map(Into::into).collect(),
+                ))
             };
 
             // Analytics replica, if one is configured. Reported explicitly at startup
@@ -144,11 +148,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "DATABASE_URL not set — management endpoints will return an error and \
                  usage will not be persisted."
             );
-            (None, None, PricingTable::with_seed_data())
+            (None, None, PricingSnapshot::seed())
         }
     };
 
-    let pricing = Arc::new(pricing);
+    // `ProviderEmbedder` wants a plain, owned table rather than the swappable cell — it
+    // only uses this to pick the cheapest embedding model, a choice cheap enough to be
+    // wrong for a few minutes that it is not worth threading the refresh mechanism
+    // through a second consumer. Grabbed before `pricing` is wrapped below.
+    let initial_pricing_table = Arc::clone(&pricing.table);
+    let pricing = Arc::new(std::sync::RwLock::new(pricing));
     let providers = Arc::new(ProviderRegistry::with_builtins());
     let shared_pool = Arc::new(SharedKeyPool::new());
     let http = build_http_client(&config)?;
@@ -186,7 +195,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         };
 
     let embedder: Arc<dyn cache::embed::Embedder> = Arc::new(cache::embed::ProviderEmbedder::new(
-        Arc::clone(&pricing),
+        initial_pricing_table,
         Arc::clone(&providers),
         Arc::clone(&shared_pool),
         Arc::clone(&config),
@@ -232,9 +241,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // Dependency reachability, published as a metric so an alert can fire on Redis
         // being down without anything having to poll /health and parse JSON.
         tokio::spawn(workers::health_probe::run(state.clone()));
+        // Re-reads model_pricing on an interval so a price a human just verified and
+        // committed reaches this replica within minutes, not at the next deploy — see
+        // docs/runbooks/pricing-update.md. A manual POST /api/admin/pricing/reload exists
+        // for "I don't want to wait".
+        tokio::spawn(workers::pricing_refresh::run(state.clone()));
         tracing::info!(
             workers = "usage_writer, partitions, scheduler, reconciliation, budget_alerts, \
-                       health_probe",
+                       health_probe, pricing_refresh",
             "background workers started"
         );
     } else {
@@ -270,45 +284,6 @@ fn build_http_client(config: &Config) -> Result<reqwest::Client, reqwest::Error>
         .connect_timeout(Duration::from_secs(10))
         .user_agent(concat!("aegis-gateway/", env!("CARGO_PKG_VERSION")))
         .build()
-}
-
-/// Translate a database pricing row into the in-memory form.
-fn into_model(row: db::repo::PricingRow) -> aegis_gateway::metering::pricing::ModelPricing {
-    aegis_gateway::metering::pricing::ModelPricing {
-        model_id: row.model_id,
-        provider: row.provider,
-        display_name: row.display_name,
-        tier: aegis_gateway::types::ModelTier::parse(&row.tier),
-        input_per_mtok: aegis_gateway::money::MicroCents(row.input_cost_per_mtok_mc),
-        output_per_mtok: aegis_gateway::money::MicroCents(row.output_cost_per_mtok_mc),
-        context_window: row.context_window.max(0) as u32,
-        supports_tools: row.supports_tools,
-        supports_vision: row.supports_vision,
-        supports_chat: row.supports_chat,
-        is_active: row.is_active,
-        source: row.source,
-        cache: aegis_gateway::metering::pricing::CachePricing {
-            read_bp: row.cache_read_bp.max(0) as u32,
-            write_bp: row.cache_write_bp.max(0) as u32,
-        },
-        // All three columns or none — the database CHECK enforces it, and this mirrors
-        // that so a partially-populated row degrades to flat pricing rather than to a
-        // tier priced at zero.
-        long_context: match (
-            row.long_context_threshold_tokens,
-            row.long_context_input_per_mtok_mc,
-            row.long_context_output_per_mtok_mc,
-        ) {
-            (Some(threshold), Some(input), Some(output)) if threshold > 0 => {
-                Some(aegis_gateway::metering::pricing::LongContextTier {
-                    threshold_tokens: threshold as u64,
-                    input_per_mtok: aegis_gateway::money::MicroCents(input),
-                    output_per_mtok: aegis_gateway::money::MicroCents(output),
-                })
-            }
-            _ => None,
-        },
-    }
 }
 
 /// Wait for SIGINT or SIGTERM.

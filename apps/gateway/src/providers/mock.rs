@@ -31,6 +31,21 @@ pub enum MockBehavior {
     Timeout,
     /// Fail `remaining` times, then succeed. For retry and circuit-breaker tests.
     FailThenSucceed { remaining: u32, content: String },
+    /// Stream a short text preamble, then a single tool call, matching the shape a real
+    /// model actually produces when it explains itself before calling a tool. Exists so
+    /// the multi-block Anthropic-shaped SSE reconstruction — and the OpenAI-shaped one —
+    /// can be exercised end to end, through the real route handlers, without a live
+    /// provider.
+    SucceedWithToolCall {
+        preamble: String,
+        tool_name: String,
+        /// Split across at least two streamed fragments, deliberately, so a test can
+        /// confirm fragments for the same call land on the same block/index rather than
+        /// each opening a new one.
+        argument_fragments: Vec<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+    },
 }
 
 impl Default for MockBehavior {
@@ -243,6 +258,30 @@ impl Provider for MockProvider {
                 },
                 raw: None,
             }),
+            MockBehavior::SucceedWithToolCall {
+                preamble,
+                tool_name,
+                argument_fragments,
+                input_tokens,
+                output_tokens,
+            } => Ok(NormalizedResponse {
+                id: format!("mock-{}", self.call_count()),
+                model: model.to_string(),
+                content: preamble,
+                finish_reason: Some("tool_calls".to_string()),
+                tool_calls: Some(serde_json::json!([{
+                    "id": "call_mock_0",
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": argument_fragments.concat()}
+                }])),
+                usage: TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    estimated: false,
+                    ..Default::default()
+                },
+                raw: None,
+            }),
             MockBehavior::Fail { status, message } => Err(AegisError::Provider {
                 provider: "mock".to_string(),
                 status,
@@ -279,6 +318,7 @@ impl Provider for MockProvider {
                             finish_reason: None,
                             usage: None,
                             raw: None,
+                            ..Default::default()
                         })
                     })
                     .collect();
@@ -292,6 +332,67 @@ impl Provider for MockProvider {
                         ..Default::default()
                     }),
                     raw: None,
+                    ..Default::default()
+                }));
+                Ok(Box::pin(futures::stream::iter(chunks)))
+            }
+            MockBehavior::SucceedWithToolCall {
+                preamble,
+                tool_name,
+                argument_fragments,
+                input_tokens,
+                output_tokens,
+            } => {
+                let mut chunks: Vec<Result<StreamChunk>> = preamble
+                    .split_inclusive(' ')
+                    .map(|word| {
+                        Ok(StreamChunk {
+                            delta: word.to_string(),
+                            raw: None,
+                            ..Default::default()
+                        })
+                    })
+                    .collect();
+
+                // The fragment that opens the call carries the name; every later
+                // fragment for the same call (index 0, the only call this mock ever
+                // makes) carries just the next slice of arguments — the exact shape a
+                // real streamed tool call takes, and the shape that used to be dropped
+                // entirely before this session's fix.
+                let mut fragments = argument_fragments.into_iter();
+                chunks.push(Ok(StreamChunk {
+                    tool_call: Some(crate::types::ToolCallDelta {
+                        index: 0,
+                        id: Some("call_mock_0".to_string()),
+                        name: Some(tool_name),
+                        arguments_fragment: fragments.next().unwrap_or_default(),
+                    }),
+                    raw: None,
+                    ..Default::default()
+                }));
+                for fragment in fragments {
+                    chunks.push(Ok(StreamChunk {
+                        tool_call: Some(crate::types::ToolCallDelta {
+                            index: 0,
+                            id: None,
+                            name: None,
+                            arguments_fragment: fragment,
+                        }),
+                        raw: None,
+                        ..Default::default()
+                    }));
+                }
+
+                chunks.push(Ok(StreamChunk {
+                    finish_reason: Some("tool_calls".to_string()),
+                    usage: Some(TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                        estimated: false,
+                        ..Default::default()
+                    }),
+                    raw: None,
+                    ..Default::default()
                 }));
                 Ok(Box::pin(futures::stream::iter(chunks)))
             }

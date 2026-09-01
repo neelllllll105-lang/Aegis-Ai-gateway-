@@ -8,7 +8,9 @@
 use super::sse::{is_done, SseDecoder};
 use super::{ChunkStream, Credential, Provider};
 use crate::error::{AegisError, Result};
-use crate::types::{NormalizedRequest, NormalizedResponse, StreamChunk, TokenUsage};
+use crate::types::{
+    NormalizedRequest, NormalizedResponse, StreamChunk, TokenUsage, ToolCallDelta, WireShape,
+};
 use async_trait::async_trait;
 use futures::StreamExt;
 use std::time::Duration;
@@ -169,8 +171,42 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
 
     let usage = json.get("usage").filter(|u| !u.is_null()).map(parse_usage);
 
-    // A chunk with no delta, no finish reason, and no usage carries nothing.
-    if delta.is_empty() && finish_reason.is_none() && usage.is_none() {
+    // A tool-call delta carries its payload under `delta.tool_calls`, not
+    // `delta.content` — a streamed function call is typically *all* tool-call chunks
+    // with an empty or absent `content` on every one of them. `delta` above only ever
+    // looks at `.content`, so without this the loop below is essential: every tool-call
+    // chunk in a streamed response looked exactly like the harmless role-announcement
+    // chunk the emptiness check further down is designed to drop, and was silently
+    // discarded — the client streamed a response with the tool call missing from it, no
+    // error, nothing to explain why. Found by re-deriving the real OpenAI streaming wire
+    // format from scratch while auditing this gateway's IDE/SDK compatibility claims, not
+    // from a bug report.
+    //
+    // OpenAI streams at most one tool-call fragment per chunk in practice; `id`/`name`
+    // arrive only on the fragment that opens a call, every later fragment for the same
+    // call carries just `index` and the next slice of `arguments`.
+    let tool_call = json
+        .pointer("/choices/0/delta/tool_calls/0")
+        .and_then(|tc| {
+            let index = tc.get("index").and_then(|v| v.as_u64())? as u32;
+            Some(ToolCallDelta {
+                index,
+                id: tc.get("id").and_then(|v| v.as_str()).map(str::to_string),
+                name: tc
+                    .pointer("/function/name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                arguments_fragment: tc
+                    .pointer("/function/arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+        });
+
+    // A chunk with no delta, no tool-call payload, no finish reason, and no usage
+    // carries nothing — this is what correctly drops OpenAI's role-only opening chunk.
+    if delta.is_empty() && tool_call.is_none() && finish_reason.is_none() && usage.is_none() {
         return Ok(None);
     }
 
@@ -179,6 +215,8 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
         finish_reason,
         usage,
         raw: Some(data.to_string()),
+        source_shape: Some(WireShape::OpenAiCompatible),
+        tool_call,
     }))
 }
 
@@ -600,6 +638,55 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_streamed_tool_call_chunk_is_not_silently_dropped() {
+        // Streamed function calling looks exactly like this on the wire: `content` is
+        // absent from every one of these chunks, only `tool_calls` carries data. Before
+        // the fix, this chunk was indistinguishable from the harmless role-only opener
+        // above and was dropped the same way — the client's tool call simply never
+        // arrived, no error raised anywhere.
+        let chunk = parse_stream_chunk(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}"#,
+        )
+        .unwrap()
+        .expect("a tool-call delta must be kept, not treated as content-free");
+
+        // The forwarding loop in routes/openai_compat.rs prefers `raw` verbatim over
+        // reconstructing from `delta` *when the caller connected via the OpenAI-shaped
+        // endpoint*, specifically so a shape this module doesn't model explicitly reaches
+        // that client byte-for-byte. It also has to reconstruct correctly when the
+        // caller connected via /v1/messages instead, which is what the structured
+        // `tool_call` field below exists for.
+        let raw = chunk
+            .raw
+            .clone()
+            .expect("raw payload must be preserved for passthrough");
+        assert!(raw.contains("tool_calls"));
+        assert!(raw.contains("get_weather"));
+        assert_eq!(chunk.source_shape, Some(WireShape::OpenAiCompatible));
+
+        let tc = chunk
+            .tool_call
+            .expect("must carry a normalised ToolCallDelta too");
+        assert_eq!(tc.index, 0);
+        assert_eq!(tc.id.as_deref(), Some("call_abc123"));
+        assert_eq!(tc.name.as_deref(), Some("get_weather"));
+        assert_eq!(tc.arguments_fragment, "");
+    }
+
+    #[test]
+    fn a_streamed_tool_call_argument_fragment_is_also_kept() {
+        // Arguments arrive as a stream of partial JSON string fragments across many
+        // chunks, each with an empty function.arguments except for that one fragment —
+        // exactly the shape that looked content-free under the old check.
+        let chunk = parse_stream_chunk(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"loc"}}]}}]}"#,
+        )
+        .unwrap()
+        .expect("an argument-fragment chunk must be kept");
+        assert!(chunk.raw.unwrap().contains("loc"));
     }
 
     #[test]

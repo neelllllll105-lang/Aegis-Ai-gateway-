@@ -15,7 +15,10 @@
 use super::sse::is_done;
 use super::{ChunkStream, Credential, Provider};
 use crate::error::{AegisError, Result};
-use crate::types::{Message, NormalizedRequest, NormalizedResponse, Role, StreamChunk, TokenUsage};
+use crate::types::{
+    Message, NormalizedRequest, NormalizedResponse, Role, StreamChunk, TokenUsage, ToolCallDelta,
+    WireShape,
+};
 use async_trait::async_trait;
 use std::time::Duration;
 
@@ -211,21 +214,76 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
         return Ok(None);
     };
 
+    let block_index = json.get("index").and_then(|v| v.as_u64()).map(|v| v as u32);
+
     match json.get("type").and_then(|t| t.as_str()) {
         Some("content_block_delta") => {
-            let delta = json
+            let text_delta = json
                 .pointer("/delta/text")
                 .and_then(|t| t.as_str())
                 .unwrap_or_default()
                 .to_string();
-            if delta.is_empty() {
+
+            // A tool call's arguments stream as `input_json_delta` fragments on this same
+            // event type, under `/delta/partial_json` rather than `/delta/text` — this
+            // function only ever looked at `.text`, so every fragment of a streamed tool
+            // call's arguments looked content-free and was dropped, and the block-start
+            // event that announces the call's id/name (below) fared no better: it fell
+            // into the `_ => Ok(None)` catch-all this match used to end with. Between the
+            // two, a caller streaming a tool call through Anthropic's own surface received
+            // text only, with the call itself missing entirely — no error, same silent
+            // failure mode as the OpenAI-side version of this bug. Found the same way:
+            // re-deriving the real wire format while auditing this gateway's compatibility
+            // claims, not from a report.
+            let partial_json = json.pointer("/delta/partial_json").and_then(|v| v.as_str());
+
+            if text_delta.is_empty() && partial_json.is_none() {
                 return Ok(None);
             }
+
+            let tool_call = partial_json.map(|fragment| ToolCallDelta {
+                index: block_index.unwrap_or_default(),
+                id: None,
+                name: None,
+                arguments_fragment: fragment.to_string(),
+            });
+
             Ok(Some(StreamChunk {
-                delta,
+                delta: text_delta,
                 finish_reason: None,
                 usage: None,
                 raw: Some(data.to_string()),
+                source_shape: Some(WireShape::Anthropic),
+                tool_call,
+            }))
+        }
+        // Announces a new content block. Only a `tool_use` block is meaningful here — a
+        // `text` block opening carries no id/name/content worth forwarding, the deltas
+        // that follow are what carry the actual text.
+        Some("content_block_start") => {
+            let is_tool_use =
+                json.pointer("/content_block/type").and_then(|t| t.as_str()) == Some("tool_use");
+            if !is_tool_use {
+                return Ok(None);
+            }
+            Ok(Some(StreamChunk {
+                delta: String::new(),
+                finish_reason: None,
+                usage: None,
+                raw: Some(data.to_string()),
+                source_shape: Some(WireShape::Anthropic),
+                tool_call: Some(ToolCallDelta {
+                    index: block_index.unwrap_or_default(),
+                    id: json
+                        .pointer("/content_block/id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    name: json
+                        .pointer("/content_block/name")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    arguments_fragment: String::new(),
+                }),
             }))
         }
         // The closing event carries the stop reason and the output token count. Input
@@ -238,6 +296,8 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
                 .map(|s| s.to_string()),
             usage: json.get("usage").map(parse_usage),
             raw: Some(data.to_string()),
+            source_shape: Some(WireShape::Anthropic),
+            tool_call: None,
         })),
         Some("message_start") => {
             // Input tokens are only ever reported here.
@@ -249,6 +309,8 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
                 finish_reason: None,
                 usage: Some(usage),
                 raw: Some(data.to_string()),
+                source_shape: Some(WireShape::Anthropic),
+                tool_call: None,
             }))
         }
         _ => Ok(None),
@@ -579,6 +641,55 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(chunk.delta, "Hello");
+    }
+
+    #[test]
+    fn a_tool_use_content_block_start_is_kept_with_its_id_and_name() {
+        // Before this session's fix, every content_block_start fell into the catch-all
+        // that correctly drops a text block's content-free opener — including this one,
+        // which carries the only place a streamed tool call's id and name ever appear.
+        let chunk = parse_stream_chunk(
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"get_weather","input":{}}}"#,
+        )
+        .unwrap()
+        .expect("a tool_use block-start must be kept, not dropped like a text block-start");
+
+        let tc = chunk.tool_call.expect("must carry a ToolCallDelta");
+        assert_eq!(tc.index, 1);
+        assert_eq!(tc.id.as_deref(), Some("toolu_01"));
+        assert_eq!(tc.name.as_deref(), Some("get_weather"));
+        assert_eq!(tc.arguments_fragment, "");
+        assert_eq!(chunk.source_shape, Some(WireShape::Anthropic));
+    }
+
+    #[test]
+    fn a_text_content_block_start_is_still_dropped() {
+        // The fix must not turn every content_block_start into a kept event — only the
+        // tool_use ones carry anything worth forwarding.
+        assert!(parse_stream_chunk(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn a_tool_use_argument_fragment_is_kept_even_with_no_text() {
+        // input_json_delta carries its payload under `delta.partial_json`, not
+        // `delta.text` — the field this function's `delta` extraction has always looked
+        // at. Before the fix, every fragment of a streamed tool call's arguments looked
+        // exactly as content-free as a chunk carrying nothing at all.
+        let chunk = parse_stream_chunk(
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"loc"}}"#,
+        )
+        .unwrap()
+        .expect("a partial_json fragment must be kept");
+
+        assert_eq!(chunk.delta, "", "no text delta on a tool-argument fragment");
+        let tc = chunk.tool_call.expect("must carry a ToolCallDelta");
+        assert_eq!(tc.index, 1);
+        assert_eq!(tc.arguments_fragment, "{\"loc");
+        assert!(tc.id.is_none(), "a continuing fragment names no id");
     }
 
     #[test]

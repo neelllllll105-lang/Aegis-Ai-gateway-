@@ -469,4 +469,53 @@ mod tests {
         assert!(!verify_password("anything", "not-a-hash"));
         assert!(!verify_password("anything", "$argon2id$garbage"));
     }
+
+    /// `scripts/seed.sql`'s hardcoded hash for `dev@aegis.local` must actually verify
+    /// against the password its own comment says it is.
+    ///
+    /// It didn't, for as long as the file existed: the literal had the correct shape
+    /// (`$argon2id$v=19$m=...$salt$hash`, valid base64, right length) but was hand-typed
+    /// rather than produced by ever actually calling `hash_password`, so it was fabricated
+    /// text that merely looked like a real hash — `dev@aegis.local` had never been able to
+    /// log in with the password its own seed file documented. No test read the SQL file at
+    /// all, so nothing caught it until a real login attempt against a real database did,
+    /// this session. This test is what should have existed from the start: read the exact
+    /// same file a human would edit, extract the exact same hash a real login checks
+    /// against, and assert the promise the comment makes actually holds.
+    #[test]
+    fn seed_sql_dev_account_hash_verifies_against_its_documented_password() {
+        let seed_sql_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/seed.sql");
+        let seed_sql = std::fs::read_to_string(&seed_sql_path)
+            .unwrap_or_else(|e| panic!("could not read {}: {e}", seed_sql_path.display()));
+
+        // Find the hash by its own unmistakable shape, anchored to the start of a SQL
+        // string literal (`'$argon2id$`) rather than a bare `$argon2id$` — a comment
+        // above this exact INSERT used to illustrate the hash's shape as prose
+        // (`($argon2id$v=19$m=...$salt$hash)`) and a bare search matched *that* first,
+        // extracting eleven characters of English instead of a hash. Anchoring on the
+        // opening quote is what a real SQL string literal always has and free-form
+        // comment prose never does.
+        let insert_start = seed_sql
+            .find("'dev@aegis.local'")
+            .expect("seed.sql no longer seeds dev@aegis.local at all");
+        let after_email = &seed_sql[insert_start..];
+        let hash_start = after_email
+            .find("'$argon2id$")
+            .expect("no quoted $argon2id$ hash literal found after dev@aegis.local in seed.sql")
+            + 1; // past the opening quote itself
+        let hash_region = &after_email[hash_start..];
+        let hash_end = hash_region
+            .find('\'')
+            .expect("the $argon2id$ hash literal in seed.sql is not closed by a following quote");
+        let hash = &hash_region[..hash_end];
+
+        assert!(
+            verify_password("aegis-development-password", hash),
+            "scripts/seed.sql's hash for dev@aegis.local does not verify against \
+             \"aegis-development-password\" — the documented dev login is broken. \
+             Regenerate it with crypto::hash_password(\"aegis-development-password\"), \
+             never hand-write one."
+        );
+    }
 }

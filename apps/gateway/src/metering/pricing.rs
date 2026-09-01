@@ -16,7 +16,9 @@
 
 use crate::money::MicroCents;
 use crate::types::ModelTier;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Marker written into `source` for any price that has not been re-verified.
 ///
@@ -1076,6 +1078,112 @@ impl PricingTable {
         table.add_alias("deepseek-chat", "deepseek/deepseek-v4-flash");
         table.add_alias("deepseek-reasoner", "deepseek/deepseek-v4-pro");
         table
+    }
+}
+
+/// Where the currently-loaded [`PricingTable`] came from.
+///
+/// Purely informational — nothing branches on it — but it is the difference between an
+/// admin console that can say "this is the seed data, nobody has verified a real price
+/// yet" and one that can only say a model id and a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PricingSource {
+    /// Loaded from the `model_pricing` table.
+    Database,
+    /// No database configured, or the table was empty: serving the hardcoded
+    /// development bootstrap in this file instead.
+    SeedFallback,
+}
+
+impl PricingSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PricingSource::Database => "database",
+            PricingSource::SeedFallback => "seed_fallback",
+        }
+    }
+}
+
+/// A pricing table plus when and where it was loaded from.
+///
+/// [`AppState::pricing`](crate::AppState::pricing) hands out the `table` alone for the
+/// hot path, where nothing needs the metadata. This full snapshot exists for the two
+/// places that do: the admin console's staleness banner, and the periodic refresh worker
+/// deciding whether a reload actually changed anything.
+#[derive(Debug, Clone)]
+pub struct PricingSnapshot {
+    pub table: Arc<PricingTable>,
+    pub loaded_at: DateTime<Utc>,
+    pub source: PricingSource,
+}
+
+impl PricingSnapshot {
+    /// The development bootstrap: seed data, timestamped now.
+    pub fn seed() -> PricingSnapshot {
+        PricingSnapshot {
+            table: Arc::new(PricingTable::with_seed_data()),
+            loaded_at: Utc::now(),
+            source: PricingSource::SeedFallback,
+        }
+    }
+
+    /// Wrap an already-built table, timestamped now, tagged as database-sourced.
+    ///
+    /// For call sites building a specific, hand-assembled table rather than loading
+    /// either real source — `PricingSource::Database` is the more honest tag for those
+    /// than `SeedFallback`, since a hand-built table (a test fixture, a mock-provider-only
+    /// table) is standing in for "known, deliberately chosen data", not "nobody has
+    /// checked this yet".
+    pub fn from_table(table: PricingTable) -> PricingSnapshot {
+        PricingSnapshot {
+            table: Arc::new(table),
+            loaded_at: Utc::now(),
+            source: PricingSource::Database,
+        }
+    }
+}
+
+/// Converts one `model_pricing` row into the in-memory pricing shape.
+///
+/// The one place this conversion happens, so the periodic refresh worker and the
+/// once-at-startup load in `main.rs` cannot drift apart from each other.
+impl From<crate::db::repo::PricingRow> for ModelPricing {
+    fn from(row: crate::db::repo::PricingRow) -> ModelPricing {
+        ModelPricing {
+            model_id: row.model_id,
+            provider: row.provider,
+            display_name: row.display_name,
+            tier: ModelTier::parse(&row.tier),
+            input_per_mtok: MicroCents(row.input_cost_per_mtok_mc),
+            output_per_mtok: MicroCents(row.output_cost_per_mtok_mc),
+            context_window: row.context_window.max(0) as u32,
+            supports_tools: row.supports_tools,
+            supports_vision: row.supports_vision,
+            supports_chat: row.supports_chat,
+            is_active: row.is_active,
+            source: row.source,
+            cache: CachePricing {
+                read_bp: row.cache_read_bp.max(0) as u32,
+                write_bp: row.cache_write_bp.max(0) as u32,
+            },
+            // All three columns or none — the database CHECK enforces it, and this
+            // mirrors that so a partially-populated row degrades to flat pricing rather
+            // than to a tier priced at zero.
+            long_context: match (
+                row.long_context_threshold_tokens,
+                row.long_context_input_per_mtok_mc,
+                row.long_context_output_per_mtok_mc,
+            ) {
+                (Some(threshold), Some(input), Some(output)) if threshold > 0 => {
+                    Some(LongContextTier {
+                        threshold_tokens: threshold as u64,
+                        input_per_mtok: MicroCents(input),
+                        output_per_mtok: MicroCents(output),
+                    })
+                }
+                _ => None,
+            },
+        }
     }
 }
 

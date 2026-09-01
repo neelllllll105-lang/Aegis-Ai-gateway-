@@ -298,8 +298,56 @@ pub struct NormalizedResponse {
     pub raw: Option<serde_json::Value>,
 }
 
-/// One chunk of a streaming response.
+/// Which wire format a [`StreamChunk`]'s `raw` field is written in.
+///
+/// This gateway serves two streaming API surfaces — OpenAI-shaped
+/// (`/v1/chat/completions`) and Anthropic-shaped (`/v1/messages`) — and the provider the
+/// router actually selects is independent of which surface the caller used: an
+/// OpenAI-shaped request can be served by the Anthropic adapter, an Anthropic-shaped one
+/// by an OpenAI-compatible adapter, whenever that is the cheaper or better-fit model.
+/// `raw` is always the literal bytes the *provider* sent, in the *provider's* wire format
+/// — forwarding it verbatim is only correct when that happens to match the format the
+/// caller's own client library expects. Everywhere else, the normalised `delta`/
+/// `tool_call`/`finish_reason` fields are what has to drive reconstruction instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireShape {
+    /// OpenAI, and everything that speaks its wire format verbatim: OpenRouter,
+    /// DeepSeek, Mistral, Groq, Moonshot, any custom OpenAI-compatible endpoint.
+    OpenAiCompatible,
+    Anthropic,
+    /// Google Gemini's own format — not verbatim-forwardable to either of the other two.
+    Google,
+}
+
+/// One fragment of a streamed tool/function call.
+///
+/// Every provider's streaming tool-call wire format is shaped differently — OpenAI
+/// indexes calls within a single `delta.tool_calls` array; Anthropic gives each call its
+/// own numbered content block with a start/delta/stop lifecycle; Gemini sends a
+/// `functionCall` part, usually whole rather than incrementally. This is the shape the
+/// engine normalises all three into, so either API surface this gateway serves can render
+/// a tool call back out in its own wire format, regardless of which provider actually
+/// produced it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallDelta {
+    /// Which call this fragment belongs to, stable across an entire streamed response —
+    /// OpenAI's own `index`, or a position assigned while translating a provider (like
+    /// Anthropic) that does not natively index tool calls the same way.
+    pub index: u32,
+    /// Present only on the fragment that announces a new call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A fragment of the arguments/input JSON. An empty string is a real, valid value —
+    /// some providers send an empty first fragment purely to announce the call before any
+    /// argument text exists yet.
+    #[serde(default)]
+    pub arguments_fragment: String,
+}
+
+/// One chunk of a streaming response.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StreamChunk {
     /// Incremental text.
     pub delta: String,
@@ -308,9 +356,17 @@ pub struct StreamChunk {
     /// Usage, present only on the final chunk for most providers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<TokenUsage>,
-    /// The raw SSE `data:` payload, for byte-faithful passthrough.
+    /// The raw SSE `data:` payload, in `source_shape`'s wire format — safe to forward
+    /// verbatim only when that matches the caller's own surface. See [`WireShape`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+    /// The wire format `raw` is written in. `None` only for a chunk with no `raw` at all
+    /// (there is nothing to guard, so nothing to shape-check).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_shape: Option<WireShape>,
+    /// Present when this chunk is (also) carrying a fragment of a tool/function call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<ToolCallDelta>,
 }
 
 /// Capability tier of a model. Ordered: `Cheap < Mid < Premium < Frontier`.
