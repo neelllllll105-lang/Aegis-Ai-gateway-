@@ -220,7 +220,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to load ONNX model, falling back to provider embedder");
                     Arc::new(cache::embed::ProviderEmbedder::new(
-                        Arc::clone(&pricing),
+                        Arc::clone(&initial_pricing_table),
                         Arc::clone(&providers),
                         Arc::clone(&shared_pool),
                         Arc::clone(&config),
@@ -236,7 +236,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "local ONNX model files not found, falling back to provider embedder"
             );
             Arc::new(cache::embed::ProviderEmbedder::new(
-                Arc::clone(&pricing),
+                Arc::clone(&initial_pricing_table),
                 Arc::clone(&providers),
                 Arc::clone(&shared_pool),
                 Arc::clone(&config),
@@ -248,7 +248,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(not(feature = "local-embeddings"))]
     let embedder: Arc<dyn cache::embed::Embedder> = Arc::new(cache::embed::ProviderEmbedder::new(
-        initial_pricing_table,
+        Arc::clone(&initial_pricing_table),
         Arc::clone(&providers),
         Arc::clone(&shared_pool),
         Arc::clone(&config),
