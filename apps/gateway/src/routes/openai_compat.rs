@@ -733,11 +733,13 @@ async fn execute_with_fallback(
                         .record_circuit_change(provider.id(), state_after.as_str());
                 }
 
-                // A 4xx from the provider is the caller's problem — the same request will
-                // fail identically on every other model, so failing over would just burn
-                // three providers to return the same error.
-                if !fallback::is_retryable(&e) && !matches!(e, AegisError::Unauthorized(_)) {
-                    return Err(e);
+                // Client-level 400 Bad Request will fail identically everywhere; other errors
+                // (e.g. 404 model not found, 401 unauthorized, 429 rate limited, 5xx) should
+                // proceed down the fallback chain to alternative providers and models.
+                if let AegisError::Provider { status, .. } = &e {
+                    if *status == 400 {
+                        return Err(e);
+                    }
                 }
                 last_error = Some(e);
             }
@@ -871,10 +873,12 @@ async fn open_stream_with_fallback(
                         continue;
                     }
                     record_provider_failure(state, provider.id(), &e);
-                    // A 4xx will fail identically everywhere; failing over would burn
-                    // three providers to return the same error.
-                    if !fallback::is_retryable(&e) && !matches!(e, AegisError::Unauthorized(_)) {
-                        return Err(e);
+                    // Client-level 400 Bad Request will fail identically everywhere; other errors
+                    // should proceed down the fallback chain.
+                    if let AegisError::Provider { status, .. } = &e {
+                        if *status == 400 {
+                            return Err(e);
+                        }
                     }
                     last_error = Some(e);
                     break;
