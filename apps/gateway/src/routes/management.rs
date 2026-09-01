@@ -1333,6 +1333,7 @@ pub async fn test_provider(
         if let Ok(res) = req.send().await {
             if res.status().is_success() {
                 if let Ok(json) = res.json::<serde_json::Value>().await {
+                    // Standard OpenAI format: { "data": [ { "id": "..." } ] }
                     if let Some(arr) = json.get("data").and_then(|d| d.as_array()) {
                         for item in arr {
                             if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
@@ -1341,8 +1342,23 @@ pub async fn test_provider(
                                     && !id.contains("tts")
                                     && !id.contains("guard")
                                     && !id.contains("moderation")
+                                    && !id.contains("dall-e")
                                 {
                                     candidates.push(id.to_string());
+                                }
+                            }
+                        }
+                    }
+                    // Google format: { "models": [ { "name": "models/..." } ] }
+                    if let Some(arr) = json.get("models").and_then(|d| d.as_array()) {
+                        for item in arr {
+                            if let Some(name) = item.get("name").and_then(|i| i.as_str()) {
+                                let bare = name.strip_prefix("models/").unwrap_or(name);
+                                if !bare.contains("embed")
+                                    && !bare.contains("aqa")
+                                    && !bare.contains("imagen")
+                                {
+                                    candidates.push(bare.to_string());
                                 }
                             }
                         }
