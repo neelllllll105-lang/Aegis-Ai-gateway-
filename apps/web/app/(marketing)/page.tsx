@@ -28,7 +28,7 @@ export default function HomePage() {
               className="relative flex h-24 w-24 sm:h-28 sm:w-28 items-center justify-center rounded-3xl bg-[var(--color-surface2)] border-2 border-[var(--color-ink)] shadow-[6px_6px_0_var(--shadow-color)] transition-transform hover:scale-105"
               style={{ filter: "drop-shadow(0 10px 25px rgba(168,52,30,.35))" }}
             >
-              <AegisLogo className="w-14 h-14 text-[var(--color-ink)]" />
+              <AegisLogo className="w-14 h-14 text-[var(--color-accent)] transition-transform group-hover:scale-105" />
             </div>
           </div>
 

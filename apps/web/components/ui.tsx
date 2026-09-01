@@ -11,26 +11,45 @@ export function AegisLogo({ className = "w-6 h-6" }: { className?: string }) {
     <svg
       viewBox="0 0 24 24"
       fill="none"
+      xmlns="http://www.w3.org/2000/svg"
       className={className}
       aria-hidden="true"
     >
+      {/* Outer Protective Aegis Shield */}
       <path
-        d="M12 2L3.5 5.5V11C3.5 16.5 7.1 21.3 12 22.8C16.9 21.3 20.5 16.5 20.5 11V5.5L12 2Z"
+        d="M12 2.2L4.2 5.4V11.6C4.2 16.9 7.5 21.6 12 23C16.5 21.6 19.8 16.9 19.8 11.6V5.4L12 2.2Z"
         stroke="currentColor"
-        strokeWidth="1.8"
+        strokeWidth="1.7"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+      {/* Right Shading Facet for Chiseled Editorial Depth */}
       <path
-        d="M12 6.8L6.5 9.2V12.8C6.5 16.2 8.8 19.3 12 20.2C15.2 19.3 17.5 16.2 17.5 12.8V9.2L12 6.8Z"
+        d="M12 2.5L19.5 5.6V11.6C19.5 16.6 16.3 21.2 12 22.7V2.5Z"
         fill="currentColor"
-        fillOpacity="0.25"
+        fillOpacity="0.12"
+      />
+      {/* Stylized Architectural 'A' / Gateway Keystone */}
+      <path
+        d="M12 6.5L7.2 16.8H9.6L10.8 14.1H13.2L14.4 16.8H16.8L12 6.5Z"
+        fill="currentColor"
+        fillOpacity="0.22"
         stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
+        strokeWidth="1.3"
         strokeLinejoin="round"
       />
-      <circle cx="12" cy="13" r="2" fill="currentColor" />
+      {/* Inner Apex Portal */}
+      <path
+        d="M12 9.4L12.8 12.3H11.2L12 9.4Z"
+        fill="currentColor"
+      />
+      {/* Gateway Nexus Node */}
+      <circle
+        cx="12"
+        cy="19"
+        r="1.15"
+        fill="currentColor"
+      />
     </svg>
   );
 }
