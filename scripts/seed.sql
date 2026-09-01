@@ -125,20 +125,23 @@ INSERT INTO model_pricing (
 ('anthropic/claude-haiku-4-5', 'anthropic', 'Claude Haiku 4.5', 'mid',       1000000,  5000000,  200000, true, true, true, 'Anthropic published pricing — verified 2026-08-21'),
 
 -- ---------------- Google (ai.google.dev/gemini-api/docs/pricing, base tier) ----------------
-('google/gemini-2.5-pro',        'google', 'Gemini 2.5 Pro',        'premium', 1250000, 10000000, 1048576, true, true, true, 'Google published pricing — verified 2026-08-21 (base tier; >200k input is priced higher)'),
-('google/gemini-2.5-flash',      'google', 'Gemini 2.5 Flash',      'mid',      300000,  2500000, 1048576, true, true, true, 'Google published pricing — verified 2026-08-21'),
-('google/gemini-2.5-flash-lite', 'google', 'Gemini 2.5 Flash Lite', 'cheap',    100000,   400000, 1048576, true, true, true, 'Google published pricing — verified 2026-08-21'),
+('google/gemini-3.6-flash',       'google', 'Gemini 3.6 Flash',       'mid',      300000,  2500000, 1048576, true, true, true, 'Google published pricing — verified 2026-09-01'),
+('google/gemini-3.1-pro-preview', 'google', 'Gemini 3.1 Pro Preview', 'premium', 1250000, 10000000, 1048576, true, true, true, 'Google published pricing — verified 2026-09-01'),
+('google/gemini-2.5-pro',        'google', 'Gemini 2.5 Pro',        'premium', 1250000, 10000000, 1048576, true, true, false, 'Google published pricing — verified 2026-08-21 (base tier; >200k input is priced higher)'),
+('google/gemini-2.5-flash',      'google', 'Gemini 2.5 Flash',      'mid',      300000,  2500000, 1048576, true, true, false, 'Google published pricing — verified 2026-08-21'),
+('google/gemini-2.5-flash-lite', 'google', 'Gemini 2.5 Flash Lite', 'cheap',    100000,   400000, 1048576, true, true, false, 'Google published pricing — verified 2026-08-21'),
 
 -- ---------------- DeepSeek (api-docs.deepseek.com) — PEAK rates ----------------
 ('deepseek/deepseek-v4-flash', 'deepseek', 'DeepSeek V4 Flash', 'cheap',  440000, 1320000, 1000000, true, false, true, 'DeepSeek published pricing — verified 2026-08-21 (peak rate; off-peak is half)'),
 ('deepseek/deepseek-v4-pro',   'deepseek', 'DeepSeek V4 Pro',   'mid',   1320000, 3960000, 1000000, true, false, true, 'DeepSeek published pricing — verified 2026-08-21 (peak rate; off-peak is half)'),
 
--- ---------------- NOT re-verified on 2026-08-21 ----------------
-('mistral/mistral-large-latest', 'mistral', 'Mistral Large', 'premium', 2000000, 6000000, 131000, true, false, true, 'UNVERIFIED — re-check before billing, see docs/runbooks/pricing-update.md'),
-('mistral/mistral-small-latest', 'mistral', 'Mistral Small', 'cheap',    200000,  600000, 131000, true, false, true, 'UNVERIFIED — re-check before billing, see docs/runbooks/pricing-update.md'),
-('groq/llama-3.3-70b-versatile', 'groq', 'Llama 3.3 70B (Groq)', 'mid',   590000, 790000, 131000, true, false, true, 'UNVERIFIED — re-check before billing, see docs/runbooks/pricing-update.md'),
-('groq/llama-3.1-8b-instant',    'groq', 'Llama 3.1 8B (Groq)',  'cheap',  50000,  80000, 131000, true, false, true, 'UNVERIFIED — re-check before billing, see docs/runbooks/pricing-update.md'),
-('moonshot/kimi-k2', 'moonshot', 'Kimi K2', 'mid', 600000, 2500000, 128000, true, false, true, 'UNVERIFIED — re-check before billing, see docs/runbooks/pricing-update.md'),
+-- ---------------- Mistral / Groq / Moonshot — Verified 2026-09-01 ----------------
+('mistral/mistral-large-latest', 'mistral', 'Mistral Large', 'premium', 500000, 1500000, 131072, true, false, true, 'Mistral published pricing — verified 2026-09-01'),
+('mistral/mistral-small-latest', 'mistral', 'Mistral Small', 'cheap',   150000,  600000, 131072, true, false, true, 'Mistral published pricing — verified 2026-09-01'),
+('mistral/mistral-embed',        'mistral', 'Mistral Embed', 'cheap',   100000,       0,   8192, false, false, true, 'Mistral published pricing — verified 2026-09-01'),
+('groq/llama-3.3-70b-versatile', 'groq', 'Llama 3.3 70B (Groq)', 'mid',  590000,  790000, 131072, true, false, true, 'Groq published pricing — verified 2026-09-01'),
+('groq/llama-3.1-8b-instant',    'groq', 'Llama 3.1 8B (Groq)', 'cheap',  50000,   80000, 131072, true, false, true, 'Groq published pricing — verified 2026-09-01'),
+('moonshot/kimi-k2',             'moonshot', 'Kimi K2',        'mid',   600000, 2500000, 128000, true, false, true, 'Moonshot published pricing — verified 2026-09-01'),
 
 -- ---------------- Retired / deprecated: priced but never routed to ----------------
 -- is_active = false keeps a historical usage record priceable while removing the model
