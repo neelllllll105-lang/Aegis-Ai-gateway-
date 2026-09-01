@@ -1314,12 +1314,51 @@ pub async fn test_provider(
             None => crate::providers::Credential::new(key),
         };
 
-        let candidates: Vec<&str> = provider
-            .supported_models()
-            .iter()
-            .copied()
-            .filter(|m| !m.contains("embed"))
-            .collect();
+        let mut candidates: Vec<String> = Vec::new();
+
+        // 1. Try querying the provider's live /models endpoint to discover the account's accessible active models
+        let base_url = credential
+            .base_url
+            .as_deref()
+            .unwrap_or_else(|| provider.default_base_url());
+        let models_url = format!("{}/models", base_url.trim_end_matches('/'));
+        let mut req = state
+            .http
+            .get(&models_url)
+            .timeout(std::time::Duration::from_secs(5));
+        for (k, v) in provider.auth_headers(&live) {
+            req = req.header(k, v);
+        }
+
+        if let Ok(res) = req.send().await {
+            if res.status().is_success() {
+                if let Ok(json) = res.json::<serde_json::Value>().await {
+                    if let Some(arr) = json.get("data").and_then(|d| d.as_array()) {
+                        for item in arr {
+                            if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
+                                if !id.contains("embed")
+                                    && !id.contains("whisper")
+                                    && !id.contains("tts")
+                                    && !id.contains("guard")
+                                    && !id.contains("moderation")
+                                {
+                                    candidates.push(id.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Fall back to static supported models if /models was not supported
+        if candidates.is_empty() {
+            for m in provider.supported_models() {
+                if !m.contains("embed") {
+                    candidates.push(m.to_string());
+                }
+            }
+        }
 
         let mut ok = false;
         let mut last_err = None;
