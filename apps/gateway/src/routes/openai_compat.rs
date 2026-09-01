@@ -101,6 +101,12 @@ impl PipelineOutcome {
         );
         push("x-aegis-cache", self.cache.as_str().to_string());
         push("x-aegis-routing", self.routing_reason.as_str().to_string());
+        if self.tokens_saved_by_compression > 0 {
+            push(
+                "x-aegis-compression-tokens-saved",
+                self.tokens_saved_by_compression.to_string(),
+            );
+        }
         if !self.explanation.is_empty() {
             // Header values must be printable ASCII on one line, so the reasons are joined
             // with a separator and anything else is dropped rather than producing a header

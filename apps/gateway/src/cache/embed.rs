@@ -24,7 +24,7 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::metering::pricing::PricingTable;
 use crate::providers::pool::SharedKeyPool;
-use crate::providers::ProviderRegistry;
+use crate::providers::{Credential, ProviderRegistry};
 
 /// Generates an embedding for cache-lookup purposes.
 #[async_trait]
@@ -36,13 +36,20 @@ pub trait Embedder: Send + Sync {
 }
 
 /// The real implementation: calls out to whichever provider has the cheapest embedding
-/// model in the pricing table, using Aegis's own pooled credential.
+/// model in the pricing table. Prefers Aegis's own pooled credential (`SharedKeyPool`),
+/// but falls back to a BYOK credential from the database when no pooled key exists —
+/// the common case in local development, where the operator's own API key stored in the
+/// dashboard is the only credential available.
 pub struct ProviderEmbedder {
     pricing: Arc<PricingTable>,
     providers: Arc<ProviderRegistry>,
     shared_pool: Arc<SharedKeyPool>,
     config: Arc<Config>,
     http: reqwest::Client,
+    /// Optional database pool for BYOK credential fallback.
+    db: Option<sqlx::PgPool>,
+    /// Master key for decrypting stored credentials.
+    master_key: [u8; 32],
 }
 
 impl ProviderEmbedder {
@@ -54,14 +61,49 @@ impl ProviderEmbedder {
         shared_pool: Arc<SharedKeyPool>,
         config: Arc<Config>,
         http: reqwest::Client,
+        db: Option<sqlx::PgPool>,
     ) -> ProviderEmbedder {
+        let master_key = config.master_key;
         ProviderEmbedder {
             pricing,
             providers,
             shared_pool,
             config,
             http,
+            db,
+            master_key,
         }
+    }
+
+    /// Resolve a credential for the given provider: shared pool first, BYOK fallback.
+    async fn resolve_credential(&self, provider_id: &str) -> Option<Credential> {
+        // Try the shared pool first (production path).
+        if let Ok(cred) = self.shared_pool.next_credential(&self.config, provider_id) {
+            return Some(cred);
+        }
+
+        // Fallback: look for any BYOK credential in the database.
+        let pool = self.db.as_ref()?;
+        let rows = sqlx::query_as::<_, (Vec<u8>, Option<String>)>(
+            "SELECT encrypted_key, base_url FROM provider_credentials \
+             WHERE provider = $1 ORDER BY is_default DESC, created_at LIMIT 1",
+        )
+        .bind(provider_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()?;
+
+        let plaintext = crate::crypto::decrypt(&self.master_key, &rows.0).ok()?;
+        let key = String::from_utf8(plaintext).ok()?;
+        tracing::debug!(
+            provider = provider_id,
+            "using BYOK credential for embedding (no shared pool key configured)"
+        );
+        Some(match rows.1 {
+            Some(base_url) => Credential::with_base_url(key, base_url),
+            None => Credential::new(key),
+        })
     }
 }
 
@@ -72,44 +114,65 @@ impl Embedder for ProviderEmbedder {
             return None;
         }
 
-        let model = self.pricing.cheapest_embedding_model()?.model_id.clone();
-        let provider = self.providers.for_model(&model)?;
-        let credential = self
-            .shared_pool
-            .next_credential(&self.config, provider.id())
-            .ok()?;
+        // Try all embedding models in order of cost, using whichever has an available credential.
+        let embedding_models: Vec<_> = self.pricing.all()
+            .filter(|m| !m.supports_chat)
+            .collect();
 
-        let base = credential
-            .base_url
-            .as_deref()
-            .unwrap_or_else(|| provider.default_base_url());
-        let url = format!("{}/embeddings", base.trim_end_matches('/'));
-        let bare = model.split_once('/').map(|(_, m)| m).unwrap_or(&model);
+        for model_pricing in &embedding_models {
+            let model = &model_pricing.model_id;
+            let provider = match self.providers.for_model(model) {
+                Some(p) => p,
+                None => continue,
+            };
 
-        let mut builder = self.http.post(&url).json(&serde_json::json!({
-            "model": bare,
-            "input": text,
-        }));
-        for (name, value) in provider.auth_headers(&credential) {
-            builder = builder.header(name, value);
-        }
+            let credential = match self.resolve_credential(provider.id()).await {
+                Some(c) => c,
+                None => continue,
+            };
 
-        let response = match builder.send().await {
-            Ok(response) => response,
-            Err(e) => {
-                tracing::warn!(error = %e, "embedding call failed, skipping semantic cache for this request");
-                return None;
+            let base = credential
+                .base_url
+                .as_deref()
+                .unwrap_or_else(|| provider.default_base_url());
+            let url = format!("{}/embeddings", base.trim_end_matches('/'));
+            let bare = model.split_once('/').map(|(_, m)| m).unwrap_or(model);
+
+            let mut builder = self.http.post(&url).json(&serde_json::json!({
+                "model": bare,
+                "input": text,
+            }));
+            for (name, value) in provider.auth_headers(&credential) {
+                builder = builder.header(name, value);
             }
-        };
-        if !response.status().is_success() {
-            tracing::warn!(status = %response.status(), "embedding provider returned an error, skipping semantic cache");
-            return None;
+
+            let response = match builder.send().await {
+                Ok(response) => response,
+                Err(e) => {
+                    tracing::warn!(error = %e, %model, "embedding call failed, trying next model");
+                    continue;
+                }
+            };
+            if !response.status().is_success() {
+                tracing::warn!(status = %response.status(), %model, "embedding provider returned an error, trying next model");
+                continue;
+            }
+
+            let json: serde_json::Value = match response.json().await {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+            if let Some(embedding) = extract_embedding(&json) {
+                tracing::debug!(%model, dims = embedding.len(), "embedding generated for semantic cache");
+                return Some(embedding);
+            }
         }
 
-        let json: serde_json::Value = response.json().await.ok()?;
-        extract_embedding(&json)
+        tracing::debug!("no embedding provider available — semantic cache skipped");
+        None
     }
 }
+
 
 /// Pull the first embedding vector out of an OpenAI-shaped `/embeddings` response.
 ///

@@ -1314,30 +1314,113 @@ pub async fn test_provider(
             None => crate::providers::Credential::new(key),
         };
 
-        let model = provider
-            .supported_models()
-            .first()
-            .copied()
-            .unwrap_or("gpt-4o-mini");
-        let probe = crate::types::NormalizedRequest {
-            max_tokens: Some(1),
-            ..crate::types::NormalizedRequest::simple(model, "ping")
-        };
+        let mut candidates: Vec<String> = Vec::new();
 
-        let result = provider
-            .chat(
-                &state.http,
-                &probe,
-                model,
-                &live,
-                std::time::Duration::from_secs(15),
-                // A one-shot connectivity probe, never retried — nothing here can double
-                // charge, so no key is needed.
-                None,
-            )
-            .await;
+        // 1. Try querying the provider's live /models endpoint to discover the account's accessible active models
+        let base_url = credential
+            .base_url
+            .as_deref()
+            .unwrap_or_else(|| provider.default_base_url());
+        let models_url = format!("{}/models", base_url.trim_end_matches('/'));
+        let mut req = state
+            .http
+            .get(&models_url)
+            .timeout(std::time::Duration::from_secs(5));
+        for (k, v) in provider.auth_headers(&live) {
+            req = req.header(k, v);
+        }
 
-        let ok = result.is_ok();
+        if let Ok(res) = req.send().await {
+            if res.status().is_success() {
+                if let Ok(json) = res.json::<serde_json::Value>().await {
+                    // Standard OpenAI format: { "data": [ { "id": "..." } ] }
+                    if let Some(arr) = json.get("data").and_then(|d| d.as_array()) {
+                        for item in arr {
+                            if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
+                                if !id.contains("embed")
+                                    && !id.contains("whisper")
+                                    && !id.contains("tts")
+                                    && !id.contains("guard")
+                                    && !id.contains("moderation")
+                                    && !id.contains("dall-e")
+                                {
+                                    candidates.push(id.to_string());
+                                }
+                            }
+                        }
+                    }
+                    // Google format: { "models": [ { "name": "models/..." } ] }
+                    if let Some(arr) = json.get("models").and_then(|d| d.as_array()) {
+                        for item in arr {
+                            if let Some(name) = item.get("name").and_then(|i| i.as_str()) {
+                                let bare = name.strip_prefix("models/").unwrap_or(name);
+                                if !bare.contains("embed")
+                                    && !bare.contains("aqa")
+                                    && !bare.contains("imagen")
+                                {
+                                    candidates.push(bare.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Fall back to static supported models if /models was not supported
+        if candidates.is_empty() {
+            for m in provider.supported_models() {
+                if !m.contains("embed") {
+                    candidates.push(m.to_string());
+                }
+            }
+        }
+
+        let mut ok = false;
+        let mut last_err = None;
+
+        for model in &candidates {
+            let probe = crate::types::NormalizedRequest {
+                max_tokens: Some(10),
+                ..crate::types::NormalizedRequest::simple(model, "ping")
+            };
+
+            let result = provider
+                .chat(
+                    &state.http,
+                    &probe,
+                    model,
+                    &live,
+                    std::time::Duration::from_secs(10),
+                    None,
+                )
+                .await;
+
+            tracing::info!(
+                provider = %credential.provider,
+                model = %model,
+                ok = result.is_ok(),
+                "credential test probe attempt"
+            );
+
+            match result {
+                Ok(_) => {
+                    ok = true;
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        provider = %credential.provider,
+                        model = %model,
+                        error = %e,
+                        "credential test probe model failed"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+
         let _ = repo::record_credential_test(pool, context.org_id, credential_id, ok).await;
 
         Ok::<_, AegisError>(respond(
@@ -1345,7 +1428,7 @@ pub async fn test_provider(
             serde_json::json!({
                 "ok": ok,
                 "provider": credential.provider,
-                "error": result.err().map(|e| e.to_string()),
+                "error": last_err.map(|e| e.to_string()),
             }),
         ))
     }

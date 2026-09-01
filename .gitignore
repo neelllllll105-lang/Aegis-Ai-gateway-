@@ -55,3 +55,7 @@ coverage/
 
 # Local infra volumes
 infra/data/
+
+# Local model weights (binary files)
+models/**/*.onnx
+models/**/*.bin

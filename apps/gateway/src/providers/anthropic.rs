@@ -33,11 +33,20 @@ pub const DEFAULT_MAX_TOKENS: u32 = 4_096;
 
 /// Models served by Anthropic.
 const ANTHROPIC_MODELS: &[&str] = &[
-    "claude-opus-4-5",
+    "claude-3-5-haiku-20241022",
+    "claude-3-5-haiku-latest",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-sonnet-latest",
+    "claude-3-haiku-20240307",
+    "claude-3-opus-20240229",
+    "claude-3-5-sonnet",
+    "claude-3-5-haiku",
     "claude-sonnet-4-5",
+    "claude-opus-4-5",
+    "claude-sonnet-5",
+    "claude-opus-5",
     "claude-haiku-4-5",
     "claude-opus-4-1",
-    "claude-3-5-haiku",
 ];
 
 /// Build an Anthropic Messages request body.

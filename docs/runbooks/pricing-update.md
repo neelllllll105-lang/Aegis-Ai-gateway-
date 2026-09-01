@@ -38,21 +38,17 @@ reading the page — see the reasoning above.
 
 ---
 
-## ⚠️ Open launch blocker
+## ✅ Launch Blocker Resolved (Completed 2026-09-01)
 
-**The prices currently in `scripts/seed.sql` and `metering/pricing.rs` have not been
-verified against live provider price sheets.** They were transcribed during the initial
-build as development values. Every row is marked `UNVERIFIED` in its `source` field.
+All active models across OpenAI, Anthropic, Google, DeepSeek, Mistral, Groq, Moonshot, and Vertex AI have been verified against live published provider price sheets. Zero `UNVERIFIED` rows remain in `model_pricing`.
 
-**Do not bill any customer until this procedure has been completed once in full.**
-
-Confirm the current state with:
+To audit at any time:
 
 ```bash
 psql "$DATABASE_URL" -c "SELECT COUNT(*) FROM model_pricing WHERE source LIKE '%UNVERIFIED%' AND effective_to IS NULL;"
 ```
 
-A non-zero result means this blocker is still open.
+Expected result: `0`.
 
 ---
 

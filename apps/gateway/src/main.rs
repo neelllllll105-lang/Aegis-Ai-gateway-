@@ -194,12 +194,64 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+    #[cfg(feature = "local-embeddings")]
+    let embedder: Arc<dyn cache::embed::Embedder> = {
+        let model_path = std::env::var("AEGIS_ONNX_MODEL_PATH")
+            .unwrap_or_else(|_| "models/bge-small-en-v1.5/model.onnx".to_string());
+        let tokenizer_path = std::env::var("AEGIS_ONNX_TOKENIZER_PATH")
+            .unwrap_or_else(|_| "models/bge-small-en-v1.5/tokenizer.json".to_string());
+
+        if std::path::Path::new(&model_path).exists() && std::path::Path::new(&tokenizer_path).exists() {
+            match cache::onnx_embed::OnnxEmbedder::load(
+                &model_path,
+                &tokenizer_path,
+                2,
+                cache::onnx_embed::BGE_SMALL_MAX_SEQUENCE_LENGTH,
+            ) {
+                Ok(onnx) => {
+                    tracing::info!(
+                        model = %model_path,
+                        "semantic cache powered by in-process local ONNX embedder (bge-small-en-v1.5, 384-dim)"
+                    );
+                    Arc::new(onnx)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load ONNX model, falling back to provider embedder");
+                    Arc::new(cache::embed::ProviderEmbedder::new(
+                        Arc::clone(&pricing),
+                        Arc::clone(&providers),
+                        Arc::clone(&shared_pool),
+                        Arc::clone(&config),
+                        http.clone(),
+                        db.clone(),
+                    ))
+                }
+            }
+        } else {
+            tracing::warn!(
+                model_path = %model_path,
+                tokenizer_path = %tokenizer_path,
+                "local ONNX model files not found, falling back to provider embedder"
+            );
+            Arc::new(cache::embed::ProviderEmbedder::new(
+                Arc::clone(&pricing),
+                Arc::clone(&providers),
+                Arc::clone(&shared_pool),
+                Arc::clone(&config),
+                http.clone(),
+                db.clone(),
+            ))
+        }
+    };
+
+    #[cfg(not(feature = "local-embeddings"))]
     let embedder: Arc<dyn cache::embed::Embedder> = Arc::new(cache::embed::ProviderEmbedder::new(
         initial_pricing_table,
         Arc::clone(&providers),
         Arc::clone(&shared_pool),
         Arc::clone(&config),
         http.clone(),
+        db.clone(),
     ));
 
     let state = AppState {

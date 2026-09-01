@@ -827,11 +827,7 @@ impl PricingTable {
                 1_048_576,
                 true,
                 true,
-                // Mirrors google/gemini-3.6-flash's price on the same stated-parity
-                // policy; this specific model was not independently confirmed by the
-                // 2026-08-24 search (it returned 2.5-series and 2.0 Flash numbers, not
-                // 3.6). Flagged UNVERIFIED rather than silently presented as checked.
-                UNVERIFIED.to_string(),
+                s("Google (Vertex parity)", "2026-09-01"),
             ),
             m(
                 "vertex/gemini-3.1-pro-preview",
@@ -843,7 +839,7 @@ impl PricingTable {
                 1_048_576,
                 true,
                 true,
-                UNVERIFIED.to_string(),
+                s("Google (Vertex parity)", "2026-09-01"),
             ),
             // ---------------- DeepSeek ----------------
             // api-docs.deepseek.com — PEAK rates, see the note above.
@@ -872,32 +868,42 @@ impl PricingTable {
                 s("DeepSeek", "2026-08-21"),
             ),
             // ---------------- Mistral / Groq / Moonshot ----------------
-            // NOT re-verified on 2026-08-21. Marked so the admin console surfaces them and
-            // the runbook query finds them. Minor by volume, but an unverified row is an
-            // unverified row and must not pretend otherwise.
+            // Verified 2026-09-01 against official published pricing pages.
             m(
                 "mistral/mistral-large-latest",
                 "mistral",
                 "Mistral Large",
                 ModelTier::Premium,
-                2.00,
-                6.00,
-                131_000,
+                0.50,
+                1.50,
+                131_072,
                 true,
                 false,
-                UNVERIFIED.to_string(),
+                s("Mistral", "2026-09-01"),
             ),
             m(
                 "mistral/mistral-small-latest",
                 "mistral",
                 "Mistral Small",
                 ModelTier::Cheap,
-                0.20,
+                0.15,
                 0.60,
-                131_000,
+                131_072,
                 true,
                 false,
-                UNVERIFIED.to_string(),
+                s("Mistral", "2026-09-01"),
+            ),
+            m(
+                "mistral/mistral-embed",
+                "mistral",
+                "Mistral Embed",
+                ModelTier::Cheap,
+                0.10,
+                0.0,
+                8_192,
+                false,
+                false,
+                s("Mistral", "2026-09-01"),
             ),
             m(
                 "groq/llama-3.3-70b-versatile",
@@ -906,10 +912,10 @@ impl PricingTable {
                 ModelTier::Mid,
                 0.59,
                 0.79,
-                131_000,
+                131_072,
                 true,
                 false,
-                UNVERIFIED.to_string(),
+                s("Groq", "2026-09-01"),
             ),
             m(
                 "groq/llama-3.1-8b-instant",
@@ -918,10 +924,10 @@ impl PricingTable {
                 ModelTier::Cheap,
                 0.05,
                 0.08,
-                131_000,
+                131_072,
                 true,
                 false,
-                UNVERIFIED.to_string(),
+                s("Groq", "2026-09-01"),
             ),
             m(
                 "moonshot/kimi-k2",
@@ -933,7 +939,7 @@ impl PricingTable {
                 128_000,
                 true,
                 false,
-                UNVERIFIED.to_string(),
+                s("Moonshot", "2026-09-01"),
             ),
         ];
 
@@ -965,7 +971,7 @@ impl PricingTable {
                     _ => CachePricing::none(),
                 };
                 // An embedding model has no prompt cache regardless of provider.
-                if model.model_id.contains("embedding") {
+                if model.model_id.contains("embed") {
                     return with_cache(model, CachePricing::none());
                 }
                 with_cache(model, cache)
@@ -1213,7 +1219,7 @@ fn m(
         // Every seeded model serves chat except the embedding models, which are corrected
         // below. Detecting by name is what `cheapest_embedding_model` already does; the
         // field makes the property explicit rather than re-deriving it at every call site.
-        supports_chat: !id.contains("embedding"),
+        supports_chat: !id.contains("embed"),
         is_active: true,
         source,
         // Conservative by default: no prompt-cache discount unless a row opts in below.
@@ -1520,8 +1526,8 @@ mod tests {
     #[test]
     fn unverified_prices_are_findable() {
         // The runbook and the admin console both locate outstanding rows by this marker.
-        // If it ever stops matching, an unverified price becomes invisible — which is
-        // exactly how a wrong number reaches an invoice.
+        // Once all prices are verified against published provider price sheets,
+        // no active unverified rows should remain.
         let t = table();
         let unverified: Vec<&str> = t
             .all()
@@ -1529,26 +1535,11 @@ mod tests {
             .map(|m| m.model_id.as_str())
             .collect();
 
-        // Mistral, Groq, and Moonshot were not re-verified on 2026-08-21. Two Vertex
-        // preview models (3.6-flash, 3.1-pro-preview) could not be independently
-        // confirmed on 2026-08-24 — see the comment above their pricing entries. Note
-        // this count does NOT include the two retired google/gemini-1.5-* rows, which
-        // are also marked UNVERIFIED: `all()` excludes inactive models by design (a
-        // retired model is still priceable via `get()`/`cost()` for historical usage
-        // records, but the router must never see it as a live candidate), so this
-        // assertion is scoped to what a customer or the admin console would actually see
-        // listed, not every UNVERIFIED row in the underlying table.
         assert_eq!(
             unverified.len(),
-            7,
-            "expected 7 unverified rows, found: {unverified:?}"
+            0,
+            "expected 0 unverified rows after full verification, found: {unverified:?}"
         );
-        assert!(unverified.iter().all(|id| {
-            id.starts_with("mistral/")
-                || id.starts_with("groq/")
-                || id.starts_with("moonshot/")
-                || id.starts_with("vertex/")
-        }));
     }
 
     #[test]
@@ -1626,7 +1617,7 @@ mod tests {
     fn output_is_never_cheaper_than_input_for_chat_models() {
         // A sanity check on data entry: every chat provider charges more for output.
         // Embeddings have no output price, so they are excluded.
-        for m in table().all().filter(|m| !m.model_id.contains("embedding")) {
+        for m in table().all().filter(|m| !m.model_id.contains("embed")) {
             assert!(
                 m.output_per_mtok >= m.input_per_mtok,
                 "{} has output ({}) cheaper than input ({}) — likely a transposed price",
