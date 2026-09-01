@@ -898,6 +898,18 @@ impl PricingTable {
                 UNVERIFIED.to_string(),
             ),
             m(
+                "mistral/mistral-embed",
+                "mistral",
+                "Mistral Embed",
+                ModelTier::Cheap,
+                0.10,
+                0.0,
+                8_192,
+                false,
+                false,
+                UNVERIFIED.to_string(),
+            ),
+            m(
                 "groq/llama-3.3-70b-versatile",
                 "groq",
                 "Llama 3.3 70B (Groq)",
@@ -963,7 +975,7 @@ impl PricingTable {
                     _ => CachePricing::none(),
                 };
                 // An embedding model has no prompt cache regardless of provider.
-                if model.model_id.contains("embedding") {
+                if model.model_id.contains("embed") {
                     return with_cache(model, CachePricing::none());
                 }
                 with_cache(model, cache)
@@ -1105,7 +1117,7 @@ fn m(
         // Every seeded model serves chat except the embedding models, which are corrected
         // below. Detecting by name is what `cheapest_embedding_model` already does; the
         // field makes the property explicit rather than re-deriving it at every call site.
-        supports_chat: !id.contains("embedding"),
+        supports_chat: !id.contains("embed"),
         is_active: true,
         source,
         // Conservative by default: no prompt-cache discount unless a row opts in below.
@@ -1432,8 +1444,8 @@ mod tests {
         // listed, not every UNVERIFIED row in the underlying table.
         assert_eq!(
             unverified.len(),
-            7,
-            "expected 7 unverified rows, found: {unverified:?}"
+            8,
+            "expected 8 unverified rows, found: {unverified:?}"
         );
         assert!(unverified.iter().all(|id| {
             id.starts_with("mistral/")
@@ -1518,7 +1530,7 @@ mod tests {
     fn output_is_never_cheaper_than_input_for_chat_models() {
         // A sanity check on data entry: every chat provider charges more for output.
         // Embeddings have no output price, so they are excluded.
-        for m in table().all().filter(|m| !m.model_id.contains("embedding")) {
+        for m in table().all().filter(|m| !m.model_id.contains("embed")) {
             assert!(
                 m.output_per_mtok >= m.input_per_mtok,
                 "{} has output ({}) cheaper than input ({}) — likely a transposed price",

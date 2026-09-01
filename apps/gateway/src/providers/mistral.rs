@@ -5,5 +5,5 @@ crate::openai_compatible_provider!(
     MistralProvider,
     id = "mistral",
     base_url = "https://api.mistral.ai/v1",
-    models = &["mistral-large-latest", "mistral-small-latest"],
+    models = &["mistral-small-latest", "open-mistral-nemo", "mistral-large-latest", "mistral-embed"],
 );
