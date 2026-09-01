@@ -935,6 +935,53 @@ endpoint's staleness count is now honest. Real code changes this time, not just 
 verification pass — `scripts/seed.sql` and `apps/gateway/src/crypto.rs` — but, like
 everything else this session, not yet committed.
 
+**Later the same session — a collaborator's work reconciled in, nothing lost on either
+side.** All ~28 files above were first committed intact on a new branch,
+`session-11-12-fixes` (commit `fee6fd0`), specifically so that pulling could not silently
+discard local work regardless of how the merge went. `git fetch` then showed
+`origin/main` 11 commits ahead (`bdfedca`) — a collaborator's work: scheduler jobs moved to
+IST (UTC+05:30), live multi-provider model discovery during credential verification,
+credential-probe fixes, a full pricing verification pass (every `UNVERIFIED` row in
+`model_pricing` replaced with real dated prices — see the runbook's new "Launch Blocker
+Resolved" section), ONNX embedder cache activation, and `scripts/seed_dummy_users.sql`.
+Local `main` fast-forwarded onto it cleanly (nothing local was on `main` itself — only the
+working tree had changes, and those were already safely on the side branch).
+
+Merging `session-11-12-fixes` onto the new `main` produced exactly one real conflict, in
+`main.rs` — both sides had independently written a `PricingRow → ModelPricing` converter:
+the collaborator's a free function (`into_model`), this session's a `From` trait impl (see
+`pricing.rs`). Checked call sites before resolving rather than guessing: the actual startup
+code path (`rows.into_iter().map(Into::into).collect()`) already used the trait impl, and
+`into_model` had zero callers anywhere in the merged tree — so the resolution kept the
+`From` impl and deleted the now-genuinely-dead free function, losing no behavior on either
+side. Every other overlapping file (`pricing.rs`, `providers/{anthropic,google,openai}.rs`,
+`scripts/seed.sql`, `docs/runbooks/pricing-update.md`, `workers/scheduler.rs`,
+`routes/{management,openai_compat}.rs`) auto-merged with no conflict — the pre-merge
+line-range analysis (different sections of the same files) held up in practice.
+
+Re-verified the merge result from scratch rather than trusting a clean `git merge` exit
+code: `cargo build --all-targets` clean, `cargo clippy --all-targets -- -D warnings` clean.
+First `cargo test` pass reported 851 passing — but with `DATABASE_URL`/`AEGIS_TEST_REDIS_URL`
+unset in that shell, every Postgres/Redis-gated integration test (`auth_and_billing.rs`,
+`durable_cache.rs`, `tenant_isolation.rs`, `redis_concurrency.rs`) had silently taken its
+`skip()` early-return rather than actually running — caught while writing this entry's
+verification numbers into `.aegis/state.json`, not by re-reading the test code. Re-ran with
+both variables pointing at the already-running Docker stack
+(`postgres://aegis:...@localhost:5432/aegis`, `redis://localhost:6379`): same **851
+passing, 0 failed**, this time genuinely exercising real Postgres and real Redis, including
+`redis_concurrency.rs`'s four atomicity tests. `cargo fmt --check` flagged two pre-existing,
+whitespace-only diffs in the collaborator's `embed.rs`/`main.rs` additions (not this
+session's code) — fixed with `cargo fmt` and re-verified the build stayed clean, committed
+separately (`fc07c12`) so the reformat is distinguishable from substantive changes. Web app
+also re-verified post-merge since `pricing/page.tsx` was one of the overlapping files:
+`npm run lint` (including the design-token check) and `npm run build` both clean, all 21
+routes prerendered.
+
+`main` now sits 3 commits ahead of `origin/main`
+(`fee6fd0` → `01e1758` merge → `fc07c12` fmt) — reconciled, tested, and formatted, but
+**not yet pushed**; push needs the founder's go-ahead since it updates a branch a
+collaborator is actively pushing to.
+
 ### 2026-09-01 — Session 11 — Claude Sonnet 5
 
 Founder asked how model pricing is maintained and, once told, asked the sharper follow-up:
