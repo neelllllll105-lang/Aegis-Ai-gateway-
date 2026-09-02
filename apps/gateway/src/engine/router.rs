@@ -24,7 +24,7 @@
 //! 4. Passthrough.
 
 use crate::engine::bandit::RoutingBandit;
-use crate::engine::classifier::{Classification, Classifier};
+use crate::engine::classifier::{Classification, Classifier, TaskDomain};
 use crate::engine::fallback::{HealthScore, ProviderHealth};
 use crate::engine::policy::{PolicyContext, RoutingPolicy};
 use crate::error::{AegisError, Result};
@@ -458,6 +458,37 @@ impl Router {
                 .then_with(|| a.model_id.cmp(&b.model_id))
         });
 
+        // Task-domain preference: if the classification named a domain, promote candidates
+        // from a preferred provider when they are within 25% of the best effective price.
+        // This is a soft re-rank, not a filter — a preferred provider that is expensive
+        // or degraded loses on price and stays behind; this only moves them up when the
+        // cost difference is negligible. The 25% band is deliberately narrow: the customer
+        // is paying for cost optimisation first.
+        if let Some(c) = classification {
+            let preferred = c.domain.preferred_providers();
+            if !preferred.is_empty() && candidates.len() > 1 {
+                let best_price = {
+                    let (m, h) = &candidates[0];
+                    effective_price(m, h, median_latency)
+                };
+                let threshold = best_price * 1.25;
+                // Stable partition: preferred providers within the band go first,
+                // preserving the price order within each group.
+                candidates.sort_by(|(a, ah), (b, bh)| {
+                    let pa = effective_price(a, ah, median_latency);
+                    let pb = effective_price(b, bh, median_latency);
+                    let a_pref = pa <= threshold
+                        && preferred.iter().any(|p| a.provider.as_str() == *p);
+                    let b_pref = pb <= threshold
+                        && preferred.iter().any(|p| b.provider.as_str() == *p);
+                    b_pref
+                        .cmp(&a_pref)
+                        .then_with(|| pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal))
+                        .then_with(|| a.model_id.cmp(&b.model_id))
+                });
+            }
+        }
+
         // The bandit reorders within what the router already permits. Deliberately not
         // allowed to add a candidate: everything here has already passed capability,
         // allowlist, tier, and availability filtering, and outcome data is not a reason to
@@ -478,6 +509,15 @@ impl Router {
 
         let (model, model_health) = chosen;
         let mut explanation = classification.map(|c| c.explain()).unwrap_or_default();
+        if let Some(c) = classification {
+            if c.domain != TaskDomain::General {
+                explanation.push(format!(
+                    "task domain: {} — routing prefers {} providers for this class of work",
+                    c.domain.as_str(),
+                    c.domain.preferred_providers().join(", ")
+                ));
+            }
+        }
         explanation.push(format!(
             "routed to {} instead of {} ({} cheaper capable alternative{} considered)",
             model.model_id,

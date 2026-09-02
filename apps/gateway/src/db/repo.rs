@@ -1549,8 +1549,8 @@ impl Default for PricingRow {
 pub async fn load_pricing(pool: &PgPool) -> Result<Vec<PricingRow>> {
     sqlx::query_as::<_, PricingRow>(concat!(
         "SELECT model_id, provider, display_name, tier, input_cost_per_mtok_mc, ",
-        "       output_cost_per_mtok_mc, context_window, supports_tools, ",
-        "       supports_vision, is_active, source, cache_read_bp, cache_write_bp, ",
+        "       output_cost_per_mtok_mc, context_window, supports_tools, supports_vision, ",
+        "       supports_chat, is_active, source, cache_read_bp, cache_write_bp, ",
         "       long_context_threshold_tokens, long_context_input_per_mtok_mc, ",
         "       long_context_output_per_mtok_mc ",
         "FROM model_pricing ",
@@ -1582,8 +1582,8 @@ pub async fn upsert_pricing(pool: &PgPool, row: &PricingRow) -> Result<()> {
         "INSERT INTO model_pricing
             (model_id, provider, display_name, tier, input_cost_per_mtok_mc,
              output_cost_per_mtok_mc, context_window, supports_tools, supports_vision,
-             is_active, source)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             supports_chat, is_active, source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&row.model_id)
     .bind(&row.provider)
@@ -1594,6 +1594,7 @@ pub async fn upsert_pricing(pool: &PgPool, row: &PricingRow) -> Result<()> {
     .bind(row.context_window)
     .bind(row.supports_tools)
     .bind(row.supports_vision)
+    .bind(row.supports_chat)
     .bind(row.is_active)
     .bind(&row.source)
     .execute(&mut *tx)

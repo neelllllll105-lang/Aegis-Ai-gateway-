@@ -119,6 +119,52 @@ const CHAINING_TERMS: &[&str] = &[
     " and ",
 ];
 
+/// Provider preferences by task domain, used by the router to break price ties
+/// toward a provider known to excel at this class of work.
+///
+/// Soft guidance only: the router still applies health and capability filters first.
+/// The domain preference just influences tie-breaking among equally-capable candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskDomain {
+    /// Code generation, refactoring, debugging, test writing.
+    Code,
+    /// Multi-step reasoning, math, analysis, root-cause investigation.
+    Reasoning,
+    /// Natural language tasks: translation, summarisation, creative writing, drafting.
+    Language,
+    /// General / conversational — no strong signal either way.
+    General,
+}
+
+impl TaskDomain {
+    /// The provider(s) to prefer for this domain, in preference order.
+    ///
+    /// This is empirical guidance, not a hard rule — the router will still use any
+    /// capable provider when the preferred one is down or too expensive.
+    pub fn preferred_providers(&self) -> &'static [&'static str] {
+        match self {
+            // DeepSeek and Groq are fast, cheap, and strong on code.
+            TaskDomain::Code => &["deepseek", "groq", "mistral"],
+            // Google and Anthropic have long context windows and strong reasoning.
+            TaskDomain::Reasoning => &["google", "vertex", "anthropic"],
+            // Mistral leads on multilingual quality; Groq is a fast fallback.
+            TaskDomain::Language => &["mistral", "groq", "google"],
+            // No strong preference — let price and health decide.
+            TaskDomain::General => &[],
+        }
+    }
+
+    /// Short label for routing explanations and logs.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskDomain::Code => "code",
+            TaskDomain::Reasoning => "reasoning",
+            TaskDomain::Language => "language",
+            TaskDomain::General => "general",
+        }
+    }
+}
+
 /// Verbs that, combined with code vocabulary, mean "produce or change code" — a
 /// materially harder task than answering a question about code.
 const CODE_INTENT_VERBS: &[&str] = &[
@@ -403,6 +449,8 @@ pub struct Classification {
     pub features: Features,
     /// Which scorer produced it.
     pub version: ClassifierVersion,
+    /// What kind of task this appears to be — used for provider preference.
+    pub domain: TaskDomain,
 }
 
 impl Classification {
@@ -461,11 +509,13 @@ impl Classifier {
             ClassifierVersion::V1 => score_v1(&features),
             ClassifierVersion::V2 => score_v2(&features),
         };
+        let domain = detect_domain(&features);
         Classification {
             score,
             complexity: Complexity::from_score(score),
             features,
             version: self.version,
+            domain,
         }
     }
 }
@@ -499,6 +549,29 @@ pub fn score_v1(features: &Features) -> f32 {
     score -= 0.16 * features.short_question;
 
     clamp01(score)
+}
+
+/// Detect the task domain from extracted features.
+///
+/// Uses the same feature signals already extracted — no extra scan of the text.
+/// Domain detection is intentionally lenient: a mixed request (e.g. "explain and
+/// implement a sorting algorithm") falls to Code when code intent is present, because
+/// code generation is the harder half and the one that benefits most from a
+/// specialised provider.
+fn detect_domain(f: &Features) -> TaskDomain {
+    // Code: any explicit production intent, or heavy code vocabulary.
+    if f.code_intent > 0.0 || f.code_block > 0.0 || f.code_terms >= 0.5 {
+        return TaskDomain::Code;
+    }
+    // Reasoning: multi-step analysis or high reasoning-verb density.
+    if f.reasoning >= 0.5 || f.multi_step >= 0.6 {
+        return TaskDomain::Reasoning;
+    }
+    // Language: trivial mechanical tasks (translation, rephrasing, etc.).
+    if f.trivial > 0.0 {
+        return TaskDomain::Language;
+    }
+    TaskDomain::General
 }
 
 /// Linear scorer over the same features.
