@@ -1268,101 +1268,27 @@ async fn handle_chat(
     Ok(response)
 }
 
-fn stream_cached_response(
-    state: &AppState,
-    auth_context: &AuthContext,
-    request_id: Uuid,
-    requested_model: String,
-    response: NormalizedResponse,
-    served_model: String,
-    cache_outcome: CacheOutcome,
-    explanation: String,
-    overhead_ms: f64,
-) -> Response {
-    let pricing = state.pricing();
-    let baseline = pricing.baseline_of(&requested_model, &response.usage, MicroCents::ZERO);
-    let savings = SavingsBreakdown::cache_hit(baseline, auth_context.savings_share_bp);
-
-    state.metrics.record_cache(cache_outcome.as_str());
-    state.metrics.record_savings(savings.gross_savings.as_i64());
-
-    let mut event = UsageEvent::new(
-        request_id,
-        auth_context.org_id,
-        auth_context.api_key_id,
-        auth_context.team_id,
-        requested_model.clone(),
-        served_model.clone(),
-        "cache".to_string(),
-        response.usage,
-        savings,
-        overhead_ms.round() as u32,
-        overhead_ms,
-        cache_outcome,
-        RoutingReason::Cache,
-        None,
-        200,
-    );
-    event.cache_hit = true;
-    event.actual_cost_mc = 0;
-
-    let state_for_emit = state.clone();
-    tokio::spawn(async move {
-        let _ = usage::emit(state_for_emit.store.as_ref(), &event).await;
-    });
-
-    let content = response.content;
-    let payload = serde_json::json!({
-        "id": format!("chatcmpl-{}", request_id.simple()),
-        "object": "chat.completion.chunk",
-        "created": chrono::Utc::now().timestamp(),
-        "model": served_model,
-        "choices": [{
-            "index": 0,
-            "delta": {
-                "role": "assistant",
-                "content": content
-            },
-            "finish_reason": null
-        }]
-    });
-    let finish = serde_json::json!({
-        "id": format!("chatcmpl-{}", request_id.simple()),
-        "object": "chat.completion.chunk",
-        "created": chrono::Utc::now().timestamp(),
-        "model": served_model,
-        "choices": [{
-            "index": 0,
-            "delta": {},
-            "finish_reason": "stop"
-        }]
-    });
-
-    let sse_body = async_stream::stream! {
-        yield Ok::<_, std::convert::Infallible>(
-            axum::body::Bytes::from(format!("data: {payload}\n\n"))
-        );
-        yield Ok(axum::body::Bytes::from(format!("data: {finish}\n\n")));
-        yield Ok(axum::body::Bytes::from_static(b"data: [DONE]\n\n"));
-    };
-
-    let mut resp = Response::builder()
-        .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
-        .header(axum::http::header::CACHE_CONTROL, "no-cache")
-        .header(axum::http::header::CONNECTION, "keep-alive")
-        .header("x-aegis-request-id", request_id.to_string())
-        .header("x-aegis-cache", cache_outcome.as_str())
-        .header("x-aegis-cost", "$0.000000")
-        .header("x-aegis-savings", format!("${:.6}", savings.customer_net.as_i64() as f64 / 1_000_000.0))
-        .header("x-aegis-model", served_model)
-        .header("x-aegis-routing-reason", "cache")
-        .header("x-aegis-cache-explanation", explanation)
-        .body(axum::body::Body::from_stream(sse_body))
-        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to build sse stream").into_response());
-
-    resp
-}
-
+/// Streaming variant.
+///
+/// Chunks are forwarded to the client as they arrive; usage is captured from the final
+/// chunk and metered after the stream completes. Principle 2 holds for streams too — the
+/// usage event is emitted from inside the stream, so a client that disconnects mid-stream
+/// is still billed for the tokens the provider produced.
+///
+/// # Where failover is and is not possible
+///
+/// Opening the upstream stream is retried and failed over exactly like a non-streaming
+/// call: until the first byte reaches the client, nothing is observable and a different
+/// provider can serve the request transparently. Once bytes have been sent, the response
+/// is committed — a second provider would produce a different continuation of a partly
+/// delivered answer, which is worse than an honest error. So a mid-stream failure ends the
+/// stream with an error event, and is recorded as a failure against the provider's circuit
+/// breaker so the *next* request routes around it.
+///
+/// That health recording is new. Before it, neither streaming entry point called
+/// `record_success` or `record_failure` at all, so a provider failing every streaming
+/// request could never trip its own circuit — on the endpoint built for streaming-heavy
+/// clients. Found in the enterprise readiness audit.
 async fn stream_chat(
     state: &AppState,
     auth_context: &AuthContext,
@@ -1373,69 +1299,6 @@ async fn stream_chat(
     let started = Instant::now();
     let request_id = Uuid::new_v4();
     let requested_model = request.model.clone();
-
-    // Check Exact & Semantic Cache before opening stream:
-    let smart_caching_enabled = auth_context.plan != "free";
-    let cache = ExactCache::new(state.store.as_ref(), state.config.cache_ttl);
-
-    let mut stream_embedding: Option<Vec<f32>> = None;
-
-    if !auth_context.zero_retention
-        && fingerprint::cacheability(&request, auth_context.zero_retention).is_cacheable()
-    {
-        // 1. Exact Cache Check (L1 & L3)
-        if let Some(hit) = cache
-            .get(&request, auth_context.org_id, auth_context.zero_retention)
-            .await
-            .unwrap_or(None)
-        {
-            reservation.release(state.store.as_ref()).await;
-            return Ok(stream_cached_response(
-                state,
-                auth_context,
-                request_id,
-                requested_model,
-                hit.response,
-                hit.served_model,
-                CacheOutcome::Exact,
-                "served from Aegis exact-match cache (stream replay)".to_string(),
-                started.elapsed().as_secs_f64() * 1000.0,
-            ));
-        }
-
-        // 2. Semantic Cache Check (L2)
-        if smart_caching_enabled {
-            let text = semantic::embedding_text(&request);
-            if let Some(embedding) = state.embedder.embed(&text).await {
-                let semantic_cache = SemanticCache::new(
-                    state.semantic_store.as_ref(),
-                    state.config.semantic_similarity_threshold,
-                );
-                if let Ok(Some(hit)) = semantic_cache
-                    .get(&embedding, auth_context.org_id, auth_context.zero_retention)
-                    .await
-                {
-                    reservation.release(state.store.as_ref()).await;
-                    let explanation = format!(
-                        "served from Aegis semantic cache ({:.0}% similar stream replay)",
-                        hit.similarity * 100.0
-                    );
-                    return Ok(stream_cached_response(
-                        state,
-                        auth_context,
-                        request_id,
-                        requested_model,
-                        hit.entry.response,
-                        hit.entry.served_model,
-                        CacheOutcome::Semantic,
-                        explanation,
-                        started.elapsed().as_secs_f64() * 1000.0,
-                    ));
-                }
-                stream_embedding = Some(embedding);
-            }
-        }
-    }
 
     let policy = load_policy(state, auth_context).await;
     let inputs = RoutingInputs {
@@ -1466,6 +1329,7 @@ async fn stream_chat(
     let opened = match open_stream_with_fallback(state, auth_context, &request, &chain).await {
         Ok(opened) => opened,
         Err(e) => {
+            // Nothing was streamed, so nothing is billable. Give the projection back.
             reservation.release(state.store.as_ref()).await;
             return Err(e);
         }
@@ -1482,8 +1346,6 @@ async fn stream_chat(
 
     let state_for_stream = state.clone();
     let auth_for_stream = auth_context.clone();
-    let request_for_cache = request.clone();
-    let stream_embedding_for_cache = stream_embedding.clone();
     let estimated_input = request.estimated_input_tokens();
     let complexity = decision.complexity_score;
     let routing_reason = if used_fallback {
@@ -1491,13 +1353,23 @@ async fn stream_chat(
     } else {
         decision.reason
     };
+    // Recorded here, after failover has resolved, rather than at selection time. The
+    // non-streaming path had the same bug: `record_routing` ran before the fallback chain
+    // executed, so the one aggregate an SRE would alert on -- "how often are we falling
+    // back" -- could structurally never show a fallback.
     state
         .metrics
         .record_routing(routing_reason.as_str(), &served_model);
 
+    // Accumulated as the stream runs, then metered when it ends.
     let mut final_usage: Option<TokenUsage> = None;
     let mut output_chars: u64 = 0;
-    let mut accumulated_content = String::new();
+    // Set the moment the upstream stream itself reports an error. Without this, a
+    // provider that dies mid-stream was metered and counted in `/metrics` as a clean
+    // 200 — the response the client actually saw *was* an SSE error event, but nothing
+    // downstream of this function could tell the two apart. Found in the enterprise
+    // readiness audit: a support engineer given a customer's request_id could not
+    // distinguish "this failed" from "this succeeded" in the usage record it produced.
     let mut stream_error: Option<String> = None;
 
     let sse = async_stream::stream! {
@@ -1506,7 +1378,6 @@ async fn stream_chat(
             match chunk {
                 Ok(chunk) => {
                     output_chars += chunk.delta.chars().count() as u64;
-                    accumulated_content.push_str(&chunk.delta);
                     if let Some(usage) = chunk.usage {
                         let merged = final_usage.get_or_insert(TokenUsage::default());
                         if usage.input_tokens > 0 {
@@ -1516,6 +1387,17 @@ async fn stream_chat(
                             merged.output_tokens = usage.output_tokens;
                         }
                     }
+                    // `raw` is the literal bytes the *serving* provider sent, in that
+                    // provider's own wire format — safe to forward verbatim only when the
+                    // router happened to pick a provider that already speaks the shape
+                    // this caller connected with (OpenAI-
+                    // 
+                    // compatible). The router chooses a
+                    // model independently of which endpoint the caller used, so a request
+                    // to this OpenAI-shaped endpoint can just as easily be served by the
+                    // Anthropic adapter or Gemini — forwarding *their* raw SSE bytes here
+                    // would hand an OpenAI-SDK client JSON it cannot parse. Reconstruct
+                    // from the normalised fields instead whenever the shapes don't match.
                     let payload = match chunk.source_shape {
                         Some(crate::types::WireShape::OpenAiCompatible) => chunk
                             .raw
@@ -1544,52 +1426,14 @@ async fn stream_chat(
 
         yield Ok(axum::body::Bytes::from_static(b"data: [DONE]\n\n"));
 
+        // Meter after the stream closes. This runs even when the client has already
+        // disconnected, because the provider tokens were produced and are billable.
         let tokens = final_usage.unwrap_or(TokenUsage {
             input_tokens: estimated_input,
             output_tokens: (output_chars / 4).max(1),
             estimated: true,
             ..Default::default()
         });
-
-        if stream_error.is_none() && !auth_for_stream.zero_retention {
-            let normalized_response = NormalizedResponse {
-                id: format!("chatcmpl-{}", request_id.simple()),
-                model: served_model.clone(),
-                content: accumulated_content,
-                finish_reason: Some("stop".to_string()),
-                tool_calls: None,
-                usage: tokens,
-                raw: None,
-            };
-            let cache = ExactCache::new(state_for_stream.store.as_ref(), state_for_stream.config.cache_ttl);
-            let _ = cache
-                .put(
-                    &request_for_cache,
-                    auth_for_stream.org_id,
-                    auth_for_stream.zero_retention,
-                    &normalized_response,
-                    &served_model,
-                )
-                .await;
-
-            if auth_for_stream.plan != "free" {
-                if let Some(embedding) = stream_embedding_for_cache {
-                    let semantic_cache = SemanticCache::new(
-                        state_for_stream.semantic_store.as_ref(),
-                        state_for_stream.config.semantic_similarity_threshold,
-                    );
-                    let _ = semantic_cache
-                        .put(
-                            embedding,
-                            auth_for_stream.org_id,
-                            auth_for_stream.zero_retention,
-                            &normalized_response,
-                            &served_model,
-                        )
-                        .await;
-                }
-            }
-        }
 
         let actual_cost = state_for_stream
             .pricing()
@@ -1620,8 +1464,16 @@ async fn stream_chat(
             CacheOutcome::Skipped,
             routing_reason,
             complexity,
+            // The HTTP status genuinely was 200 — SSE has no way to change it mid-stream,
+            // and the client did receive a 200 response. `error_type` below is what
+            // records that the *stream itself* failed partway, which status_code alone
+            // cannot express.
             200,
         );
+        // A stream that died partway still failed, and the circuit breaker has to hear
+        // about it or the next request routes straight back into the same provider. This
+        // is the only place a mid-stream failure can be observed — by the time the error
+        // chunk arrives, `open_stream_with_fallback` has long since returned success.
         if let Some(error_type) = stream_error.as_deref() {
             let after = state_for_stream.health.record_failure(&provider_id);
             state_for_stream
@@ -1646,8 +1498,16 @@ async fn stream_chat(
         }
 
         event.error_type = stream_error;
+        // Convert the held projection into the real cost, exactly as the non-streaming
+        // path does. Without this the reservation would sit on the counter until it
+        // expired, and every subsequent request would see inflated spend.
         event.reserved_mc = reservation.commit();
 
+        // Metering completeness must reflect whether the event was actually durable, not
+        // whether we attempted to make it durable. The prior version incremented this
+        // counter unconditionally after discarding emit()'s Result, which meant the one
+        // metric meant to catch "a request was served but never billed" could not detect
+        // it happening in the exact failure mode it exists to catch — a Redis XADD error
         // at this line would have been invisible to both this metric and the nightly
         // reconciliation job, which compares two counters that were equally blind to the
         // drop. Found in the enterprise readiness audit.

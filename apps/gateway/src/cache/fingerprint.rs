@@ -169,6 +169,9 @@ pub fn cacheability(request: &NormalizedRequest, zero_retention: bool) -> Cachea
     if request.requires_tools() {
         return Cacheability::ToolUse;
     }
+    if request.stream {
+        return Cacheability::Streaming;
+    }
     if request
         .temperature
         .is_some_and(|t| t > CACHE_TEMPERATURE_CEILING)
@@ -358,12 +361,12 @@ mod tests {
     }
 
     #[test]
-    fn streaming_requests_are_cacheable() {
+    fn streaming_requests_are_not_cached() {
         let request = NormalizedRequest {
             stream: true,
             ..NormalizedRequest::simple("gpt-4o", "hi")
         };
-        assert_eq!(cacheability(&request, false), Cacheability::Cacheable);
+        assert_eq!(cacheability(&request, false), Cacheability::Streaming);
     }
 
     #[test]
