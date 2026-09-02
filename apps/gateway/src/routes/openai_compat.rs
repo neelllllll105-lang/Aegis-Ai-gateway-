@@ -1391,7 +1391,7 @@ async fn stream_chat(
                     // provider's own wire format — safe to forward verbatim only when the
                     // router happened to pick a provider that already speaks the shape
                     // this caller connected with (OpenAI-
-                    // 
+                    //
                     // compatible). The router chooses a
                     // model independently of which endpoint the caller used, so a request
                     // to this OpenAI-shaped endpoint can just as easily be served by the

@@ -477,10 +477,8 @@ impl Router {
                 candidates.sort_by(|(a, ah), (b, bh)| {
                     let pa = effective_price(a, ah, median_latency);
                     let pb = effective_price(b, bh, median_latency);
-                    let a_pref = pa <= threshold
-                        && preferred.iter().any(|p| a.provider.as_str() == *p);
-                    let b_pref = pb <= threshold
-                        && preferred.iter().any(|p| b.provider.as_str() == *p);
+                    let a_pref = pa <= threshold && preferred.contains(&a.provider.as_str());
+                    let b_pref = pb <= threshold && preferred.contains(&b.provider.as_str());
                     b_pref
                         .cmp(&a_pref)
                         .then_with(|| pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal))
