@@ -25,6 +25,13 @@ use crate::types::{Message, NormalizedRequest, Role};
 pub const TRUNCATE_THRESHOLD: usize = 40;
 /// Recent turns always preserved when truncating.
 pub const KEEP_RECENT: usize = 20;
+/// A block must be at least this many characters before duplicate-referencing or
+/// stale-trimming will touch it. Below this the marker costs more than the saving.
+pub const LARGE_BLOCK_CHARS: usize = 400;
+/// Tool results older than this many messages from the end are candidates for trimming.
+pub const STALE_TOOL_RESULT_AGE: usize = 6;
+/// Head and tail retained on each side when a stale tool result is trimmed.
+pub const TOOL_RESULT_KEEP_EDGE: usize = 300;
 /// Marker inserted where history was removed.
 pub const TRUNCATION_MARKER: &str =
     "[Earlier conversation history was omitted to fit the context window.]";
@@ -37,6 +44,14 @@ pub struct CompressionResult {
     pub duplicate_system_messages_removed: usize,
     pub messages_truncated: usize,
     pub whitespace_chars_removed: usize,
+    /// Pretty-printed JSON re-serialised compactly. Provably lossless: the value
+    /// parses to exactly the same thing, only the formatting bytes are gone.
+    pub json_blocks_minified: usize,
+    /// Large blocks that exactly repeated an earlier one, replaced by a short pointer
+    /// to it rather than deleted, so the turn structure the model reasons over survives.
+    pub duplicate_blocks_referenced: usize,
+    /// Stale tool results whose middle was elided, keeping head and tail.
+    pub stale_tool_results_trimmed: usize,
 }
 
 impl CompressionResult {
@@ -50,6 +65,9 @@ impl CompressionResult {
         self.tokens_saved() == 0
             && self.duplicate_system_messages_removed == 0
             && self.messages_truncated == 0
+            && self.json_blocks_minified == 0
+            && self.duplicate_blocks_referenced == 0
+            && self.stale_tool_results_trimmed == 0
     }
 
     /// Proportion of tokens removed.
@@ -67,6 +85,9 @@ pub struct CompressorConfig {
     pub dedupe_system: bool,
     pub collapse_whitespace: bool,
     pub truncate_history: bool,
+    pub minify_json: bool,
+    pub reference_duplicate_blocks: bool,
+    pub trim_stale_tool_results: bool,
     pub truncate_threshold: usize,
     pub keep_recent: usize,
 }
@@ -77,6 +98,9 @@ impl Default for CompressorConfig {
             dedupe_system: true,
             collapse_whitespace: true,
             truncate_history: true,
+            minify_json: true,
+            reference_duplicate_blocks: true,
+            trim_stale_tool_results: true,
             truncate_threshold: TRUNCATE_THRESHOLD,
             keep_recent: KEEP_RECENT,
         }
@@ -91,6 +115,9 @@ impl CompressorConfig {
             dedupe_system: false,
             collapse_whitespace: false,
             truncate_history: false,
+            minify_json: false,
+            reference_duplicate_blocks: false,
+            trim_stale_tool_results: false,
             truncate_threshold: usize::MAX,
             keep_recent: usize::MAX,
         }
@@ -106,6 +133,24 @@ pub fn compress(request: &mut NormalizedRequest, config: &CompressorConfig) -> C
 
     if config.dedupe_system {
         result.duplicate_system_messages_removed = dedupe_system_messages(&mut request.messages);
+    }
+
+    // JSON first: minifying before the duplicate check means two payloads that differ
+    // only in indentation are recognised as the identical value they are.
+    if config.minify_json {
+        result.json_blocks_minified = minify_json_blocks(&mut request.messages);
+    }
+
+    if config.reference_duplicate_blocks {
+        result.duplicate_blocks_referenced = reference_duplicate_blocks(&mut request.messages);
+    }
+
+    if config.trim_stale_tool_results {
+        result.stale_tool_results_trimmed = trim_stale_tool_results(
+            &mut request.messages,
+            STALE_TOOL_RESULT_AGE,
+            TOOL_RESULT_KEEP_EDGE,
+        );
     }
 
     if config.collapse_whitespace {
@@ -265,6 +310,134 @@ fn truncate_history(messages: &mut Vec<Message>, threshold: usize, keep_recent: 
 /// asynchronously and the next request picks it up.
 pub fn warrants_summarization(request: &NormalizedRequest) -> bool {
     request.messages.len() > 100 && request.estimated_input_tokens() > 20_000
+}
+
+/// Re-serialise pretty-printed JSON compactly.
+///
+/// The strongest guarantee in this module: a JSON value that round-trips through
+/// `serde_json` is *the same value*. Only insignificant formatting bytes — indentation,
+/// the space after `:` and `,`, trailing newlines — are removed. A model parsing the
+/// result gets identical data.
+///
+/// This matters because tool results are overwhelmingly pretty-printed JSON, and
+/// indentation is routinely 20-40% of such a payload. It is the largest safe saving
+/// available on agentic traffic, and unlike every other transformation here it cannot
+/// change meaning even in principle.
+fn minify_json_blocks(messages: &mut [Message]) -> usize {
+    let mut minified = 0;
+    for message in messages.iter_mut() {
+        let Some(content) = &message.content else {
+            continue;
+        };
+        let original = content.as_text();
+        let trimmed = original.trim();
+        // Cheap gate before attempting a parse: only `{`/`[` can start a JSON document
+        // worth minifying, and a short one has nothing to gain.
+        if trimmed.len() < 64 || !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let Ok(compact) = serde_json::to_string(&value) else {
+            continue;
+        };
+        if compact.len() < trimmed.len() {
+            message.content = Some(crate::types::Content::Text(compact));
+            minified += 1;
+        }
+    }
+    minified
+}
+
+/// Replace a large block that exactly repeats an earlier one with a pointer to it.
+///
+/// A retrieval pipeline re-injecting the same document, or an agent re-reading a file it
+/// already read, sends the identical payload several times in one conversation. Deleting
+/// the later copy would change the turn structure the model reasons over; replacing its
+/// body with a one-line reference keeps the structure and drops the tokens.
+///
+/// Only *byte-identical* bodies are referenced — never merely similar ones — and only
+/// above [`LARGE_BLOCK_CHARS`], below which the marker would cost more than it saves.
+/// System messages are excluded because [`dedupe_system_messages`] already handles them.
+fn reference_duplicate_blocks(messages: &mut [Message]) -> usize {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut referenced = 0;
+
+    for (index, message) in messages.iter_mut().enumerate() {
+        if matches!(message.role, Role::System | Role::Developer) {
+            continue;
+        }
+        let Some(content) = &message.content else {
+            continue;
+        };
+        let text = content.as_text();
+        if text.len() < LARGE_BLOCK_CHARS {
+            continue;
+        }
+        match seen.get(&text) {
+            Some(first) => {
+                let marker = format!(
+                    "[Identical to the content already provided in message {} of this \
+                     conversation; omitted here to save context.]",
+                    first + 1
+                );
+                message.content = Some(crate::types::Content::Text(marker));
+                referenced += 1;
+            }
+            None => {
+                seen.insert(text, index);
+            }
+        }
+    }
+
+    referenced
+}
+
+/// Elide the middle of large, stale tool results.
+///
+/// In an agentic loop the context fills with tool output that has already served its
+/// purpose — a file read fifteen steps ago, a search result long since acted on. The
+/// recent ones are load-bearing and are never touched; older large ones keep their head
+/// and tail (where identifying detail and conclusions live) and lose the middle, with a
+/// marker stating exactly how much was removed so the model knows the payload is partial.
+///
+/// Deliberately not applied to the most recent [`STALE_TOOL_RESULT_AGE`] messages: the
+/// tool output a model is actively reasoning about must arrive whole.
+fn trim_stale_tool_results(messages: &mut [Message], stale_age: usize, keep_edge: usize) -> usize {
+    let total = messages.len();
+    if total <= stale_age {
+        return 0;
+    }
+    let cutoff = total - stale_age;
+    let mut trimmed = 0;
+
+    for message in messages.iter_mut().take(cutoff) {
+        if !matches!(message.role, Role::Tool) {
+            continue;
+        }
+        let Some(content) = &message.content else {
+            continue;
+        };
+        let text = content.as_text();
+        // Needs to be long enough that removing the middle beats the marker's own cost.
+        if text.chars().count() < keep_edge * 2 + LARGE_BLOCK_CHARS {
+            continue;
+        }
+
+        let chars: Vec<char> = text.chars().collect();
+        let head: String = chars[..keep_edge].iter().collect();
+        let tail: String = chars[chars.len() - keep_edge..].iter().collect();
+        let removed = chars.len() - (keep_edge * 2);
+        let rebuilt = format!(
+            "{head}\n[... {removed} characters of earlier tool output omitted to save \
+             context ...]\n{tail}"
+        );
+        message.content = Some(crate::types::Content::Text(rebuilt));
+        trimmed += 1;
+    }
+
+    trimmed
 }
 
 #[cfg(test)]
@@ -550,5 +723,171 @@ mod tests {
             long.estimated_input_tokens()
         );
         assert!(warrants_summarization(&long));
+    }
+
+    // ---------------------------------------------------------------------------
+    // JSON minification — the provably-lossless transformation.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn pretty_printed_json_is_minified_to_the_same_value() {
+        let pretty = serde_json::to_string_pretty(&serde_json::json!({
+            "results": [
+                {"file": "src/main.rs", "line": 42, "match": "fn main"},
+                {"file": "src/lib.rs", "line": 7, "match": "pub mod"}
+            ],
+            "truncated": false
+        }))
+        .unwrap();
+
+        let mut request = NormalizedRequest {
+            messages: vec![message(Role::Tool, &pretty)],
+            ..NormalizedRequest::simple("gpt-4o", "")
+        };
+        let result = compress(&mut request, &CompressorConfig::default());
+
+        assert_eq!(result.json_blocks_minified, 1);
+        let after = request.messages[0].text_content();
+        assert!(after.len() < pretty.len(), "minified form must be shorter");
+
+        let before_value: serde_json::Value = serde_json::from_str(&pretty).unwrap();
+        let after_value: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            before_value, after_value,
+            "minification must never change the parsed value"
+        );
+    }
+
+    #[test]
+    fn text_that_merely_starts_with_a_brace_is_left_alone() {
+        let prose = "{ this is not JSON, it is a sentence that happens to open with a brace \
+                     and continues for a while so it clears the length gate comfortably. }";
+        let mut request = NormalizedRequest {
+            messages: vec![message(Role::User, prose)],
+            ..NormalizedRequest::simple("gpt-4o", "")
+        };
+        let result = compress(&mut request, &CompressorConfig::default());
+        assert_eq!(result.json_blocks_minified, 0);
+        assert_eq!(request.messages[0].text_content(), prose);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Duplicate large blocks.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn a_repeated_large_block_is_replaced_by_a_reference_not_deleted() {
+        let document = "SECTION ".repeat(80);
+        let mut request = NormalizedRequest {
+            messages: vec![
+                message(Role::User, &document),
+                message(Role::Assistant, "Understood."),
+                message(Role::User, &document),
+            ],
+            ..NormalizedRequest::simple("gpt-4o", "")
+        };
+        let result = compress(&mut request, &CompressorConfig::default());
+
+        assert_eq!(result.duplicate_blocks_referenced, 1);
+        assert_eq!(request.messages.len(), 3);
+        assert!(request.messages[2].text_content().contains("Identical to"));
+        assert!(result.tokens_saved() > 0);
+    }
+
+    #[test]
+    fn a_small_repeated_block_is_left_alone() {
+        let mut request = NormalizedRequest {
+            messages: vec![
+                message(Role::User, "hello there"),
+                message(Role::Assistant, "hi"),
+                message(Role::User, "hello there"),
+            ],
+            ..NormalizedRequest::simple("gpt-4o", "")
+        };
+        let result = compress(&mut request, &CompressorConfig::default());
+        assert_eq!(result.duplicate_blocks_referenced, 0);
+        assert_eq!(request.messages[2].text_content(), "hello there");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Stale tool results.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn a_stale_tool_result_keeps_its_head_and_tail() {
+        let payload = format!("HEAD-MARKER{}TAIL-MARKER", "x".repeat(4000));
+        let mut messages = vec![message(Role::Tool, &payload)];
+        for i in 0..10 {
+            messages.push(message(Role::User, &format!("follow up {i}")));
+        }
+        let mut request = NormalizedRequest {
+            messages,
+            ..NormalizedRequest::simple("gpt-4o", "")
+        };
+        let result = compress(&mut request, &CompressorConfig::default());
+
+        assert_eq!(result.stale_tool_results_trimmed, 1);
+        let trimmed = request.messages[0].text_content();
+        assert!(trimmed.contains("HEAD-MARKER"), "head must survive");
+        assert!(trimmed.contains("TAIL-MARKER"), "tail must survive");
+        assert!(trimmed.contains("omitted to save context"));
+        assert!(trimmed.len() < payload.len());
+    }
+
+    #[test]
+    fn recent_tool_results_are_never_trimmed() {
+        let payload = "y".repeat(5000);
+        let mut request = NormalizedRequest {
+            messages: vec![
+                message(Role::User, "run the search"),
+                message(Role::Tool, &payload),
+            ],
+            ..NormalizedRequest::simple("gpt-4o", "")
+        };
+        let result = compress(&mut request, &CompressorConfig::default());
+        assert_eq!(result.stale_tool_results_trimmed, 0);
+        assert_eq!(request.messages[1].text_content(), payload);
+    }
+
+    #[test]
+    fn every_new_technique_is_off_when_compression_is_disabled() {
+        let pretty =
+            serde_json::to_string_pretty(&serde_json::json!({"a": [1, 2, 3, 4, 5]})).unwrap();
+        let document = "SECTION ".repeat(80);
+        let mut request = NormalizedRequest {
+            messages: vec![
+                message(Role::Tool, &pretty),
+                message(Role::User, &document),
+                message(Role::User, &document),
+            ],
+            ..NormalizedRequest::simple("gpt-4o", "")
+        };
+        let before = request.messages.clone();
+        let result = compress(&mut request, &CompressorConfig::disabled());
+
+        assert!(result.is_noop());
+        assert_eq!(result.json_blocks_minified, 0);
+        assert_eq!(result.duplicate_blocks_referenced, 0);
+        assert_eq!(result.stale_tool_results_trimmed, 0);
+        assert_eq!(request.messages, before, "prompt must be byte-identical");
+    }
+
+    #[test]
+    fn code_fences_survive_every_technique_together() {
+        let code = "Here is the fix:\n```python\ndef f():\n    if x:\n        return 1\n```\n";
+        let mut request = NormalizedRequest {
+            messages: vec![message(Role::Assistant, code)],
+            ..NormalizedRequest::simple("gpt-4o", "")
+        };
+        compress(&mut request, &CompressorConfig::default());
+        let after = request.messages[0].text_content();
+        assert!(
+            after.contains("    if x:"),
+            "4-space indent must survive: {after}"
+        );
+        assert!(
+            after.contains("        return 1"),
+            "8-space indent must survive"
+        );
     }
 }

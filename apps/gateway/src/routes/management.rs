@@ -2715,3 +2715,102 @@ pub async fn ",
         assert!(!handlers().contains("mod analytics_pool_tests"));
     }
 }
+
+/// `POST /api/compression/preview`
+///
+/// Run the compressor over a prompt and report exactly what it would save — without
+/// calling a provider, spending anything, or recording usage.
+///
+/// This exists for demonstration and for tuning. "We compress your context" is an
+/// assertion; a before/after token count with the money attached is evidence, and the
+/// only honest way to show it is to run the real compressor, not a mock of it. The same
+/// `compressor::compress` the live pipeline calls at stage [6c] runs here, on the caller's
+/// own prompt, so the number shown is the number they would actually get.
+///
+/// Costs are priced at the named model's real input rate from the live pricing table, so
+/// the saving is denominated in the currency the customer is billed in rather than in
+/// tokens they then have to convert themselves.
+pub async fn compression_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CompressionPreviewRequest>,
+) -> Response {
+    match async {
+        require_reader(&state, &headers).await?;
+
+        let model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| "openai/gpt-4o".to_string());
+
+        let mut normalized = crate::types::NormalizedRequest {
+            messages: request.messages.clone(),
+            ..crate::types::NormalizedRequest::simple(&model, "")
+        };
+
+        let before_text = normalized.all_text();
+        let result = crate::engine::compressor::compress(
+            &mut normalized,
+            &crate::engine::compressor::CompressorConfig::default(),
+        );
+        let after_text = normalized.all_text();
+
+        // Priced at the input rate: compression only ever removes prompt tokens, never
+        // output ones, so charging the saving at the output rate would overstate it.
+        let pricing = state.pricing();
+        let (input_rate_mc, cost_saved_mc) = match pricing.get(&model) {
+            Some(m) => (
+                m.input_per_mtok.as_i64(),
+                (m.input_per_mtok.as_i64().saturating_mul(result.tokens_saved() as i64)) / 1_000_000,
+            ),
+            None => (0, 0),
+        };
+
+        Ok::<Response, AegisError>(
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "model": model,
+                    "tokens_before": result.tokens_before,
+                    "tokens_after": result.tokens_after,
+                    "tokens_saved": result.tokens_saved(),
+                    "savings_percent": (result.savings_percent() * 100.0).round() / 100.0,
+                    // Micro-cents, and the dollar figure alongside it so a demo does not
+                    // have to do arithmetic on a projector.
+                    "input_rate_per_mtok_mc": input_rate_mc,
+                    "cost_saved_mc": cost_saved_mc,
+                    "cost_saved_usd": format!("{:.6}", cost_saved_mc as f64 / 1_000_000.0),
+                    "techniques": {
+                        "duplicate_system_messages_removed": result.duplicate_system_messages_removed,
+                        "json_blocks_minified": result.json_blocks_minified,
+                        "duplicate_blocks_referenced": result.duplicate_blocks_referenced,
+                        "stale_tool_results_trimmed": result.stale_tool_results_trimmed,
+                        "whitespace_chars_removed": result.whitespace_chars_removed,
+                        "messages_truncated": result.messages_truncated,
+                    },
+                    // The prompt as the provider would have received it, before and after.
+                    // Returned so a demo can show the actual diff rather than asking the
+                    // audience to trust a number.
+                    "prompt_before": before_text,
+                    "prompt_after": after_text,
+                    "messages_after": normalized.messages,
+                })),
+            )
+                .into_response(),
+        )
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Body for [`compression_preview`].
+#[derive(Debug, Deserialize)]
+pub struct CompressionPreviewRequest {
+    pub messages: Vec<crate::types::Message>,
+    /// Model whose input rate prices the saving. Defaults to `openai/gpt-4o`.
+    #[serde(default)]
+    pub model: Option<String>,
+}
