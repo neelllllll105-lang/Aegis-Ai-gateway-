@@ -232,7 +232,7 @@ export interface BillingPlan {
 export interface ModelPrice {
   model_id: string;
   provider: string;
-  tier: "economy" | "standard" | "premium";
+  tier: "cheap" | "mid" | "premium" | "frontier";
   input_per_mtok_mc: number;
   output_per_mtok_mc: number;
   blended_per_mtok_mc: number;
@@ -262,11 +262,24 @@ export interface Member {
   joined_at: string;
 }
 
+/**
+ * One routing-policy rule. Matches `engine::policy::Rule` on the gateway: `when` accepts
+ * `complexity` / `model_requested` / `team` / `requires_tools` / `min_input_tokens`,
+ * `then` accepts `model_tier` / `max_model_tier` / `pin_model` / `deny` / `passthrough`.
+ * A field the backend doesn't recognise is silently dropped by serde, not rejected — so a
+ * typo here produces a rule that parses fine and matches nothing, which is exactly the
+ * failure mode `RoutingPolicy::from_json`'s own doc comment warns about.
+ */
+export interface PolicyRule {
+  when: Record<string, unknown>;
+  then: Record<string, unknown>;
+}
+
 export interface Policy {
   id: string;
   org_id: string;
   name: string;
-  rules: Record<string, unknown>;
+  rules: PolicyRule[];
   is_active: boolean;
   created_at: string;
 }
@@ -434,7 +447,7 @@ export const api = {
 
   listPolicies: () => apiRequest<{ policies: Policy[] }>("/api/policies"),
 
-  createPolicy: (name: string, rules: Record<string, unknown>) =>
+  createPolicy: (name: string, rules: PolicyRule[]) =>
     apiRequest<{ policy: Policy }>("/api/policies", {
       method: "POST",
       body: { name, rules },

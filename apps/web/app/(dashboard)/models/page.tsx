@@ -12,8 +12,21 @@ import {
   Th,
 } from "@/components/ui";
 
-const TIERS = ["all", "economy", "standard", "premium"] as const;
+// Wire values from `ModelTier::as_str()` (apps/gateway/src/types.rs) — must match exactly,
+// or a filter button silently matches nothing. Previously "economy"/"standard", which never
+// matched the real "cheap"/"mid" the API sends, so two of four buttons always showed an
+// empty table.
+const TIERS = ["all", "cheap", "mid", "premium", "frontier"] as const;
 type Tier = (typeof TIERS)[number];
+
+/** Customer-facing label for a tier button — the wire value stays the comparison key. */
+const TIER_LABELS: Record<Tier, string> = {
+  all: "All",
+  cheap: "Economy",
+  mid: "Standard",
+  premium: "Premium",
+  frontier: "Frontier",
+};
 
 /**
  * The model catalogue, framed as a substitution question.
@@ -100,7 +113,7 @@ export default function ModelsPage() {
                     : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
                 }`}
               >
-                {option}
+                {TIER_LABELS[option]}
               </button>
             ))}
           </div>
@@ -170,7 +183,11 @@ export default function ModelsPage() {
                 <Td muted>{model.provider}</Td>
                 <Td>
                   <Badge
-                    tone={model.tier === "premium" ? "accent" : "neutral"}
+                    tone={
+                      model.tier === "premium" || model.tier === "frontier"
+                        ? "accent"
+                        : "neutral"
+                    }
                     size="sm"
                   >
                     {model.tier}

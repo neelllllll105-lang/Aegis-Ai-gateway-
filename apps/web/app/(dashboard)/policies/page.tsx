@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, ApiError, type Policy } from "@/lib/api";
+import { api, ApiError, type Policy, type PolicyRule } from "@/lib/api";
 import {
   Badge,
   Button,
@@ -26,35 +26,52 @@ import { formatRelative } from "@/lib/format";
  * reliable way to produce a policy that silently matches nothing.
  */
 
-/** The shapes the routing engine understands, as a human would describe them. */
+/**
+ * The shapes the routing engine understands, as a human would describe them.
+ *
+ * The API expects `rules` as an array of `{"when": {...}, "then": {...}}` objects —
+ * `engine::policy::RoutingPolicy::from_json` parses `Vec<Rule>` and falls back to an
+ * empty (no-op) policy on any shape mismatch, and `routes::management::create_policy`
+ * rejects that with a 400 before it can save silently-broken. These four presets used
+ * to be flat objects with invented field names (`action`, `target_tier`, `pin_provider`,
+ * `allowed_models`) that matched none of the real `Condition`/`Action` fields
+ * (`complexity`, `model_requested`, `team`, `requires_tools`, `min_input_tokens` /
+ * `model_tier`, `max_model_tier`, `pin_model`, `deny`, `passthrough`) — every save of
+ * every preset failed the 400 check. Found while chasing an unrelated bug report.
+ *
+ * "Pin to a single provider" and "Restrict to an approved model list" are dropped rather
+ * than patched: the policy DSL has no provider-level field and no negative/exclusion
+ * matcher, so neither was ever expressible as a policy rule. A true model allowlist is a
+ * real feature — it just lives on the API key itself (see Keys), not here.
+ */
 const PRESETS = [
   {
     id: "pin-complex",
     label: "Never downgrade complex work",
     description:
       "Requests classified complex always go to the model that was asked for. Simple and medium requests still route for cost.",
-    rules: { min_complexity: "complex", action: "passthrough" },
+    rules: [{ when: { complexity: "complex" }, then: { passthrough: true } }],
   },
   {
     id: "force-economy",
     label: "Send simple requests to economy models",
     description:
       "Anything classified simple is served by the cheapest model in the economy tier. The largest single source of savings for most teams.",
-    rules: { max_complexity: "simple", action: "route", target_tier: "economy" },
+    rules: [{ when: { complexity: "simple" }, then: { model_tier: "cheap" } }],
   },
   {
-    id: "provider-pin",
-    label: "Pin to a single provider",
+    id: "deny-model",
+    label: "Block a specific model",
     description:
-      "All routing stays within one provider. Used when a data-processing agreement covers one vendor and not others.",
-    rules: { action: "route", pin_provider: "openai" },
+      "Requests naming this model are rejected outright rather than silently substituted onto something else. Useful for retiring a model or enforcing an exclusion.",
+    rules: [{ when: { model_requested: "gpt-3.5-turbo" }, then: { deny: true } }],
   },
   {
-    id: "model-allowlist",
-    label: "Restrict to an approved model list",
+    id: "pin-model",
+    label: "Pin everything to one model",
     description:
-      "Only the named models may ever be served. Requests for anything else are rejected rather than silently substituted.",
-    rules: { action: "restrict", allowed_models: ["gpt-4o-mini", "claude-haiku-4-5"] },
+      "Every request, regardless of what was asked for, is served by exactly this model. For a true per-key model allowlist instead, set it on the API key itself in Keys.",
+    rules: [{ when: {}, then: { pin_model: "openai/gpt-4o-mini" } }],
   },
 ] as const;
 
@@ -105,10 +122,20 @@ export default function PoliciesPage() {
 
     // Parse before sending. A malformed rules object accepted by the browser becomes a
     // policy that matches nothing, which looks identical to a policy that is simply not
-    // being applied — one of the hardest things to debug from the outside.
-    let rules: Record<string, unknown>;
+    // being applied — one of the hardest things to debug from the outside. The API
+    // requires an array of {"when": {...}, "then": {...}} objects — checked here too,
+    // not just left to the server's 400, so the error shows up next to the field that's
+    // actually wrong rather than as a bare request failure.
+    let rules: PolicyRule[];
     try {
-      rules = JSON.parse(rulesJson) as Record<string, unknown>;
+      const parsed: unknown = JSON.parse(rulesJson);
+      if (!Array.isArray(parsed)) {
+        setJsonError(
+          'Rules must be an array: [{"when": {...}, "then": {...}}, ...].',
+        );
+        return;
+      }
+      rules = parsed as PolicyRule[];
     } catch {
       setJsonError("This is not valid JSON. Fix it before saving.");
       return;

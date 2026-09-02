@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
-import { CodeBlock } from "@/components/ui";
+import { IntegrationGuides } from "./IntegrationGuides";
 
 export const metadata: Metadata = {
   title: "Connect Anything — Aegis Gateway",
   description:
-    "Drop-in replacement for OpenAI and Anthropic APIs. Point Cursor, Claude Code, Python, Node.js, or any tool at Aegis with no code changes.",
+    "Drop-in replacement for OpenAI, Anthropic, and Google APIs. Point Cursor, Claude Code, Python, Node.js, or any tool at Aegis with no code changes.",
 };
 
 export default function ConnectPage() {
@@ -19,7 +19,7 @@ export default function ConnectPage() {
           Connect Anything.
         </h1>
         <p className="mt-3 text-[var(--color-muted)] text-sm sm:text-base font-semibold leading-relaxed">
-          Aegis is a <b className="text-[var(--color-ink)]">drop-in replacement</b> for the OpenAI and Anthropic APIs. Point your app, IDE, or SDK at it and instantly spend less, with full governance and analytics — <b className="text-[var(--color-ink)]">with no code changes</b>.
+          Aegis is a <b className="text-[var(--color-ink)]">drop-in replacement</b> for the OpenAI and Anthropic APIs, and it routes to Google models too. Point your app, IDE, or SDK at it and instantly spend less, with full governance and analytics — <b className="text-[var(--color-ink)]">with no code changes</b>.
         </p>
       </section>
 
@@ -126,15 +126,19 @@ export default function ConnectPage() {
         </div>
       </section>
 
-      {/* Integration Guides (Collapsible Accordions) */}
+      {/* Integration Guides, organized by wire shape */}
       <section id="guides" className="scroll-mt-8 space-y-4">
         <div className="text-center">
           <div className="font-mono text-[11px] font-bold uppercase tracking-[0.18em] text-[var(--color-muted-light)]">
             Integration guides
           </div>
           <h2 className="mx-auto mt-2 max-w-2xl text-balance text-2xl font-bold tracking-tight sm:text-3xl text-[var(--color-ink)]">
-            Copy-paste setup for your tool
+            Copy-paste setup, by provider
           </h2>
+          <p className="mx-auto mt-2 max-w-xl text-xs sm:text-sm text-[var(--color-muted)] font-semibold">
+            Two request shapes, every model reachable from either. Pick whichever matches
+            what you already speak.
+          </p>
         </div>
 
         <div className="mx-auto max-w-3xl rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface2)] p-5 shadow-[3px_3px_0_var(--shadow-color)]">
@@ -151,67 +155,7 @@ export default function ConnectPage() {
           </ol>
         </div>
 
-        <div className="mx-auto max-w-3xl space-y-3">
-          <GuideItem
-            title="Cursor / IDE Integration"
-            instruction="Settings → Models → enable OpenAI API Key, paste your aegis_sk_ key, tick Override OpenAI Base URL and set it to the URL below."
-            code={`Base URL:  http://localhost:8080/v1
-API Key:   aegis_sk_live_your_key_here`}
-          />
-
-          <GuideItem
-            title="Claude Code CLI & Terminal"
-            instruction="Export the following two environment variables before running the claude command:"
-            code={`export ANTHROPIC_BASE_URL="http://localhost:8080"
-export ANTHROPIC_API_KEY="aegis_sk_live_your_key_here"
-
-claude`}
-          />
-
-          <GuideItem
-            title="Python (OpenAI SDK)"
-            instruction="Pass base_url and your Aegis key during client initialization:"
-            code={`from openai import OpenAI
-
-client = OpenAI(
-    base_url="http://localhost:8080/v1",
-    api_key="aegis_sk_live_your_key_here",
-)
-
-response = client.chat.completions.create(
-    model="gpt-4o",
-    messages=[{"role": "user", "content": "Hello Aegis!"}],
-)`}
-          />
-
-          <GuideItem
-            title="TypeScript / Node.js (OpenAI SDK)"
-            instruction="Change baseURL in your client instantiation:"
-            code={`import OpenAI from "openai";
-
-const client = new OpenAI({
-  baseURL: "http://localhost:8080/v1",
-  apiKey: process.env.AEGIS_API_KEY,
-});
-
-const response = await client.chat.completions.create({
-  model: "gpt-4o",
-  messages: [{ role: "user", content: "Summarize this data" }],
-});`}
-          />
-
-          <GuideItem
-            title="Raw HTTP / cURL"
-            instruction="Standard HTTP POST to the completions endpoint:"
-            code={`curl http://localhost:8080/v1/chat/completions \\
-  -H "Authorization: Bearer aegis_sk_live_your_key_here" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "gpt-4o",
-    "messages": [{"role": "user", "content": "Hello Aegis!"}]
-  }'`}
-          />
-        </div>
+        <IntegrationGuides />
       </section>
     </div>
   );
@@ -228,32 +172,5 @@ function StepCard({ num, title, desc }: { num: string; title: string; desc: stri
         <div className="mt-0.5 text-xs text-[var(--color-muted)] font-medium">{desc}</div>
       </div>
     </div>
-  );
-}
-
-function GuideItem({
-  title,
-  instruction,
-  code,
-}: {
-  title: string;
-  instruction: string;
-  code: string;
-}) {
-  return (
-    <details className="group rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface)] open:bg-[var(--color-surface)] shadow-[3px_3px_0_var(--shadow-color)]">
-      <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 font-bold text-[var(--color-ink)] text-sm marker:hidden">
-        <span>{title}</span>
-        <span className="text-[var(--color-ink)] font-bold transition-transform group-open:rotate-90">
-          ▶
-        </span>
-      </summary>
-      <div className="border-t border-[var(--color-ink)] px-5 py-4">
-        <p className="mb-3 text-xs sm:text-sm text-[var(--color-muted)] font-medium leading-relaxed">
-          {instruction}
-        </p>
-        <CodeBlock code={code} />
-      </div>
-    </details>
   );
 }
