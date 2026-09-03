@@ -59,6 +59,8 @@ pub struct PipelineOutcome {
     pub requested_model: String,
     pub provider: String,
     pub savings: SavingsBreakdown,
+    pub input_cost_mc: i64,
+    pub output_cost_mc: i64,
     pub cache: CacheOutcome,
     pub routing_reason: RoutingReason,
     pub complexity_score: Option<f32>,
@@ -81,7 +83,7 @@ impl PipelineOutcome {
     /// they are derived from the same values written to the usage record — never
     /// recomputed, never rounded differently.
     pub fn headers(&self) -> Vec<(HeaderName, HeaderValue)> {
-        let mut headers = Vec::with_capacity(9);
+        let mut headers = Vec::with_capacity(16);
         let mut push = |name: &'static str, value: String| {
             if let Ok(value) = HeaderValue::from_str(&value) {
                 headers.push((HeaderName::from_static(name), value));
@@ -99,13 +101,42 @@ impl PipelineOutcome {
             "x-aegis-savings",
             self.savings.gross_savings.to_usd_string(),
         );
+        push("x-aegis-tokens-input", self.tokens.input_tokens.to_string());
+        push("x-aegis-tokens-output", self.tokens.output_tokens.to_string());
+        if self.tokens.cached_input_tokens > 0 {
+            push(
+                "x-aegis-tokens-cached",
+                self.tokens.cached_input_tokens.to_string(),
+            );
+        }
+        push(
+            "x-aegis-cost-input",
+            MicroCents(self.input_cost_mc).to_usd_string(),
+        );
+        push(
+            "x-aegis-cost-output",
+            MicroCents(self.output_cost_mc).to_usd_string(),
+        );
         push("x-aegis-cache", self.cache.as_str().to_string());
         push("x-aegis-routing", self.routing_reason.as_str().to_string());
         if self.tokens_saved_by_compression > 0 {
             push(
+                "x-aegis-compression-before-tokens",
+                (self.tokens.input_tokens + self.tokens_saved_by_compression).to_string(),
+            );
+            push(
+                "x-aegis-compression-after-tokens",
+                self.tokens.input_tokens.to_string(),
+            );
+            push(
                 "x-aegis-compression-tokens-saved",
                 self.tokens_saved_by_compression.to_string(),
             );
+            let total_before = self.tokens.input_tokens + self.tokens_saved_by_compression;
+            if total_before > 0 {
+                let ratio = (self.tokens_saved_by_compression as f64 / total_before as f64) * 100.0;
+                push("x-aegis-compression-ratio", format!("{:.1}%", ratio));
+            }
         }
         if !self.explanation.is_empty() {
             // Header values must be printable ASCII on one line, so the reasons are joined
@@ -159,6 +190,8 @@ impl PipelineOutcome {
             self.complexity_score,
             status_code,
         );
+        event.input_cost_mc = self.input_cost_mc;
+        event.output_cost_mc = self.output_cost_mc;
         event.tokens_saved_by_compression = self.tokens_saved_by_compression;
         event.region = Some(region.to_string());
         event
@@ -208,6 +241,30 @@ impl OverheadClock {
             .as_secs_f64()
             * 1_000.0
     }
+}
+
+/// Derives a deterministic affinity key for a multi-turn conversation.
+///
+/// Hashes org_id, system prompt text, and the first user message.
+/// Because these remain invariant across all turns of a conversation, all subsequent turns
+/// will produce the exact same key and map to the pinned model in Redis.
+pub(crate) fn conversation_affinity_key(org_id: Uuid, request: &NormalizedRequest) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let system = request.system_text();
+    let first_user = request.first_user_message();
+    if system.trim().is_empty() && first_user.as_deref().unwrap_or("").trim().is_empty() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(org_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(system.as_bytes());
+    hasher.update(b":");
+    if let Some(user_msg) = first_user {
+        hasher.update(user_msg.as_bytes());
+    }
+    let hash = format!("{:x}", hasher.finalize());
+    Some(format!("aegis:affinity:{}:{}", org_id, hash))
 }
 
 /// The token circuit breaker — stage [4b].
@@ -264,6 +321,8 @@ fn cache_hit_outcome(
         provider: "cache".to_string(),
         response,
         savings,
+        input_cost_mc: 0,
+        output_cost_mc: 0,
         cache: outcome,
         routing_reason: RoutingReason::Cache,
         complexity_score: None,
@@ -440,12 +499,17 @@ pub async fn execute_with_headroom(
     if smart_caching_enabled
         && !auth.zero_retention
         && fingerprint::cacheability(&request, auth.zero_retention).is_cacheable()
+        // Local-only embedder guard: Skip semantic check if embedder requires external HTTP network
+        // calls (e.g. 300ms remote embedding API), preserving sub-millisecond hot-path P99 SLA.
+        && state.embedder.is_local()
     {
         let text = semantic::embedding_text(&request);
         if let Some(embedding) = state.embedder.embed(&text).await {
-            let semantic_cache = SemanticCache::new(
+            let domain = Classifier::new().classify(&request).domain;
+            let semantic_cache = SemanticCache::with_domain(
                 state.semantic_store.as_ref(),
                 state.config.semantic_similarity_threshold,
+                domain,
             );
             if let Ok(Some(hit)) = semantic_cache
                 .get(&embedding, auth.org_id, auth.zero_retention)
@@ -500,7 +564,14 @@ pub async fn execute_with_headroom(
     };
     let compression = compressor::compress(&mut request, &compressor_config);
 
-    // ---- [6] Routing --------------------------------------------------------------
+    // ---- [6] Routing with Conversation Affinity ----------------------------------
+    let affinity_key = conversation_affinity_key(auth.org_id, &request);
+    let affinity_model = if let Some(ref key) = affinity_key {
+        state.store.get(key).await.ok().flatten()
+    } else {
+        None
+    };
+
     let policy = load_policy(state, auth).await;
     let inputs = RoutingInputs {
         hint,
@@ -514,6 +585,7 @@ pub async fn execute_with_headroom(
         // description of intent rather than behaviour. It reorders candidates the router
         // has already accepted; it can never widen the set.
         bandit: Some(state.bandit.as_ref()),
+        affinity_model,
     };
 
     let router = Router::with_classifier(Classifier::new());
@@ -539,6 +611,15 @@ pub async fn execute_with_headroom(
     clock.exit_provider();
 
     let (response, served_model, provider_id, used_fallback) = attempt?;
+
+    // Maintain conversation affinity in Redis (30-minute sliding window) to preserve
+    // upstream KV prompt cache discounts on subsequent turns.
+    if let Some(ref key) = affinity_key {
+        let _ = state
+            .store
+            .set_ex(key, &served_model, std::time::Duration::from_secs(1800))
+            .await;
+    }
 
     // ---- [8]/[9] Usage and cost ---------------------------------------------------
     let tokens = resolve_usage(&response, &request);
@@ -636,6 +717,17 @@ pub async fn execute_with_headroom(
         .metrics
         .record_routing(routing_reason.as_str(), &served_model);
 
+    let input_cost = state
+        .pricing()
+        .get(&served_model)
+        .map(|m| m.input_cost_of(&tokens))
+        .unwrap_or(MicroCents::ZERO);
+    let output_cost = state
+        .pricing()
+        .get(&served_model)
+        .map(|m| m.output_cost_of(&tokens))
+        .unwrap_or(MicroCents::ZERO);
+
     Ok(PipelineOutcome {
         request_id,
         response,
@@ -643,6 +735,8 @@ pub async fn execute_with_headroom(
         requested_model,
         provider: provider_id,
         savings,
+        input_cost_mc: input_cost.as_i64(),
+        output_cost_mc: output_cost.as_i64(),
         cache: CacheOutcome::Miss,
         routing_reason,
         complexity_score: decision.complexity_score,
@@ -842,8 +936,49 @@ async fn open_stream_with_fallback(
                 )
                 .await
             {
-                Ok(upstream) => {
+                Ok(mut upstream) => {
                     let elapsed_ms = opened_at.elapsed().as_secs_f64() * 1_000.0;
+
+                    // TTFT Verification Gate: buffer the first chunk to catch immediate empty streams,
+                    // upstream network truncations, or model refusals before committing to the client.
+                    let final_stream: crate::providers::ChunkStream = if index + 1 < chain.attempts.len() {
+                        match upstream.next().await {
+                            Some(Ok(first_chunk)) => {
+                                let text = first_chunk.delta.trim_start();
+                                let is_refusal = text.starts_with("I cannot")
+                                    || text.starts_with("I am unable")
+                                    || text.starts_with("As an AI");
+                                if is_refusal {
+                                    tracing::info!(
+                                        model = %attempt.model_id,
+                                        "TTFT buffer gate detected refusal from candidate; cascading to next tier"
+                                    );
+                                    continue;
+                                }
+                                Box::pin(futures::stream::once(async move { Ok(first_chunk) }).chain(upstream))
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!(
+                                    model = %attempt.model_id,
+                                    error = %e,
+                                    "TTFT initial chunk error; advancing fallback chain"
+                                );
+                                record_provider_failure(state, provider.id(), &e);
+                                last_error = Some(e);
+                                break;
+                            }
+                            None => {
+                                tracing::warn!(
+                                    model = %attempt.model_id,
+                                    "upstream stream closed immediately without producing tokens; advancing fallback chain"
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        upstream
+                    };
+
                     state
                         .health
                         .record_success_with_latency(provider.id(), elapsed_ms);
@@ -860,7 +995,7 @@ async fn open_stream_with_fallback(
                             .record_fallback(&chain.attempts[0].provider, provider.id());
                     }
                     return Ok(StreamAttempt {
-                        upstream,
+                        upstream: final_stream,
                         model_id: attempt.model_id.clone(),
                         provider_id: provider.id().to_string(),
                         used_fallback: index > 0,
@@ -1300,6 +1435,23 @@ async fn stream_chat(
     let request_id = Uuid::new_v4();
     let requested_model = request.model.clone();
 
+    // Context compression: runs identically on streaming traffic as non-streaming traffic
+    let mut request = request;
+    let compressor_config = if auth_context.zero_retention {
+        CompressorConfig::disabled()
+    } else {
+        CompressorConfig::default()
+    };
+    let compression = compressor::compress(&mut request, &compressor_config);
+
+    // Conversation affinity: keep multi-turn conversations pinned to the warm model in Redis
+    let affinity_key = conversation_affinity_key(auth_context.org_id, &request);
+    let affinity_model = if let Some(ref key) = affinity_key {
+        state.store.get(key).await.ok().flatten()
+    } else {
+        None
+    };
+
     let policy = load_policy(state, auth_context).await;
     let inputs = RoutingInputs {
         hint,
@@ -1309,6 +1461,7 @@ async fn stream_chat(
         plan_tier_ceiling: plan_tier_ceiling(&auth_context.plan),
         budget_headroom_mc: None,
         bandit: Some(state.bandit.as_ref()),
+        affinity_model,
     };
     let router = Router::with_classifier(Classifier::new());
     let decision = router.route(&request, &state.pricing(), &state.health, &inputs)?;
@@ -1344,6 +1497,14 @@ async fn stream_chat(
         used_fallback,
     } = opened;
 
+    // Pin or refresh the conversation affinity in Redis (30m sliding TTL)
+    if let Some(ref key) = affinity_key {
+        let _ = state
+            .store
+            .set_ex(key, &served_model, std::time::Duration::from_secs(1800))
+            .await;
+    }
+
     let state_for_stream = state.clone();
     let auth_for_stream = auth_context.clone();
     let estimated_input = request.estimated_input_tokens();
@@ -1371,6 +1532,7 @@ async fn stream_chat(
     // readiness audit: a support engineer given a customer's request_id could not
     // distinguish "this failed" from "this succeeded" in the usage record it produced.
     let mut stream_error: Option<String> = None;
+    let requested_model_header = requested_model.clone();
 
     let sse = async_stream::stream! {
         let mut upstream = upstream;
@@ -1497,6 +1659,12 @@ async fn stream_chat(
             state_for_stream.health.record_success(&provider_id);
         }
 
+        event.tokens_saved_by_compression = compression.tokens_saved();
+        if let Some(pricing) = state_for_stream.pricing().get(&served_model) {
+            event.input_cost_mc = pricing.input_cost_of(&tokens).as_i64();
+            event.output_cost_mc = pricing.output_cost_of(&tokens).as_i64();
+        }
+
         event.error_type = stream_error;
         // Convert the held projection into the real cost, exactly as the non-streaming
         // path does. Without this the reservation would sit on the counter until it
@@ -1542,6 +1710,39 @@ async fn stream_chat(
         HeaderValue::from_str(&decision.served_model)
             .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
     );
+    response_headers.insert(
+        HeaderName::from_static("x-aegis-requested-model"),
+        HeaderValue::from_str(&requested_model_header)
+            .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+    );
+    response_headers.insert(
+        HeaderName::from_static("x-aegis-routing"),
+        HeaderValue::from_str(decision.reason.as_str())
+            .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+    );
+    if compression.tokens_saved() > 0 {
+        response_headers.insert(
+            HeaderName::from_static("x-aegis-compression-before-tokens"),
+            HeaderValue::from_str(&compression.tokens_before.to_string())
+                .unwrap_or_else(|_| HeaderValue::from_static("0")),
+        );
+        response_headers.insert(
+            HeaderName::from_static("x-aegis-compression-after-tokens"),
+            HeaderValue::from_str(&compression.tokens_after.to_string())
+                .unwrap_or_else(|_| HeaderValue::from_static("0")),
+        );
+        response_headers.insert(
+            HeaderName::from_static("x-aegis-compression-tokens-saved"),
+            HeaderValue::from_str(&compression.tokens_saved().to_string())
+                .unwrap_or_else(|_| HeaderValue::from_static("0")),
+        );
+        let ratio = compression.savings_percent();
+        response_headers.insert(
+            HeaderName::from_static("x-aegis-compression-ratio"),
+            HeaderValue::from_str(&format!("{:.1}%", ratio))
+                .unwrap_or_else(|_| HeaderValue::from_static("0%")),
+        );
+    }
     response_headers.insert(
         HeaderName::from_static("x-aegis-request-id"),
         HeaderValue::from_str(&request_id.to_string())
@@ -2629,6 +2830,8 @@ mod tests {
             requested_model: "mock/mock-premium".into(),
             provider: "mock".into(),
             savings: SavingsBreakdown::compute(MicroCents(1_000), MicroCents(100), 2_000),
+            input_cost_mc: 0,
+            output_cost_mc: 0,
             cache: CacheOutcome::Miss,
             routing_reason: RoutingReason::Complexity,
             complexity_score: Some(0.1),
@@ -2669,6 +2872,8 @@ mod tests {
             requested_model: "m".into(),
             provider: "mock".into(),
             savings: SavingsBreakdown::passthrough(MicroCents(10)),
+            input_cost_mc: 0,
+            output_cost_mc: 0,
             cache: CacheOutcome::Miss,
             routing_reason: RoutingReason::Passthrough,
             complexity_score: None,

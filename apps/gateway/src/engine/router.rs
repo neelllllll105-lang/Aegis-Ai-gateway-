@@ -90,6 +90,8 @@ pub struct RoutingInputs<'a> {
     /// `None` disables outcome-informed selection entirely — used by tests that need a
     /// purely deterministic decision, and available as a kill switch.
     pub bandit: Option<&'a RoutingBandit>,
+    /// Pinned model from conversation affinity, preserving upstream KV prompt caching across turns.
+    pub affinity_model: Option<String>,
 }
 
 /// The routing engine.
@@ -220,6 +222,31 @@ impl Router {
                     }
                 }
                 return Ok(self.passthrough(requested, RoutingReason::Policy));
+            }
+        }
+
+        // [2b] Conversation affinity: if this multi-turn session has a pinned model
+        // (to retain prompt KV-cache across turns), check if it can serve this turn.
+        if let Some(pinned_id) = &inputs.affinity_model {
+            if let Some(pinned) = pricing.get(pinned_id) {
+                if health.is_available(&pinned.provider)
+                    && is_allowed(&pinned.model_id, inputs)
+                    && (!requirements.tools || pinned.supports_tools)
+                    && (!requirements.vision || pinned.supports_vision)
+                    && pinned.context_window >= requirements.min_context
+                {
+                    return Ok(RoutingDecision {
+                        served_model: pinned.model_id.clone(),
+                        provider: pinned.provider.clone(),
+                        reason: RoutingReason::Complexity,
+                        complexity_score: Some(classification.score),
+                        candidates_considered: 1,
+                        explanation: vec![format!(
+                            "pinned to {} via conversation affinity to preserve upstream prompt KV cache",
+                            pinned.model_id
+                        )],
+                    });
+                }
             }
         }
 
@@ -1467,5 +1494,24 @@ mod tests {
             actual < baseline,
             "routing produced no saving: {actual} vs {baseline}"
         );
+    }
+
+    #[test]
+    fn conversation_affinity_pins_model_across_turns() {
+        let table = pricing();
+        let health = healthy();
+        let request = simple_request();
+
+        let inputs = RoutingInputs {
+            affinity_model: Some("gpt-4o-mini".to_string()),
+            ..RoutingInputs::default()
+        };
+
+        let decision = Router::new()
+            .route(&request, &table, &health, &inputs)
+            .unwrap();
+
+        assert_eq!(decision.served_model, "openai/gpt-4o-mini");
+        assert!(decision.explanation[0].contains("conversation affinity"));
     }
 }

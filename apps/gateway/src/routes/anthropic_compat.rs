@@ -539,6 +539,23 @@ async fn stream_messages(
     let request_id = uuid::Uuid::new_v4();
     let requested_model = request.model.clone();
 
+    // Context compression: eliminate identical system instructions and whitespace
+    let mut request = request;
+    let compressor_config = if auth_context.zero_retention {
+        crate::engine::compressor::CompressorConfig::disabled()
+    } else {
+        crate::engine::compressor::CompressorConfig::default()
+    };
+    let compression = crate::engine::compressor::compress(&mut request, &compressor_config);
+
+    // Conversation affinity: maintain model pinning across multi-turn sessions
+    let affinity_key = crate::routes::openai_compat::conversation_affinity_key(auth_context.org_id, &request);
+    let affinity_model = if let Some(ref key) = affinity_key {
+        state.store.get(key).await.ok().flatten()
+    } else {
+        None
+    };
+
     let inputs = RoutingInputs {
         hint,
         policy: None,
@@ -547,6 +564,7 @@ async fn stream_messages(
         plan_tier_ceiling: crate::routes::openai_compat::plan_tier_ceiling(&auth_context.plan),
         budget_headroom_mc: None,
         bandit: Some(state.bandit.as_ref()),
+        affinity_model,
     };
     let router = Router::with_classifier(Classifier::new());
     let decision = router.route(&request, &state.pricing(), &state.health, &inputs)?;
@@ -576,6 +594,14 @@ async fn stream_messages(
     let state_for_stream = state.clone();
     let auth_for_stream = auth_context.clone();
     let served_model = opened.model_id.clone();
+
+    // Pin or refresh conversation affinity in Redis (30-minute sliding window)
+    if let Some(ref key) = affinity_key {
+        let _ = state
+            .store
+            .set_ex(key, &served_model, std::time::Duration::from_secs(1800))
+            .await;
+    }
     let provider_id = opened.provider_id.clone();
     let upstream = opened.upstream;
     let estimated_input = request.estimated_input_tokens();
@@ -598,6 +624,7 @@ async fn stream_messages(
     // dies mid-stream is metered as a clean 200 and the circuit breaker never hears about
     // it -- on the endpoint built specifically for streaming-heavy clients.
     let mut stream_error: Option<String> = None;
+    let requested_model_header = requested_model.clone();
 
     let sse = async_stream::stream! {
         // message_start. The input token count is reported here and nowhere else, so a
@@ -762,6 +789,12 @@ async fn stream_messages(
             state_for_stream.health.record_success(&provider_id);
         }
 
+        event.tokens_saved_by_compression = compression.tokens_saved();
+        if let Some(pricing) = state_for_stream.pricing().get(&served_model) {
+            event.input_cost_mc = pricing.input_cost_of(&tokens).as_i64();
+            event.output_cost_mc = pricing.output_cost_of(&tokens).as_i64();
+        }
+
         event.error_type = stream_error;
         event.reserved_mc = reservation.commit();
 
@@ -806,6 +839,39 @@ async fn stream_messages(
         HeaderValue::from_str(&decision.served_model)
             .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
     );
+    headers.insert(
+        "x-aegis-requested-model",
+        HeaderValue::from_str(&requested_model_header)
+            .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+    );
+    headers.insert(
+        "x-aegis-routing",
+        HeaderValue::from_str(decision.reason.as_str())
+            .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+    );
+    if compression.tokens_saved() > 0 {
+        headers.insert(
+            "x-aegis-compression-before-tokens",
+            HeaderValue::from_str(&compression.tokens_before.to_string())
+                .unwrap_or_else(|_| HeaderValue::from_static("0")),
+        );
+        headers.insert(
+            "x-aegis-compression-after-tokens",
+            HeaderValue::from_str(&compression.tokens_after.to_string())
+                .unwrap_or_else(|_| HeaderValue::from_static("0")),
+        );
+        headers.insert(
+            "x-aegis-compression-tokens-saved",
+            HeaderValue::from_str(&compression.tokens_saved().to_string())
+                .unwrap_or_else(|_| HeaderValue::from_static("0")),
+        );
+        let ratio = compression.savings_percent();
+        headers.insert(
+            "x-aegis-compression-ratio",
+            HeaderValue::from_str(&format!("{:.1}%", ratio))
+                .unwrap_or_else(|_| HeaderValue::from_static("0%")),
+        );
+    }
     headers.insert(
         "x-aegis-request-id",
         HeaderValue::from_str(&request_id.to_string())
@@ -1301,6 +1367,8 @@ mod tests {
             requested_model: "anthropic/claude-sonnet-4-5".into(),
             provider: "openai".into(),
             savings: SavingsBreakdown::compute(MicroCents(5_000), MicroCents(500), 2_000),
+            input_cost_mc: 0,
+            output_cost_mc: 0,
             cache: CacheOutcome::Miss,
             routing_reason: RoutingReason::Complexity,
             complexity_score: Some(0.2),

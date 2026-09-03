@@ -69,6 +69,8 @@ pub struct CompressorConfig {
     pub truncate_history: bool,
     pub truncate_threshold: usize,
     pub keep_recent: usize,
+    /// Maximum target tokens before history truncation triggers, regardless of turn count.
+    pub token_budget: Option<u64>,
 }
 
 impl Default for CompressorConfig {
@@ -79,6 +81,7 @@ impl Default for CompressorConfig {
             truncate_history: true,
             truncate_threshold: TRUNCATE_THRESHOLD,
             keep_recent: KEEP_RECENT,
+            token_budget: Some(32_000),
         }
     }
 }
@@ -93,6 +96,7 @@ impl CompressorConfig {
             truncate_history: false,
             truncate_threshold: usize::MAX,
             keep_recent: usize::MAX,
+            token_budget: None,
         }
     }
 }
@@ -117,6 +121,8 @@ pub fn compress(request: &mut NormalizedRequest, config: &CompressorConfig) -> C
             &mut request.messages,
             config.truncate_threshold,
             config.keep_recent,
+            config.token_budget,
+            result.tokens_before,
         );
     }
 
@@ -222,8 +228,16 @@ fn collapse_outside_code_fences(input: &str) -> String {
 /// Drop the middle of an over-long conversation, keeping system messages and recent turns.
 ///
 /// Returns the number of messages removed.
-fn truncate_history(messages: &mut Vec<Message>, threshold: usize, keep_recent: usize) -> usize {
-    if messages.len() <= threshold || keep_recent >= messages.len() {
+fn truncate_history(
+    messages: &mut Vec<Message>,
+    threshold: usize,
+    keep_recent: usize,
+    token_budget: Option<u64>,
+    estimated_tokens: u64,
+) -> usize {
+    let exceeds_turns = messages.len() > threshold;
+    let exceeds_budget = token_budget.map(|b| estimated_tokens > b).unwrap_or(false);
+    if (!exceeds_turns && !exceeds_budget) || keep_recent >= messages.len() {
         return 0;
     }
 
@@ -550,5 +564,37 @@ mod tests {
             long.estimated_input_tokens()
         );
         assert!(warrants_summarization(&long));
+    }
+
+    #[test]
+    fn truncation_triggers_on_token_budget_exceeded() {
+        // A conversation with only 8 messages (< TRUNCATE_THRESHOLD = 40)
+        // but 50,000 tokens (> token_budget = 10,000)
+        let large_msg = "word ".repeat(3000); // ~3750 tokens each
+        let mut request = NormalizedRequest {
+            messages: vec![
+                message(Role::System, "You are an assistant."),
+                message(Role::User, &large_msg),
+                message(Role::Assistant, &large_msg),
+                message(Role::User, &large_msg),
+                message(Role::Assistant, &large_msg),
+                message(Role::User, &large_msg),
+                message(Role::Assistant, &large_msg),
+                message(Role::User, "final question"),
+            ],
+            ..NormalizedRequest::simple("gpt-4o", "")
+        };
+
+        let config = CompressorConfig {
+            token_budget: Some(10_000),
+            truncate_threshold: 40,
+            keep_recent: 3,
+            ..CompressorConfig::default()
+        };
+
+        let result = compress(&mut request, &config);
+        assert!(result.messages_truncated > 0);
+        assert!(result.tokens_saved() > 0);
+        assert!(request.messages.iter().any(|m| m.text_content() == TRUNCATION_MARKER));
     }
 }
