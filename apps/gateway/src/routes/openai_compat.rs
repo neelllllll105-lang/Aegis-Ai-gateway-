@@ -102,7 +102,10 @@ impl PipelineOutcome {
             self.savings.gross_savings.to_usd_string(),
         );
         push("x-aegis-tokens-input", self.tokens.input_tokens.to_string());
-        push("x-aegis-tokens-output", self.tokens.output_tokens.to_string());
+        push(
+            "x-aegis-tokens-output",
+            self.tokens.output_tokens.to_string(),
+        );
         if self.tokens.cached_input_tokens > 0 {
             push(
                 "x-aegis-tokens-cached",
@@ -248,7 +251,10 @@ impl OverheadClock {
 /// Hashes org_id, system prompt text, and the first user message.
 /// Because these remain invariant across all turns of a conversation, all subsequent turns
 /// will produce the exact same key and map to the pinned model in Redis.
-pub(crate) fn conversation_affinity_key(org_id: Uuid, request: &NormalizedRequest) -> Option<String> {
+pub(crate) fn conversation_affinity_key(
+    org_id: Uuid,
+    request: &NormalizedRequest,
+) -> Option<String> {
     use sha2::{Digest, Sha256};
     let system = request.system_text();
     let first_user = request.first_user_message();
@@ -941,7 +947,9 @@ async fn open_stream_with_fallback(
 
                     // TTFT Verification Gate: buffer the first chunk to catch immediate empty streams,
                     // upstream network truncations, or model refusals before committing to the client.
-                    let final_stream: crate::providers::ChunkStream = if index + 1 < chain.attempts.len() {
+                    let final_stream: crate::providers::ChunkStream = if index + 1
+                        < chain.attempts.len()
+                    {
                         match upstream.next().await {
                             Some(Ok(first_chunk)) => {
                                 let text = first_chunk.delta.trim_start();
@@ -955,7 +963,10 @@ async fn open_stream_with_fallback(
                                     );
                                     continue;
                                 }
-                                Box::pin(futures::stream::once(async move { Ok(first_chunk) }).chain(upstream))
+                                Box::pin(
+                                    futures::stream::once(async move { Ok(first_chunk) })
+                                        .chain(upstream),
+                                )
                             }
                             Some(Err(e)) => {
                                 tracing::warn!(

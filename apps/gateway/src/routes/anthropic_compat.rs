@@ -549,7 +549,8 @@ async fn stream_messages(
     let compression = crate::engine::compressor::compress(&mut request, &compressor_config);
 
     // Conversation affinity: maintain model pinning across multi-turn sessions
-    let affinity_key = crate::routes::openai_compat::conversation_affinity_key(auth_context.org_id, &request);
+    let affinity_key =
+        crate::routes::openai_compat::conversation_affinity_key(auth_context.org_id, &request);
     let affinity_model = if let Some(ref key) = affinity_key {
         state.store.get(key).await.ok().flatten()
     } else {

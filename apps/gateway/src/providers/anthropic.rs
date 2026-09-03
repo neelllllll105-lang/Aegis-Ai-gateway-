@@ -153,7 +153,10 @@ fn translate_tools(tools: &[serde_json::Value], is_cacheable: bool) -> Vec<serde
             };
             if is_cacheable && i + 1 == total {
                 if let Some(obj) = translated.as_object_mut() {
-                    obj.insert("cache_control".into(), serde_json::json!({"type": "ephemeral"}));
+                    obj.insert(
+                        "cache_control".into(),
+                        serde_json::json!({"type": "ephemeral"}),
+                    );
                 }
             }
             translated
@@ -816,7 +819,9 @@ mod tests {
     fn anthropic_cache_control_injected_when_cacheable() {
         let large_prompt = "system instruction ".repeat(300); // > 1024 tokens
         let mut request = NormalizedRequest::simple("claude-sonnet-4-5", "hello");
-        request.messages.insert(0, Message::text(Role::System, &large_prompt));
+        request
+            .messages
+            .insert(0, Message::text(Role::System, &large_prompt));
         request.tools = vec![serde_json::json!({
             "type": "function",
             "function": {
