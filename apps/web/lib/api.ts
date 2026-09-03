@@ -184,8 +184,12 @@ export interface RequestLogRow {
   provider: string;
   input_tokens: number;
   output_tokens: number;
+  cached_input_tokens?: number;
+  tokens_saved_by_compression?: number;
   baseline_cost_mc: number;
   actual_cost_mc: number;
+  input_cost_mc?: number;
+  output_cost_mc?: number;
   gross_savings_mc: number;
   latency_ms: number;
   cache_hit: boolean;

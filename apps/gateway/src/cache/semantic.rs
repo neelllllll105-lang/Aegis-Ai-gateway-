@@ -328,9 +328,32 @@ pub struct SemanticCache<'a> {
     threshold: f32,
 }
 
+/// Adapt the semantic similarity threshold based on task domain:
+/// - Code tasks require near-exact semantic match (0.96) because a single token/variable difference alters program logic.
+/// - Reasoning tasks require high precision (0.92).
+/// - Language / General tasks can use 0.85 to capture natural paraphrasing.
+pub fn adaptive_threshold(base: f32, domain: crate::engine::classifier::TaskDomain) -> f32 {
+    match domain {
+        crate::engine::classifier::TaskDomain::Code => base.max(0.96),
+        crate::engine::classifier::TaskDomain::Reasoning => base.max(0.92),
+        crate::engine::classifier::TaskDomain::Language
+        | crate::engine::classifier::TaskDomain::General => base.clamp(0.82, 0.88),
+    }
+}
+
 impl<'a> SemanticCache<'a> {
     /// Construct with a vector store and similarity threshold.
     pub fn new(store: &'a dyn VectorStore, threshold: f32) -> SemanticCache<'a> {
+        SemanticCache { store, threshold }
+    }
+
+    /// Construct with a vector store, base threshold, and task domain for adaptive thresholding.
+    pub fn with_domain(
+        store: &'a dyn VectorStore,
+        base_threshold: f32,
+        domain: crate::engine::classifier::TaskDomain,
+    ) -> SemanticCache<'a> {
+        let threshold = adaptive_threshold(base_threshold, domain);
         SemanticCache { store, threshold }
     }
 
@@ -621,5 +644,18 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn adaptive_threshold_scales_by_domain() {
+        use crate::engine::classifier::TaskDomain;
+        let base = 0.90;
+        let code_thresh = adaptive_threshold(base, TaskDomain::Code);
+        let reason_thresh = adaptive_threshold(base, TaskDomain::Reasoning);
+        let lang_thresh = adaptive_threshold(base, TaskDomain::Language);
+
+        assert_eq!(code_thresh, 0.96);
+        assert_eq!(reason_thresh, 0.92);
+        assert!(lang_thresh <= 0.88);
     }
 }

@@ -33,6 +33,13 @@ pub trait Embedder: Send + Sync {
     /// configured or the call failed. A missing embedding degrades semantic caching to
     /// "skip it for this request," never to a failed request.
     async fn embed(&self, text: &str) -> Option<Vec<f32>>;
+
+    /// Whether this embedder executes locally (in-process) without an external HTTP network hop.
+    /// Used by the hot path to skip semantic cache checks when only high-latency remote
+    /// embedding providers are available, preserving the sub-millisecond gateway SLA.
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 /// The real implementation: calls out to whichever provider has the cheapest embedding
@@ -218,6 +225,10 @@ impl Embedder for DeterministicEmbedder {
         let vector: Vec<f32> = bytes.iter().map(|b| (*b as f32) / 255.0 + 0.01).collect();
         Some(vector)
     }
+
+    fn is_local(&self) -> bool {
+        true
+    }
 }
 
 /// Never produces an embedding. The default for `AppState::for_tests()`, so every
@@ -250,6 +261,10 @@ impl Embedder for ConstantEmbedder {
             return None;
         }
         Some(self.0.clone())
+    }
+
+    fn is_local(&self) -> bool {
+        true
     }
 }
 

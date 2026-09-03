@@ -82,8 +82,23 @@ pub fn build_body(request: &NormalizedRequest, model: &str) -> serde_json::Value
 
     let map = body.as_object_mut().expect("constructed as an object");
 
+    let is_cacheable = request.estimated_input_tokens() >= 1024;
+
     if !system_text.is_empty() {
-        map.insert("system".into(), serde_json::json!(system_text));
+        if is_cacheable {
+            map.insert(
+                "system".into(),
+                serde_json::json!([
+                    {
+                        "type": "text",
+                        "text": system_text,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]),
+            );
+        } else {
+            map.insert("system".into(), serde_json::json!(system_text));
+        }
     }
     if let Some(temperature) = request.temperature {
         map.insert("temperature".into(), serde_json::json!(temperature));
@@ -94,7 +109,7 @@ pub fn build_body(request: &NormalizedRequest, model: &str) -> serde_json::Value
     if !request.tools.is_empty() {
         map.insert(
             "tools".into(),
-            serde_json::json!(translate_tools(&request.tools)),
+            serde_json::json!(translate_tools(&request.tools, is_cacheable)),
         );
     }
     if let Some(stop) = &request.stop {
@@ -115,12 +130,15 @@ pub fn build_body(request: &NormalizedRequest, model: &str) -> serde_json::Value
 /// Translate OpenAI-style tool definitions into Anthropic's shape.
 ///
 /// OpenAI nests the definition under `function` with `parameters`; Anthropic flattens it
-/// and calls the schema `input_schema`.
-fn translate_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
+/// and calls the schema `input_schema`. When `is_cacheable` is true, the final tool
+/// receives an ephemeral `cache_control` breakpoint, caching all tools for 90% savings.
+fn translate_tools(tools: &[serde_json::Value], is_cacheable: bool) -> Vec<serde_json::Value> {
+    let total = tools.len();
     tools
         .iter()
-        .map(|tool| {
-            if let Some(function) = tool.get("function") {
+        .enumerate()
+        .map(|(i, tool)| {
+            let mut translated = if let Some(function) = tool.get("function") {
                 serde_json::json!({
                     "name": function.get("name").cloned().unwrap_or_default(),
                     "description": function.get("description").cloned().unwrap_or_default(),
@@ -132,7 +150,13 @@ fn translate_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
             } else {
                 // Already in Anthropic shape.
                 tool.clone()
+            };
+            if is_cacheable && i + 1 == total {
+                if let Some(obj) = translated.as_object_mut() {
+                    obj.insert("cache_control".into(), serde_json::json!({"type": "ephemeral"}));
+                }
             }
+            translated
         })
         .collect()
 }
@@ -786,5 +810,29 @@ mod tests {
         assert!(provider.supports("claude-sonnet-4-5"));
         assert!(provider.supports("anthropic/claude-opus-4-5"));
         assert!(!provider.supports("gpt-4o"));
+    }
+
+    #[test]
+    fn anthropic_cache_control_injected_when_cacheable() {
+        let large_prompt = "system instruction ".repeat(300); // > 1024 tokens
+        let mut request = NormalizedRequest::simple("claude-sonnet-4-5", "hello");
+        request.messages.insert(0, Message::text(Role::System, &large_prompt));
+        request.tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "lookup tool",
+                "parameters": {"type": "object"}
+            }
+        })];
+
+        let body = build_body(&request, "claude-sonnet-4-5");
+        let system = &body["system"];
+        assert!(system.is_array());
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+
+        let tools = &body["tools"];
+        assert!(tools.is_array());
+        assert_eq!(tools[0]["cache_control"]["type"], "ephemeral");
     }
 }

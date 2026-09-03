@@ -208,13 +208,21 @@ pub struct RequestLogRow {
     pub provider: String,
     pub input_tokens: i32,
     pub output_tokens: i32,
+    #[sqlx(default)]
+    pub cached_input_tokens: i64,
     pub baseline_cost_mc: i64,
     pub actual_cost_mc: i64,
+    #[sqlx(default)]
+    pub input_cost_mc: i64,
+    #[sqlx(default)]
+    pub output_cost_mc: i64,
     pub gross_savings_mc: i64,
     pub latency_ms: i32,
     pub cache_hit: bool,
     pub cache_type: Option<String>,
     pub routing_reason: String,
+    #[sqlx(default)]
+    pub tokens_saved_by_compression: i32,
     pub status_code: i32,
     pub created_at: DateTime<Utc>,
 }
@@ -1283,9 +1291,10 @@ pub async fn insert_usage_record(
              input_tokens, output_tokens, tokens_estimated, baseline_cost_mc, actual_cost_mc,
              gross_savings_mc, aegis_fee_mc, latency_ms, gateway_overhead_us, cache_hit,
              cache_type, routing_reason, complexity_score_milli, tokens_saved_by_compression,
-             status_code, error_type, created_at, cached_input_tokens, cache_write_tokens)
+             status_code, error_type, created_at, cached_input_tokens, cache_write_tokens,
+             input_cost_mc, output_cost_mc)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                 $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+                 $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
          ON CONFLICT (request_id, created_at) DO NOTHING",
     )
     .bind(event.request_id)
@@ -1314,6 +1323,8 @@ pub async fn insert_usage_record(
     .bind(event.created_at)
     .bind(event.cached_input_tokens as i64)
     .bind(event.cache_write_tokens as i64)
+    .bind(event.input_cost_mc)
+    .bind(event.output_cost_mc)
     .execute(pool)
     .await
     .map_err(AegisError::Database)?;
@@ -1360,8 +1371,12 @@ pub async fn list_requests(
 ) -> Result<Vec<RequestLogRow>> {
     sqlx::query_as::<_, RequestLogRow>(
         "SELECT request_id, requested_model, served_model, provider, input_tokens,
-                output_tokens, baseline_cost_mc, actual_cost_mc, gross_savings_mc,
-                latency_ms, cache_hit, cache_type, routing_reason, status_code, created_at
+                output_tokens, COALESCE(cached_input_tokens, 0) AS cached_input_tokens,
+                baseline_cost_mc, actual_cost_mc, COALESCE(input_cost_mc, 0) AS input_cost_mc,
+                COALESCE(output_cost_mc, 0) AS output_cost_mc, gross_savings_mc,
+                latency_ms, cache_hit, cache_type, routing_reason,
+                COALESCE(tokens_saved_by_compression, 0) AS tokens_saved_by_compression,
+                status_code, created_at
          FROM usage_records
          WHERE org_id = $1 AND created_at >= $2 AND created_at < $3
          ORDER BY created_at DESC

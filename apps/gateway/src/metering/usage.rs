@@ -64,6 +64,10 @@ pub struct UsageEvent {
 
     pub baseline_cost_mc: i64,
     pub actual_cost_mc: i64,
+    #[serde(default)]
+    pub input_cost_mc: i64,
+    #[serde(default)]
+    pub output_cost_mc: i64,
     pub gross_savings_mc: i64,
     pub aegis_fee_mc: i64,
 
@@ -143,6 +147,8 @@ impl UsageEvent {
             tokens_estimated: tokens.estimated,
             baseline_cost_mc: savings.baseline_cost.as_i64(),
             actual_cost_mc: savings.actual_cost.as_i64(),
+            input_cost_mc: 0,
+            output_cost_mc: 0,
             gross_savings_mc: savings.gross_savings.as_i64(),
             aegis_fee_mc: savings.aegis_fee.as_i64(),
             latency_ms,
@@ -188,6 +194,8 @@ impl UsageEvent {
             tokens_estimated: false,
             baseline_cost_mc: 0,
             actual_cost_mc: 0,
+            input_cost_mc: 0,
+            output_cost_mc: 0,
             gross_savings_mc: 0,
             aegis_fee_mc: 0,
             latency_ms: gateway_overhead_ms.round() as u32,

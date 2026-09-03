@@ -106,16 +106,44 @@ export default function RequestsPage() {
                       />
                     </Td>
                     <Td>
-                      <RoutingBadge
-                        reason={row.routing_reason}
-                        cacheType={row.cache_type}
-                      />
+                      <div className="flex flex-wrap items-center gap-1">
+                        <RoutingBadge
+                          reason={row.routing_reason}
+                          cacheType={row.cache_type}
+                        />
+                        {row.tokens_saved_by_compression && row.tokens_saved_by_compression > 0 ? (
+                          <Stamp tone="agent">
+                            compressed
+                          </Stamp>
+                        ) : null}
+                      </div>
                     </Td>
                     <Td align="right" mono>
-                      {row.input_tokens + row.output_tokens}
+                      <div className="flex flex-col items-end leading-tight">
+                        <span>
+                          {row.input_tokens.toLocaleString()} in / {row.output_tokens.toLocaleString()} out
+                        </span>
+                        {row.cached_input_tokens && row.cached_input_tokens > 0 ? (
+                          <span className="text-[11px] text-[var(--color-positive)] font-sans">
+                            {row.cached_input_tokens.toLocaleString()} cached
+                          </span>
+                        ) : null}
+                        {row.tokens_saved_by_compression && row.tokens_saved_by_compression > 0 ? (
+                          <span className="text-[11px] text-amber-500 dark:text-amber-400 font-sans">
+                            -{row.tokens_saved_by_compression.toLocaleString()} saved
+                          </span>
+                        ) : null}
+                      </div>
                     </Td>
                     <Td align="right" mono>
-                      {formatUsd(row.actual_cost_mc)}
+                      <div className="flex flex-col items-end leading-tight">
+                        <span className="font-semibold">{formatUsd(row.actual_cost_mc)}</span>
+                        {(row.input_cost_mc !== undefined || row.output_cost_mc !== undefined) && row.actual_cost_mc > 0 ? (
+                          <span className="text-[11px] text-[var(--color-muted-light)] font-sans">
+                            in: {formatUsd(row.input_cost_mc ?? 0)} · out: {formatUsd(row.output_cost_mc ?? 0)}
+                          </span>
+                        ) : null}
+                      </div>
                     </Td>
                     <Td align="right" mono>
                       {row.gross_savings_mc > 0 ? (

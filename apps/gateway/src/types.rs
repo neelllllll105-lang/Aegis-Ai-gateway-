@@ -179,6 +179,14 @@ impl NormalizedRequest {
             .map(|m| m.text_content())
     }
 
+    /// The first user message — used for conversation affinity pinning across multi-turn sessions.
+    pub fn first_user_message(&self) -> Option<String> {
+        self.messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.text_content())
+    }
+
     /// Combined system and developer prompt text.
     pub fn system_text(&self) -> String {
         self.messages

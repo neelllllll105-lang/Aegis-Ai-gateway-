@@ -153,10 +153,13 @@ impl ModelPricing {
     /// The rates used depend on total prompt size when the model has a long-context tier,
     /// which is why this takes the whole usage rather than one figure at a time.
     pub fn cost_of(&self, usage: &crate::types::TokenUsage) -> MicroCents {
-        let (input_rate, output_rate) = self.rates_for(usage.total_input());
+        self.input_cost_of(usage) + self.output_cost_of(usage)
+    }
 
+    /// Input cost of serving a request, including cached and cache-write token classes.
+    pub fn input_cost_of(&self, usage: &crate::types::TokenUsage) -> MicroCents {
+        let (input_rate, _) = self.rates_for(usage.total_input());
         MicroCents::cost_for_tokens(input_rate, usage.input_tokens)
-            + MicroCents::cost_for_tokens(output_rate, usage.output_tokens)
             + MicroCents::cost_for_tokens(
                 CachePricing::scale(input_rate, self.cache.read_bp),
                 usage.cached_input_tokens,
@@ -165,6 +168,12 @@ impl ModelPricing {
                 CachePricing::scale(input_rate, self.cache.write_bp),
                 usage.cache_write_tokens,
             )
+    }
+
+    /// Output cost of serving a request.
+    pub fn output_cost_of(&self, usage: &crate::types::TokenUsage) -> MicroCents {
+        let (_, output_rate) = self.rates_for(usage.total_input());
+        MicroCents::cost_for_tokens(output_rate, usage.output_tokens)
     }
 
     /// The input and output rates that apply to a prompt of this size.
