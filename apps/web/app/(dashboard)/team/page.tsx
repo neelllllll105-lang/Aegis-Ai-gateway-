@@ -57,6 +57,8 @@ export default function TeamPage() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<string>("member");
   const [inviting, setInviting] = useState(false);
+  const [lastInviteUrl, setLastInviteUrl] = useState<string | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
 
   const [teamName, setTeamName] = useState("");
   const [teamBudget, setTeamBudget] = useState("");
@@ -92,9 +94,24 @@ export default function TeamPage() {
 
     setInviting(true);
     setNotice(null);
+    setLastInviteUrl(null);
     try {
-      await api.inviteMember(inviteEmail.trim(), inviteRole);
-      setNotice(`Invitation sent to ${inviteEmail.trim()}.`);
+      const res = await api.inviteMember(inviteEmail.trim(), inviteRole);
+      if (res && "invite_url" in res && res.invite_url) {
+        try {
+          const url = new URL(res.invite_url);
+          url.protocol = window.location.protocol;
+          url.host = window.location.host;
+          setLastInviteUrl(url.toString());
+        } catch {
+          setLastInviteUrl(res.invite_url);
+        }
+      }
+      if (res && "email_sent" in res && res.email_sent) {
+        setNotice(`Invitation email sent to ${inviteEmail.trim()} via Resend!`);
+      } else {
+        setNotice(`Member added. Direct activation link generated for ${inviteEmail.trim()}.`);
+      }
       setInviteEmail("");
       await load();
     } catch (caught) {
@@ -180,6 +197,32 @@ export default function TeamPage() {
       {notice && (
         <div className="mb-6 rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface2)] px-4 py-3 text-xs font-bold text-[var(--color-ink)]">
           {notice}
+        </div>
+      )}
+
+      {lastInviteUrl && (
+        <div className="mb-6 rounded-2xl border border-[var(--color-accent)] bg-[var(--color-surface)] p-4 shadow-[2px_2px_0_var(--shadow-color)]">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-bold text-[var(--color-accent)] uppercase tracking-wider mb-1">
+                Direct Activation Link
+              </div>
+              <p className="font-mono text-xs text-[var(--color-ink)] truncate select-all bg-[var(--color-surface2)] px-3 py-1.5 rounded-lg border border-[var(--color-desk-line)]">
+                {lastInviteUrl}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                void navigator.clipboard.writeText(lastInviteUrl);
+                setCopiedLink(true);
+                setTimeout(() => setCopiedLink(false), 2000);
+              }}
+              className="shrink-0 rounded-xl bg-[var(--color-accent)] px-4 py-2 text-xs font-bold text-[var(--color-surface)] shadow-[2px_2px_0_var(--shadow-color)] hover:bg-[var(--color-accent-dark)]"
+            >
+              {copiedLink ? "Copied Link!" : "Copy Link"}
+            </button>
+          </div>
         </div>
       )}
 

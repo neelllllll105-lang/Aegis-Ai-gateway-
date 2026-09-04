@@ -44,6 +44,18 @@ async fn require_writer(state: &AppState, headers: &HeaderMap) -> Result<AuthCon
     Ok(context)
 }
 
+/// Authenticate and require key management authority (owner, admin, or member).
+async fn require_key_writer(state: &AppState, headers: &HeaderMap) -> Result<AuthContext> {
+    let context = auth::authenticate_management(state, headers).await?;
+    let role = context.role.as_deref().unwrap_or("");
+    if !matches!(role, "owner" | "admin" | "member") {
+        return Err(AegisError::Forbidden(
+            "this action requires an owner, admin, or member role.".into(),
+        ));
+    }
+    Ok(context)
+}
+
 /// Authenticate and require read authority.
 async fn require_reader(state: &AppState, headers: &HeaderMap) -> Result<AuthContext> {
     let context = auth::authenticate_management(state, headers).await?;
@@ -638,7 +650,7 @@ async fn do_create_key(
     headers: &HeaderMap,
     request: CreateKeyRequest,
 ) -> Result<Response> {
-    let context = require_writer(state, headers).await?;
+    let context = require_key_writer(state, headers).await?;
     let pool = state.db()?;
 
     if request.name.trim().is_empty() {
@@ -726,7 +738,7 @@ pub async fn update_key(
     Json(request): Json<UpdateKeyRequest>,
 ) -> Response {
     match async {
-        let context = require_writer(&state, &headers).await?;
+        let context = require_key_writer(&state, &headers).await?;
         let pool = state.db()?;
 
         let key = repo::update_api_key(
@@ -770,7 +782,7 @@ pub async fn revoke_key(
     Path(key_id): Path<Uuid>,
 ) -> Response {
     match async {
-        let context = require_writer(&state, &headers).await?;
+        let context = require_key_writer(&state, &headers).await?;
         let pool = state.db()?;
 
         // Read before revoking: the hash is needed to invalidate the caches, and after
@@ -990,9 +1002,77 @@ pub async fn invite_member(
         )
         .await;
 
+        // Generate a single-use 7-day invite token and store it in auth_tokens
+        let token = crypto::generate_session_token();
+        let expires_at = Utc::now() + Duration::days(7);
+        repo::create_auth_token(pool, user.id, &token.hash, "invite", expires_at).await?;
+
+        let org = repo::find_org(pool, context.org_id).await?;
+        let org_name = org.as_ref().map(|o| o.name.as_str()).unwrap_or("Aegis");
+
+        let encoded_email = url::form_urlencoded::byte_serialize(request.email.as_bytes()).collect::<String>();
+        let base_url = headers
+            .get("origin")
+            .and_then(|h| h.to_str().ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(state.config.app_url.as_str());
+        let invite_url = format!("{}/join?token={}&email={}", base_url, token.plaintext, encoded_email);
+
+        let subject = format!("You've been invited to join {} on Aegis", org_name);
+        let text = format!(
+            "You have been invited to join {org_name} on Aegis with the role of {role}.\n\n\
+             Click the link below to set your password and access your account:\n\
+             {invite_url}\n\n\
+             This link expires in 7 days.",
+            role = request.role
+        );
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px 20px;">
+  <div style="max-width: 520px; margin: 0 auto; background: #1e293b; border-radius: 16px; border: 1px solid #334155; padding: 32px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+    <div style="font-size: 20px; font-weight: 700; color: #38bdf8; margin-bottom: 8px;">Aegis</div>
+    <h1 style="font-size: 22px; font-weight: 700; color: #f8fafc; margin: 0 0 16px;">Join {org_name} on Aegis</h1>
+    <p style="font-size: 15px; color: #94a3b8; line-height: 1.6; margin: 0 0 24px;">
+      You have been invited to collaborate with the role of <strong style="color: #f8fafc;">{role}</strong>. Set your password to activate your account and access the dashboard.
+    </p>
+    <div style="margin: 28px 0;">
+      <a href="{invite_url}" style="display: inline-block; background: #0284c7; color: #ffffff; padding: 12px 24px; border-radius: 10px; font-size: 14px; font-weight: 600; text-decoration: none;">
+        Accept Invitation &amp; Set Password &rarr;
+      </a>
+    </div>
+    <p style="font-size: 13px; color: #64748b; margin-top: 28px; border-top: 1px solid #334155; padding-top: 20px;">
+      Or copy this URL into your browser:<br>
+      <a href="{invite_url}" style="color: #38bdf8; word-break: break-all;">{invite_url}</a>
+    </p>
+    <p style="font-size: 12px; color: #475569; margin-top: 12px;">This invitation link will expire in 7 days.</p>
+  </div>
+</body>
+</html>"#,
+            org_name = org_name,
+            role = request.role,
+            invite_url = invite_url
+        );
+
+        let email_sent = crate::workers::budget_alerts::send_email_full(
+            &state.http,
+            &state.config,
+            &request.email,
+            &subject,
+            &text,
+            Some(&html),
+        )
+        .await
+        .unwrap_or(false);
+
         Ok::<_, AegisError>(respond(
             StatusCode::CREATED,
-            serde_json::json!({"invited": request.email, "role": request.role}),
+            serde_json::json!({
+                "invited": request.email,
+                "role": request.role,
+                "invite_url": invite_url,
+                "email_sent": email_sent,
+            }),
         ))
     }
     .await
@@ -1000,6 +1080,91 @@ pub async fn invite_member(
         Ok(response) => response,
         Err(e) => e.into_response(),
     }
+}
+
+/// `POST /api/auth/accept-invite`
+#[derive(Debug, Deserialize)]
+pub struct AcceptInviteRequest {
+    pub token: String,
+    pub password: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+pub async fn accept_invite(
+    State(state): State<AppState>,
+    Json(request): Json<AcceptInviteRequest>,
+) -> Response {
+    match do_accept_invite(&state, request).await {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn do_accept_invite(
+    state: &AppState,
+    request: AcceptInviteRequest,
+) -> Result<Response> {
+    if request.password.len() < MIN_PASSWORD_LENGTH {
+        return Err(AegisError::BadRequest(format!(
+            "password must be at least {MIN_PASSWORD_LENGTH} characters"
+        )));
+    }
+
+    let pool = state.db()?;
+    let token_hash = crypto::hash_token(&request.token);
+    let user_id = repo::consume_auth_token(pool, &token_hash, "invite")
+        .await?
+        .ok_or_else(|| {
+            AegisError::BadRequest(
+                "invalid or expired invitation link. Please request a new invite.".into(),
+            )
+        })?;
+
+    let hash = crypto::hash_password(&request.password)?;
+    repo::update_password(pool, user_id, &hash).await?;
+
+    // Mark email as verified and update name if supplied
+    sqlx::query(
+        "UPDATE users SET email_verified_at = NOW(), name = COALESCE($2, name), updated_at = NOW() WHERE id = $1",
+    )
+    .bind(user_id)
+    .bind(&request.name)
+    .execute(pool)
+    .await
+    .map_err(AegisError::Database)?;
+
+    let user = repo::find_user_by_id(pool, user_id)
+        .await?
+        .ok_or_else(|| AegisError::NotFound("user not found".into()))?;
+
+    let session = crypto::generate_session_token();
+    repo::create_session(
+        pool,
+        user.id,
+        &session.hash,
+        Utc::now() + Duration::seconds(auth::SESSION_DURATION.as_secs() as i64),
+    )
+    .await?;
+
+    let organizations = repo::list_orgs_for_user(pool, user.id).await?;
+
+    let mut response = respond(
+        StatusCode::OK,
+        serde_json::json!({
+            "user": user,
+            "organizations": organizations,
+            "message": "Account activated successfully"
+        }),
+    );
+
+    if let Ok(cookie) = auth::session_cookie(&session.plaintext, &state.config).parse() {
+        response
+            .headers_mut()
+            .insert(axum::http::header::SET_COOKIE, cookie);
+    }
+
+    Ok(response)
 }
 
 /// `DELETE /api/org/members/:userId`

@@ -3,6 +3,8 @@ import type { NextConfig } from "next";
 const config: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  allowedDevOrigins: ["192.168.120.28", "localhost"],
+
 
   // Emit a self-contained server plus only the node_modules actually reached at run
   // time. The self-hosted image copies `.next/standalone` rather than the whole tree,

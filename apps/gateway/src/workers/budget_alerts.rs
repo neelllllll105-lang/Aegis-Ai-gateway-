@@ -167,32 +167,53 @@ pub async fn send_email(
     subject: &str,
     body: &str,
 ) -> Result<bool> {
+    send_email_full(http, config, to, subject, body, None).await
+}
+
+/// Send an email via Resend with optional HTML support.
+pub async fn send_email_full(
+    http: &reqwest::Client,
+    config: &crate::config::Config,
+    to: &str,
+    subject: &str,
+    text: &str,
+    html: Option<&str>,
+) -> Result<bool> {
     let Some(api_key) = &config.resend_api_key else {
         tracing::info!(
             to,
             subject,
-            "email not sent (no provider configured):\n{body}"
+            "email not sent (no provider configured):\n{text}"
         );
         return Ok(false);
     };
 
+    let mut payload = serde_json::json!({
+        "from": config.email_from,
+        "to": [to],
+        "subject": subject,
+        "text": text,
+    });
+    if let Some(html_content) = html {
+        payload["html"] = serde_json::Value::String(html_content.to_string());
+    }
+
     let response = http
         .post("https://api.resend.com/emails")
         .bearer_auth(api_key)
-        .json(&serde_json::json!({
-            "from": config.email_from,
-            "to": [to],
-            "subject": subject,
-            "text": body,
-        }))
+        .json(&payload)
         .timeout(Duration::from_secs(10))
         .send()
         .await
         .map_err(|e| crate::error::AegisError::Internal(format!("email send failed: {e}")))?;
 
-    let ok = response.status().is_success();
+    let status = response.status();
+    let ok = status.is_success();
     if !ok {
-        tracing::warn!(status = %response.status(), "email provider rejected the message");
+        let err = response.text().await.unwrap_or_default();
+        tracing::warn!(%status, error = %err, "email provider rejected the message");
+    } else {
+        tracing::info!(to, subject, "email dispatched successfully via Resend");
     }
     Ok(ok)
 }

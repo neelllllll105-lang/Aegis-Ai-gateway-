@@ -174,7 +174,7 @@ impl Config {
 
             resend_api_key: opt("RESEND_API_KEY"),
             email_from: opt("AEGIS_EMAIL_FROM")
-                .unwrap_or_else(|| "Aegis <noreply@aegis.dev>".into()),
+                .unwrap_or_else(|| "Aegis <onboarding@resend.dev>".into()),
 
             stripe_secret_key: opt("STRIPE_SECRET_KEY"),
             stripe_webhook_secret: opt("STRIPE_WEBHOOK_SECRET"),

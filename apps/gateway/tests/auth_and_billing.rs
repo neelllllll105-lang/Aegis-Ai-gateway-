@@ -1036,3 +1036,88 @@ async fn a_platform_admin_can_inspect_a_different_organisations_audit_log() {
     cleanup(&pool, &staff).await;
     cleanup(&pool, &customer).await;
 }
+
+#[tokio::test]
+async fn invite_and_accept_lifecycle_works() {
+    let Some((state, pool)) = setup().await else {
+        return skip("invite_and_accept_lifecycle_works");
+    };
+
+    use aegis_gateway::routes::management;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::Json;
+
+    let fixture = create_org(&pool, "invite_accept").await;
+    let owner_headers = owner_session_headers(&pool, &fixture).await;
+
+    // 1. Invite a new colleague
+    let invite_email = format!("colleague_{}@aegis.test", uuid::Uuid::new_v4());
+    let response = management::invite_member(
+        State(state.clone()),
+        owner_headers,
+        Json(management::InviteRequest {
+            email: invite_email.clone(),
+            role: "admin".into(),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = body_json(response).await;
+    assert_eq!(body["invited"], invite_email);
+    assert_eq!(body["role"], "admin");
+    let invite_url = body["invite_url"].as_str().expect("must have invite_url");
+    assert!(invite_url.contains("/join?token="));
+
+    // Extract token from URL
+    let token = invite_url
+        .split("token=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+
+    // 2. Colleague accepts invite and sets password (min 12 chars)
+    let new_password = "secure_password_123456";
+    let accept_res = management::accept_invite(
+        State(state.clone()),
+        Json(management::AcceptInviteRequest {
+            token: token.to_string(),
+            password: new_password.to_string(),
+            name: Some("Invited Admin".into()),
+        }),
+    )
+    .await;
+    assert_eq!(accept_res.status(), StatusCode::OK);
+    let accept_body = body_json(accept_res).await;
+    assert_eq!(accept_body["user"]["email"], invite_email);
+    assert_eq!(accept_body["user"]["name"], "Invited Admin");
+
+    // 3. Colleague can now log in with their newly set password
+    let login_res = management::login(
+        State(state.clone()),
+        HeaderMap::new(),
+        Json(management::LoginRequest {
+            email: invite_email.clone(),
+            password: new_password.to_string(),
+            totp_code: None,
+        }),
+    )
+    .await;
+    assert_eq!(login_res.status(), StatusCode::OK);
+
+    // 4. Second redemption of the exact same token MUST be rejected
+    let second_accept = management::accept_invite(
+        State(state),
+        Json(management::AcceptInviteRequest {
+            token: token.to_string(),
+            password: "another_password_123456".to_string(),
+            name: None,
+        }),
+    )
+    .await;
+    assert_eq!(second_accept.status(), StatusCode::BAD_REQUEST);
+
+    cleanup(&pool, &fixture).await;
+}

@@ -28,6 +28,8 @@ use std::time::{Duration, Instant};
 
 #[tokio::main]
 async fn main() {
+    dotenvy::dotenv().ok();
+
     // The container healthcheck runs this binary rather than requiring curl in the
     // runtime image. Keeping the image free of shell utilities is worth a few lines here.
     if std::env::args().any(|arg| arg == "--health-check") {

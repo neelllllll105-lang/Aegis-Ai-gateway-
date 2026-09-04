@@ -46,6 +46,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/auth/login", post(management::login))
         .route("/api/auth/logout", post(management::logout))
         .route("/api/auth/me", get(management::me))
+        .route("/api/auth/accept-invite", post(management::accept_invite))
         // TOTP two-factor. `totp_enabled` and `totp_secret_encrypted` have existed on
         // `users` since the initial schema and the RFC 6238 algorithm was always correct;
         // nothing previously read or wrote the column, and login never checked it, so
@@ -313,27 +314,33 @@ async fn security_headers_layer(
 /// A specific origin rather than a wildcard: `Access-Control-Allow-Credentials` and `*`
 /// are mutually exclusive, and the session cookie needs credentials.
 fn cors_layer(app_url: &str) -> CorsLayer {
-    match app_url.parse::<axum::http::HeaderValue>() {
-        Ok(origin) => CorsLayer::new()
-            .allow_origin(origin)
-            .allow_credentials(true)
-            .allow_headers([
-                axum::http::header::AUTHORIZATION,
-                axum::http::header::CONTENT_TYPE,
-                axum::http::HeaderName::from_static("x-aegis-routing-hint"),
-                axum::http::HeaderName::from_static("x-aegis-org"),
-                axum::http::HeaderName::from_static("x-api-key"),
-            ])
-            .allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::PATCH,
-                axum::http::Method::DELETE,
-                axum::http::Method::OPTIONS,
-            ]),
-        Err(_) => {
-            tracing::warn!(app_url, "invalid AEGIS_APP_URL; CORS disabled");
-            CorsLayer::new()
+    let origin_config = if app_url.contains("localhost") || app_url.contains("127.0.0.1") {
+        tower_http::cors::AllowOrigin::mirror_request()
+    } else {
+        match app_url.parse::<axum::http::HeaderValue>() {
+            Ok(origin) => tower_http::cors::AllowOrigin::exact(origin),
+            Err(_) => {
+                tracing::warn!(app_url, "invalid AEGIS_APP_URL; mirroring request origin");
+                tower_http::cors::AllowOrigin::mirror_request()
+            }
         }
-    }
+    };
+
+    CorsLayer::new()
+        .allow_origin(origin_config)
+        .allow_credentials(true)
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderName::from_static("x-aegis-routing-hint"),
+            axum::http::HeaderName::from_static("x-aegis-org"),
+            axum::http::HeaderName::from_static("x-api-key"),
+        ])
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+        ])
 }

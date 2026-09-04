@@ -14,6 +14,26 @@
  */
 
 /** Base URL of the gateway. */
+export function getApiUrl(): string {
+  if (typeof window !== "undefined") {
+    const hostname = window.location.hostname;
+    const protocol = window.location.protocol;
+    // In local dev / LAN mode, always target port 8080 on the EXACT same host the browser is viewing
+    // (e.g. localhost -> localhost:8080, or 192.168.x.x -> 192.168.x.x:8080).
+    // This ensures requests remain same-site so SameSite=Lax session cookies are preserved.
+    if (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname.startsWith("192.168.") ||
+      hostname.startsWith("10.") ||
+      hostname.startsWith("172.")
+    ) {
+      return `${protocol}//${hostname}:8080`;
+    }
+  }
+  return process.env.NEXT_PUBLIC_AEGIS_API_URL ?? "http://localhost:8080";
+}
+
 export const API_URL =
   process.env.NEXT_PUBLIC_AEGIS_API_URL ?? "http://localhost:8080";
 
@@ -73,7 +93,8 @@ export async function apiRequest<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, {
+  const baseUrl = getApiUrl();
+  const response = await fetch(`${baseUrl}${path}`, {
     method: options.method ?? "GET",
     headers: { "Content-Type": "application/json" },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
@@ -358,6 +379,15 @@ export const api = {
       body: { email, password },
     }),
 
+  acceptInvite: (token: string, password: string, name?: string) =>
+    apiRequest<{ user: User; organizations: Organization[]; message: string }>(
+      "/api/auth/accept-invite",
+      {
+        method: "POST",
+        body: { token, password, name },
+      },
+    ),
+
   logout: () => apiRequest<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
 
   me: () =>
@@ -441,10 +471,12 @@ export const api = {
   listMembers: () => apiRequest<{ members: Member[] }>("/api/org/members"),
 
   inviteMember: (email: string, role: string) =>
-    apiRequest<{ member: Member } | { invited: boolean }>(
-      "/api/org/members/invite",
-      { method: "POST", body: { email, role } },
-    ),
+    apiRequest<{
+      invited: string;
+      role: string;
+      invite_url?: string;
+      email_sent?: boolean;
+    }>("/api/org/members/invite", { method: "POST", body: { email, role } }),
 
   removeMember: (userId: string) =>
     apiRequest<void>(`/api/org/members/${userId}`, { method: "DELETE" }),
@@ -483,7 +515,7 @@ export const api = {
     return apiRequest<ChargebackReport>(`/api/usage/chargeback${suffix}`);
   },
 
-  chargebackCsvUrl: () => `${API_URL}/api/usage/chargeback.csv`,
+  chargebackCsvUrl: () => `${getApiUrl()}/api/usage/chargeback.csv`,
 
   credits: () => apiRequest<CreditsResponse>("/api/billing/credits"),
 
@@ -493,5 +525,5 @@ export const api = {
       body: { code },
     }),
 
-  savingsCsvUrl: () => `${API_URL}/api/savings/report.csv`,
+  savingsCsvUrl: () => `${getApiUrl()}/api/savings/report.csv`,
 };
