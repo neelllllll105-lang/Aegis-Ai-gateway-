@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# A new push to the same branch makes the previous run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Debug info is the bulk of a Rust build cache. CI never runs a debugger.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  RUSTFLAGS: -D warnings
+
+jobs:
+  gateway:
+    name: Gateway (fmt, clippy, test)
+    runs-on: ubuntu-latest
+
+    # Real services, so the integration tests exercise the actual database and store
+    # rather than only the in-memory implementations.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: aegis
+          POSTGRES_PASSWORD: aegis_ci
+          POSTGRES_DB: aegis_test
+        options: >-
+          --health-cmd "pg_isready -U aegis -d aegis_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --lib --all-features
+
+      - name: Integration tests
+        env:
+          # Only set here. Locally the same tests skip themselves, so a contributor
+          # without Docker still gets a green `cargo test`.
+          AEGIS_TEST_DATABASE_URL: postgres://aegis:aegis_ci@localhost:5432/aegis_test
+          AEGIS_TEST_REDIS_URL: redis://localhost:6379
+        run: cargo test --tests --all-features
+
+      - name: Documentation builds
+        run: cargo doc --no-deps --all-features
+
+  security:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Part 9 item 11: fail on anything critical.
+      - name: Audit dependencies
+        run: cargo audit --deny warnings
+
+      # Part 1 principle 7: GPL and AGPL code cannot enter a closed-source product.
+      # This is a licence check, not a style preference.
+      - name: Check dependency licences
+        run: |
+          cargo install cargo-license --locked
+          echo "--- Dependency licences ---"
+          cargo license --avoid-build-deps --avoid-dev-deps || true
+          if cargo license --avoid-build-deps --avoid-dev-deps 2>/dev/null | grep -Ei '(^|[^L])GPL-[23]|AGPL'; then
+            echo "::error::A GPL or AGPL dependency was found. This contaminates a closed-source product (MASTER_BUILD.md Part 1, principle 7)."
+            exit 1
+          fi
+          echo "No copyleft dependencies found."
+
+  web:
+    name: Dashboard (lint, typecheck, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=critical
+
+  memory:
+    name: Handoff state is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The staleness check compares MEMORY.md against recent commits.
+          fetch-depth: 50
+
+      # CLAUDE.md says an out-of-date MEMORY.md is a build failure. This enforces it:
+      # a project whose handoff document has silently rotted is one nobody can pick up.
+      - name: Check MEMORY.md freshness
+        run: bash scripts/check-memory-freshness.sh

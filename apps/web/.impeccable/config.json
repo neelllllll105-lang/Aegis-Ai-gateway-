@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "app/globals.css"
+        ],
+        "createdAt": "2026-08-31T08:14:47.081Z",
+        "reason": "user-supplied Deskwork design spec explicitly names colored-left-rail=severity as part of its border grammar (docs/design.md); used narrowly on DecisionCard/ErrorState severity rails, not generic decorative cards"
+      }
+    ]
+  }
+}

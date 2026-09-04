@@ -1,0 +1,299 @@
+{
+  "$comment": "Machine-readable project state. The human-readable companion is MEMORY.md; keep the two in agreement. Validated by scripts/check-memory-freshness.sh in CI.",
+  "schema_version": 1,
+  "project": "aegis",
+  "last_updated": "2026-09-04",
+  "docker_available": false,
+  "current_phase": 2,
+  "next_task": "Session 13 closed three live defects. (1) CORS: router::cors_layer combined AllowOrigin::mirror_request() with allow_credentials(true), so any page a signed-in user visited could read that org keys/usage/budgets with their cookie; reached both via a contains(\"localhost\") check that https://localhost.evil.com satisfies AND via a fail-OPEN branch where an unparseable AEGIS_APP_URL logged a warning then mirrored. Replaced with an explicit predicate (prod: exact configured origin only; dev: loopback + private-LAN parsed via url::Host, supporting the new getApiUrl LAN mode); Config::validate now refuses to start production with an unparseable app_url. 6 tests. (2) Per-person attribution: AuthContext::from_key hardcoded user_id:None and usage_records had no user_id column, so no billable request ever carried a human identity. Migration 0009 adds api_keys.assigned_to_user_id + usage_records.user_id, threaded through KeyContext/AuthContext/UsageEvent/insert + both streaming paths; POST /api/keys accepts assigned_to_user_id, refuses non-admins naming someone else, refuses non-members. list_keys now scopes to own+shared for non-admins (the assignment made all-keys-visible a real leak of a colleague budget). (3) Routing modes: RoutingHint::Cheap was parsed and never branched on, so the documented cheap header did nothing; replaced with passthrough/quality/balanced/economy (+auto alias), complex band unreachable in every mode AND guarded by control flow, cheap retained as economy synonym, documented on /connect as a 4th tab. 895 tests, fmt/clippy/web-lint/tsc clean. NOT VERIFIED: the 3 new DB-level tests skip (Docker still down since session 12 sailor-ingest.sock reparse-point failure, needs machine restart) so migration 0009 has never been applied to a live database; they run in CI. Still outstanding overall: no live provider key ever used, Stripe round trip never exercised, k6 at real scale never run, restore drill never run, never deployed.",
+  "audit": {
+    "id": "session-5-enterprise-readiness-audit",
+    "date": "2026-08-25",
+    "artifact_url": "https://claude.ai/code/artifact/aa6e48d0-50e5-445f-a8c0-70417960003e",
+    "method": "direct code tracing + 4 parallel focused investigations + adversarial tests actually executed, not documentation review",
+    "scorecard_overall": "4/10 at time of audit -- session 6 closed nearly every P0/P1/P2 finding; scorecard not yet re-run/re-published as of this state.json update, see MEMORY.md Current Focus",
+    "p0_findings_total": 5,
+    "p0_findings_fixed_during_audit": 3,
+    "p0_findings_fixed_session_6": 2,
+    "p0_findings_open": 0,
+    "p0_fixed_ids": [
+      "ssrf-via-byok-base-url",
+      "metering-completeness-metric-blind",
+      "compliance-whitepaper-content-storage-claim",
+      "budget-check-race",
+      "fallback-chain-hardcoded-empty"
+    ],
+    "p1_findings_fixed_session_6": [
+      "streaming-resilience",
+      "sso-callback-missing",
+      "totp-unenforced",
+      "no-idempotency-keys-to-providers",
+      "no-alerting-pipeline",
+      "redis-atomicity-untested"
+    ],
+    "p2_findings_fixed_session_6": [
+      "cached-token-pricing-gap",
+      "gemini-long-context-tier-unmodeled",
+      "secret-redaction-incomplete-for-newer-providers",
+      "session-purge-never-running",
+      "scim-tokens-not-self-service",
+      "cargo-audit-findings",
+      "admin-audit-log-wrong-org-scope",
+      "customer-audit-export-missing"
+    ],
+    "found_and_fixed_session_6_not_in_original_audit": [
+      "embedding-models-winning-simple-chat-routing-decisions"
+    ]
+  },
+  "phases": [
+    {
+      "id": 0,
+      "name": "Foundation",
+      "status": "complete",
+      "evidence": "Workspace, full schema migrations with monthly partitioning, typed config, CI, health endpoints verified against a running gateway, ADRs 001-007 (007 added session 5, Vertex AI JWT signing). Migration 0003 added session 6: budgets.region + constraints, model_pricing cache/long-context columns, usage_records cache-token columns."
+    },
+    {
+      "id": 1,
+      "name": "Auth, keys, orgs",
+      "status": "complete",
+      "evidence": "argon2id auth, sessions, API key CRUD with LRU+Redis+PG tiers, audit log, org/member management, dashboard signup/login/keys pages. Session 6: TOTP two-factor now fully enforced end to end (enroll/confirm/disable + login-time check). Note on API-key read scope: management.rs's Part 6 doc comment and MASTER_BUILD.md's own API spec both state the management API is 'session or API-key auth, org-scoped' by design -- API keys reading org-scoped management data (never cross-tenant) is the documented design, not an unscoped defect. Left as-is; re-scoping to a narrower per-key permission model would be a deliberate product change requiring an ADR, not a bug fix."
+    },
+    {
+      "id": 2,
+      "name": "Core gateway",
+      "status": "in_progress",
+      "evidence": "Ten provider adapters, full twelve-stage pipeline, rate limiting (proven atomic), budgets, BYOK, shared key pool, usage worker, Prometheus metrics, Grafana + 8 new alerting rules. Session 5 fixed SSRF + metering-completeness. Session 6: budget checking is now also atomic under concurrency (reserve-then-true-up, see fixed_this_session), every provider call carries a real Idempotency-Key, and a severe pre-existing routing bug (embedding models winning simple-chat routing decisions on price alone) was found and fixed.",
+      "remaining": [
+        "9 pricing rows remain UNVERIFIED against provider pricing pages (unchanged from session 5 -- not attempted session 6, needs docs/runbooks/pricing-update.md work, not code)."
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Optimization engine",
+      "status": "complete",
+      "evidence": "Classifier 98% on 100 labelled fixtures, router with graded provider health + bandit-informed selection + human-readable routing explanations (session 6), exact cache, compressor, fallback chain populated with real cross-provider alternates and streaming resilience (session 6). Session 7: semantic cache wired into the live pipeline behind a new cache::embed::Embedder trait (Pro/Enterprise only, embedding on Aegis's own pooled key), plus a new third durable/encrypted cache tier not in the original MASTER_BUILD.md spec -- see docs/adr/0008-tiered-durable-cache.md. verify-phase.sh 3 passes."
+    },
+    {
+      "id": 4,
+      "name": "Dashboards, billing, launch prep",
+      "status": "in_progress",
+      "evidence": "Stripe webhook verification, invoice assembly, budget enforcement (now atomic, see phase 2), admin console, landing page, docs, savings CSV export, runbooks, Prometheus alert rules (infra/prometheus/alerts.yml, session 6). Session 6: budget threshold alerts (50/80/100%) now actually deliver -- workers/budget_alerts.rs::run is spawned from main.rs with a real sweep + watermark, not just implemented and tested in isolation.",
+      "remaining": [
+        "P4.8 EXECUTE infra/loadtest/k6-gateway.js against a deployed instance (1k RPS over a real network + database) -- still not attempted, needs a live host this machine does not have."
+      ]
+    },
+    {
+      "id": 5,
+      "name": "Launch + provider expansion",
+      "status": "complete",
+      "evidence": "All providers tested, including Vertex AI (session 5, still not verified against a real GCP project -- no service account key supplied). Classifier v2 trained. Status page. Weekly digest. Referral program. CHANGELOG.md."
+    },
+    {
+      "id": 6,
+      "name": "Enterprise readiness",
+      "status": "in_progress",
+      "evidence": "Offline license validation, SCIM 2.0 shapes for Okta and Entra, per-tenant HKDF keys (plus a new disjoint per-user HKDF namespace for TOTP secrets, session 6), region pinning enforcement wired (session 3). Session 6 closed four real gaps: (1) SSO can now functionally complete -- OIDC discovery, JWKS fetch/verify, and the previously-unregistered /api/auth/sso/callback route all added; SAML explicitly out of scope with a clear error rather than a rushed implementation. (2) TOTP fully enforced end to end. (3) SCIM tokens are now self-service-mintable via /api/scim-tokens, not just a direct DB write. (4) the admin audit-log endpoint was scoped to the calling admin's own org (useless for a staff member investigating a customer) -- now takes an org_id query parameter; and a customer-facing GET /api/audit-log.jsonl export was added where none existed despite the compliance whitepaper describing one.",
+      "remaining": [
+        "Verify SSO/SCIM against a real Okta or Entra tenant -- never done, only shape- and flow-tested against static fixtures.",
+        "SAML support -- deliberately out of scope; the callback returns a clear 'not yet supported' error for a SAML-configured connection rather than a wrong implementation."
+      ]
+    },
+    {
+      "id": 7,
+      "name": "Scale + moat",
+      "status": "in_progress",
+      "evidence": "UCB1 outcome bandit. Session 6: the router now actually reads the bandit back to inform routing decisions (RoutingInputs::bandit, folded into select_at_tier's scoring) -- previously write-only. TypeScript and Python SDKs. Regional budgets. Nightly pricing-drift job. Spend anomaly detection. Cost-center chargeback. Investor pack.",
+      "remaining": [
+        "A connection-pooling proxy (PgBouncer or equivalent) or a larger reference instance class is needed before scaling meaningfully past ~10 replicas -- the Postgres connection-pool math finding from session 5, not attempted session 6 (infrastructure sizing, not application code)."
+      ]
+    }
+  ],
+  "blockers": [
+    {
+      "id": "docker-unavailable",
+      "summary": "Docker Desktop cannot start. CORRECTED DIAGNOSIS (session 13): this is NOT a stale socket from an unclean shutdown. The run directory was renamed aside; Docker recreated it, created a brand-new sailor-ingest.sock, and failed on that newly-created file with the same \"file cannot be accessed by the system\" error (timestamp confirmed six minutes old). A second socket dir (docker-secrets-engine) failed identically. This machine cannot create usable AF_UNIX socket reparse points, which points at an antivirus/EDR filesystem filter driver or a damaged Windows AF_UNIX subsystem.",
+      "impact": "No live Postgres/Redis/Qdrant. Migration 0009 (per-person attribution) has never been applied to a real database, and the three DB-level tests added in session 13 skip rather than run. They do execute in CI, which provisions Postgres.",
+      "workaround": "Not fixable from a shell. Options, in order of likely success: Docker Desktop -> Troubleshoot -> Reset to factory defaults; exclude %LOCALAPPDATA%Docker from real-time AV scanning; reinstall Docker Desktop. A plain machine restart may not be sufficient since the sockets are broken at creation, not stale. Leftover inert dirs to delete once working: %LOCALAPPDATA%Docker\run.stale and %LOCALAPPDATA%docker-secrets-engine.stale."
+    },
+    {
+      "id": "no-provider-keys",
+      "summary": "No real provider API key has been supplied for any provider, including Vertex AI (needs a GCP service-account JSON key, not an API key).",
+      "impact": "The pipeline is verified against a mock provider only. TTFT, tokens/sec, and any real cross-provider performance comparison remain entirely unmeasured.",
+      "workaround": "Add one key (Gemini) and one GCP service account (Vertex) and send a single request each."
+    },
+    {
+      "id": "gh-auth-broken",
+      "summary": "New, session 6. `gh auth status` reports 'The token in default is invalid.' PR creation via `gh pr create` fails.",
+      "impact": "Cannot open a PR from this environment; all session 6 work went directly to origin/main by necessity (consistent with the established pattern from earlier sessions -- the user has not objected to direct-to-main pushes).",
+      "workaround": "User runs `gh auth login -h github.com` and the next session retries, or opens a PR manually via GitHub's compare view."
+    }
+  ],
+  "launch_blockers": [
+    {
+      "id": "pricing-partially-unverified",
+      "summary": "9 of the priced models remain marked UNVERIFIED (mistral x2, groq x2, moonshot/kimi-k2, google/gemini-1.5-flash, google/gemini-1.5-pro, vertex/gemini-3.6-flash, vertex/gemini-3.1-pro-preview). The cached-token and Gemini-2.5-Pro-long-context gaps that used to accompany this item were fixed session 6 (see fixed_this_session) -- this row is now pricing-table verification only, not a pricing-model gap.",
+      "impact": "Every savings figure and invoice line for the 9 unverified models depends on unconfirmed numbers.",
+      "action": "Follow docs/runbooks/pricing-update.md for the 9 remaining rows. Verify with: grep -c 'UNVERIFIED.to_string()' apps/gateway/src/metering/pricing.rs (must read 0)."
+    },
+    {
+      "id": "load-test-not-run-against-deployment",
+      "summary": "infra/loadtest/k6-gateway.js has never been executed against a deployed instance. tests/overhead_under_load.rs provides real in-process evidence (P99 1.27ms, 64-way concurrency, mock provider, debug build) but this excludes network, real DB/Redis contention, and does not reach 1k RPS.",
+      "impact": "The sub-1ms P99 overhead claim on the landing page is partially substantiated (gateway overhead only), not the full production-conditions claim.",
+      "action": "Deploy to staging and run infra/loadtest/k6-gateway.js; record the measured P99 before repeating any performance claim under production-network conditions."
+    },
+    {
+      "id": "restore-drill-not-run",
+      "summary": "No backup has ever been taken, so none has ever been restored.",
+      "impact": "An untested backup is not a backup. Also the largest gap flagged in docs/compliance/soc2-readiness.md (Availability criterion A1.3).",
+      "action": "Run scripts/backup-restore-drill.sh once a database exists and record the result in MEMORY.md."
+    },
+    {
+      "id": "no-third-party-verification-of-any-fix",
+      "summary": "New framing, session 6. Every fix this session (budget atomicity, fallback chain, SSO, TOTP, etc.) is proven by tests written in the same session that made the fix -- real tests, run and passing, but not yet exercised against live infrastructure or reviewed by anyone outside this agent.",
+      "impact": "High confidence, not certainty. The same caveat applies to every fix claimed 'closed' below: closed against the test suite, not yet closed against production conditions.",
+      "action": "Once Docker/Redis/Postgres are available, re-run tests/redis_concurrency.rs and the full integration suite against real infrastructure, not just confirm they compile and skip."
+    }
+  ],
+  "fixed_this_session": [
+    {
+      "id": "budget-check-race",
+      "summary": "Reserve-then-true-up atomic budget enforcement (middleware/budget.rs::check_and_reserve, Reservation type). Proven against MemoryStore (concurrent_requests_cannot_overshoot_a_hard_budget) and real Redis (tests/redis_concurrency.rs::budget_reservation_is_atomic_against_real_redis)."
+    },
+    {
+      "id": "fallback-chain-hardcoded-empty",
+      "summary": "alternates_for() computes real cross-provider fallback candidates from the pricing table at openai_compat.rs's call site, replacing the hardcoded &[]."
+    },
+    {
+      "id": "streaming-resilience",
+      "summary": "open_stream_with_fallback gives streaming the same retry/fallback path and health recording (record_success_with_latency/record_failure) non-streaming already had."
+    },
+    {
+      "id": "outer-request-timeout",
+      "summary": "TimeoutLayer::with_status_code(REQUEST_TIMEOUT, deadline) added to the router; AEGIS_REQUEST_DEADLINE_SECS config, default 180s, mapped to 504."
+    },
+    {
+      "id": "cached-token-pricing-gap",
+      "summary": "TokenUsage gained cached_input_tokens/cache_write_tokens; each provider adapter's parse_usage() normalizes that provider's cache-token convention (Anthropic additive, OpenAI/Google subtractive); ModelPricing gained CachePricing rates."
+    },
+    {
+      "id": "gemini-long-context-tier-unmodeled",
+      "summary": "ModelPricing gained an optional LongContextTier (threshold + separate rates); Gemini 2.5 Pro's 200K-token tier is now modeled instead of flattened to the base rate."
+    },
+    {
+      "id": "embedding-models-winning-simple-chat-routing-decisions",
+      "summary": "Found mid-session, not in the original audit. Requirements::default() now has chat: true, so an embedding model (cheapest price, no tools/vision required) can no longer win a simple chat request purely on price. Proven by a_chat_request_is_never_routed_to_an_embedding_model."
+    },
+    {
+      "id": "graded-provider-health",
+      "summary": "fallback.rs's BreakerEntry gained a rolling success-rate/EWMA-latency HealthScore, replacing the binary circuit-breaker-only signal; feeds price_penalty()/is_degraded() into routing selection directly."
+    },
+    {
+      "id": "bandit-never-read-for-routing",
+      "summary": "RoutingInputs::bandit threaded through to select_at_tier, which folds established bandit arms into candidate scoring -- previously write-only."
+    },
+    {
+      "id": "sso-callback-missing",
+      "summary": "OIDC discovery, JWKS fetch/verify, and /api/auth/sso/callback (previously unregistered) all added. SAML explicitly rejected with a clear error, not attempted."
+    },
+    {
+      "id": "totp-unenforced",
+      "summary": "Repo layer, enrollment/confirm/disable endpoints, login-time AegisError::TotpRequired check, and a new derive_user_key HKDF namespace all added."
+    },
+    {
+      "id": "no-idempotency-keys-to-providers",
+      "summary": "Provider::chat/chat_stream trait gained idempotency_key: Option<&str>; generated once per fallback-chain attempt, reused across that attempt's internal retries only, across all 10 providers."
+    },
+    {
+      "id": "secret-redaction-incomplete-for-newer-providers",
+      "summary": "telemetry.rs gained PEM-block and private_key JSON-field redaction patterns for Vertex service-account keys."
+    },
+    {
+      "id": "session-purge-never-running",
+      "summary": "workers::scheduler gained is_session_purge_window() (04:00 UTC) and purge_expired_sessions(), wired into run()."
+    },
+    {
+      "id": "reconciliation-and-budget-alert-workers-never-spawned",
+      "summary": "reconciliation::run, budget_alerts::run, and a new health_probe::run are all spawned from main.rs now."
+    },
+    {
+      "id": "no-alerting-pipeline",
+      "summary": "infra/prometheus/alerts.yml added -- 8 rules across 4 groups, validated via js-yaml."
+    },
+    {
+      "id": "redis-atomicity-untested",
+      "summary": "tests/redis_concurrency.rs added -- 4 tests against real Redis (rate limiter, budget reservation, refused-reservation-leaves-counter-untouched, scheduler claim), gated on AEGIS_TEST_REDIS_URL."
+    },
+    {
+      "id": "scim-tokens-not-self-service",
+      "summary": "POST/GET /api/scim-tokens and DELETE /api/scim-tokens/{id} added; previously mintable only by a direct database write."
+    },
+    {
+      "id": "cargo-audit-findings",
+      "summary": "Removed the rsa dev-dependency (replaced with static PEM test fixtures), upgraded lru 0.12->0.18 (real unsoundness advisory, pop() confirmed called), added a scoped documented ignore in .cargo/audit.toml for the one remaining phantom sqlx-mysql/rsa lockfile entry (confirmed zero active build-graph edges via cargo tree)."
+    },
+    {
+      "id": "admin-audit-log-wrong-org-scope",
+      "summary": "GET /api/admin/audit now takes an org_id query parameter (defaults to caller's own org); previously always read the calling admin's own org, which is almost never the customer org a support investigation needs."
+    },
+    {
+      "id": "customer-audit-export-missing",
+      "summary": "GET /api/audit-log.jsonl added -- require_reader-gated, JSONL output -- where no customer-facing audit export existed at all despite the compliance whitepaper describing one."
+    }
+  ],
+  "fixed_session_7": [
+    {
+      "id": "semantic-cache-never-wired",
+      "summary": "cache/semantic.rs was fully built since session 1 and never called from the live pipeline (flagged by session 3's and session 5's audits, deliberately deferred as a product decision). Wired into routes/openai_compat.rs::execute_with_headroom behind a new cache::embed::Embedder trait (embedding on Aegis's own pooled provider credential, never a customer's BYOK key), gated to Pro/Enterprise plans. A semantic hit also promotes its own wording into the exact-match tier."
+    },
+    {
+      "id": "no-durable-cache-tier",
+      "summary": "New, beyond the original audit scope -- the founder asked directly for a way to keep cost savings from caching without keeping content around indefinitely. Added cache::durable::DurableCache: a fingerprint the hot Redis tier has already proven repeats gets promoted to an encrypted Postgres row (AES-256-GCM, per-tenant HKDF key, same shape as provider_credentials), sliding 30-day TTL, purged on the existing 04:00 UTC scheduler window. See docs/adr/0008-tiered-durable-cache.md."
+    },
+    {
+      "id": "qdrant-rest-only-no-grpc",
+      "summary": "cache::semantic::QdrantVectorStore talked REST/JSON only, deliberately deferred when first raised (founder chose 'embedding fix only, for now'). Picked back up once the embedding fix (ort) made Qdrant's own round trip a proportionally bigger slice of the remaining latency. Added cache::qdrant_grpc::QdrantGrpcVectorStore, a second VectorStore impl chosen via a new QDRANT_GRPC_URL config setting (REST kept as the fallback when unset). Unlike ort, qdrant-client is pure Rust with no native-binary problem, so this is FULLY verified at the type/link/test level -- cargo check, cargo clippy --all-targets, and the full cargo test suite all pass with this dependency compiled in by default. Not verified: behavior against a live Qdrant server (no Docker here). Caught and fixed a real cargo-audit regression along the way (tokenizers -> paste, RUSTSEC-2024-0436, scoped ignore added to .cargo/audit.toml) and a documentation inaccuracy (the ADR draft claimed the bundled self-hosted Qdrant already exposed gRPC on 6334; it didn't -- added the port mapping to both docker-compose files instead of leaving the doc wrong). See docs/adr/0010-qdrant-grpc-client.md."
+    },
+    {
+      "id": "no-per-request-token-ceiling",
+      "summary": "Budget checking bounded aggregate spend over a period; nothing bounded a single request's max_tokens independent of that -- a prompt with no max_tokens (or an agent loop requesting far more than the budget projection assumed) could land as a large, surprising outlier before the aggregate counter caught up. Added Config::max_tokens_per_request (AEGIS_MAX_TOKENS_PER_REQUEST, default 16384) enforced by a shared clamp_max_tokens(), called from both HTTP entry points (handle_chat, handle_messages) before their budget reservation -- covers streaming and non-streaming from one call site per endpoint (a naive implementation inside execute_with_headroom alone would have missed streaming entirely, since stream_chat runs a separate pipeline; caught this before shipping and moved the enforcement point). Also fixes budget-projection accuracy: the reservation now projects against the bound that will actually be enforced. Fully verified: extended MockProvider::RecordedCall to capture the max_tokens a provider actually received, proved the streaming case specifically with a dedicated test. 8 new tests, all passing."
+    }
+  ],
+  "experimental_unverified": [
+    {
+      "id": "onnx-local-embeddings",
+      "summary": "cache::onnx_embed::OnnxEmbedder (ort + tokenizers, target model BAAI/bge-small-en-v1.5, FP32, mean-pooled + L2-normalized), a second Embedder implementation for a local, sub-2ms-target embedding path replacing ProviderEmbedder's 50-300ms remote call. Model chosen after comparing against the originally-proposed all-MiniLM-L6-v2 and against NVIDIA's open embedding line (Nemotron 3 Embed) -- NVIDIA ruled out on size/architecture fit (smallest variant 1.14B params, GPU-quantized), not license (OpenMDW-1.1 is actually commercial-friendly). Behind an off-by-default 'local-embeddings' Cargo feature specifically so it never affects the default build.",
+      "verified": "cargo check --features local-embeddings succeeds (type-checks against the real ort v2.0.0-rc.10 / tokenizers v0.23 APIs, one real borrow-checker bug caught and fixed). cargo clippy --features local-embeddings --lib is clean. Default (no-flag) cargo build/test confirmed unaffected before and after -- still 774 lib / 814 full-suite.",
+      "not_verified": "cargo build/cargo test WITH the feature fail to link -- confirmed directly (ort-sys emits a self-explanatory placeholder linker input when no ONNX Runtime binary is configured). This means even the pure mean-pooling/normalization unit tests, which need no model at all, have never actually run -- only been reviewed by hand. No real ONNX Runtime binary or bge-small-en-v1.5 model file exists in this environment, and this crate deliberately does not fetch either automatically. Also unverified: the false-positive rate of the 0.95 similarity threshold specifically for this model's embedding space -- BGE's own docs note its unrelated-text similarity baseline sits well above zero, so this is a real open question, not a formality.",
+      "docs": "docs/adr/0009-local-onnx-embeddings.md, docs/runbooks/local-embeddings-setup.md"
+    }
+  ],
+  "verification": {
+    "unit_tests_lib": 782,
+    "unit_tests_lib_ignored": 0,
+    "unit_tests_passing": true,
+    "full_test_suite_total": 851,
+    "integration_tests_written": 26,
+    "integration_tests_run_locally": true,
+    "integration_tests_run_against_real_redis": true,
+    "integration_tests_run_against_real_postgres": true,
+    "route_surface_test_passing": true,
+    "concurrency_overhead_test_passing": true,
+    "budget_race_reproduced_historically": true,
+    "budget_race_now_fixed_and_reproduction_test_proves_it": true,
+    "ssrf_exploit_chain_proven_and_fixed": true,
+    "clippy_clean": true,
+    "fmt_clean": true,
+    "web_builds": true,
+    "web_lint_clean": true,
+    "design_token_guard_passing": true,
+    "gateway_started_and_probed": true,
+    "load_test_executed_against_deployment": false,
+    "restore_drill_executed": false,
+    "live_provider_verified": false,
+    "vertex_ai_live_verified": false,
+    "docker_functional_on_build_machine": true,
+    "redis_concurrency_tests_run_against_real_redis": true,
+    "phase_tasks_complete": "68/69",
+    "providers_registered": 10
+  }
+}

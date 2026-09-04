@@ -1,0 +1,134 @@
+[package]
+name = "aegis-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Aegis — AI cost optimization gateway"
+default-run = "aegis-gateway"
+
+[dependencies]
+# HTTP server
+axum = { version = "0.8", features = ["macros", "json"] }
+tower = { version = "0.5", features = ["util", "timeout"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "limit", "request-id", "timeout"] }
+hyper = { version = "1", features = ["full"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-stream = "0.3"
+async-trait = "0.1"
+
+# HTTP client
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "stream",
+  "rustls-tls",
+] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Storage
+sqlx = { version = "0.8", default-features = false, features = [
+  "postgres",
+  "runtime-tokio",
+  "tls-rustls",
+  "uuid",
+  "chrono",
+  "json",
+  "migrate",
+  "macros",
+] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "script"] }
+
+# Crypto & hashing
+argon2 = "0.5"
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+# RS256 JWT signing for Vertex AI service-account auth. See docs/adr/0007. Used only by
+# providers/vertex.rs — no other provider needs asymmetric signing.
+jsonwebtoken = "9"
+hkdf = "0.12"
+aes-gcm = "0.10"
+rand = "0.8"
+subtle = "2"
+base64 = "0.22"
+hex = "0.4"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+thiserror = "2"
+anyhow = "1"
+lru = "0.18"
+dashmap = "6"
+dotenvy = "0.15"
+once_cell = "1"
+regex = "1"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# The official gRPC client for the semantic cache's vector store — see
+# docs/adr/0010-qdrant-grpc-client.md. Pure Rust, no native binary, so unlike `ort` this is
+# a normal always-on dependency, not feature-gated.
+qdrant-client = { version = "1", default-features = false, features = [
+  "serde",
+  "uuid",
+] }
+
+# Local embeddings for the semantic cache — optional, see docs/adr/0009-local-onnx-embeddings.md.
+# `default-features = false` on `ort` deliberately excludes its `download-binaries` feature:
+# enabling `local-embeddings` must never make `cargo build` silently fetch a native binary
+# from the internet. A deployment that wants this path either enables `ort`'s
+# `download-binaries` feature itself (an explicit, informed choice) or points `ort` at a
+# system-installed ONNX Runtime via `load-dynamic` — see the ADR.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+  "std",
+  "ndarray",
+  "download-binaries",
+], optional = true }
+ndarray = { version = "0.16", optional = true }
+tokenizers = { version = "0.23", default-features = false, features = [
+  "fancy-regex",
+], optional = true }
+
+[features]
+# Off by default: no code path anywhere in the default build depends on ort or tokenizers,
+# so `cargo build`/`cargo test` with no flags is completely unaffected by this feature's
+# existence. Enable explicitly once a real ONNX model + tokenizer are provisioned — see the
+# ADR for exactly what "provisioned" means and why that step is deliberately not automated.
+local-embeddings = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+# Only exercised by benches/semantic_embedding.rs, which itself only compiles under
+# `local-embeddings` (see that file's own doc comment) — a plain `cargo bench` with no
+# feature flags never touches this.
+criterion = "0.5"
+# Deliberately NOT depending on the `rsa` crate for the SSO id-token verification tests.
+# It was tried first and removed: `cargo audit` (which CI runs with `--deny warnings`)
+# flags it under RUSTSEC-2023-0071, a timing side-channel with no fixed release available.
+# jsonwebtoken signs and verifies through `ring`, not `rsa`, so the tests instead load two
+# static throwaway keypairs from testdata/ (see enterprise::sso's test module) — identical
+# real-RS256 coverage, no vulnerable dependency.
+
+[lib]
+name = "aegis_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aegis-gateway"
+path = "src/main.rs"
+
+[[bench]]
+name = "semantic_embedding"
+harness = false
+required-features = ["local-embeddings"]

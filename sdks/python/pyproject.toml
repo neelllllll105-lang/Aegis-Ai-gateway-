@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aegis-sdk"
+version = "0.1.0"
+description = "Typed access to Aegis savings attribution and the management API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "UNLICENSED" }
+keywords = ["aegis", "llm", "cost-optimization", "openai", "anthropic"]
+dependencies = []
+
+[project.optional-dependencies]
+# httpx is only needed for AegisClient. parse_attribution has no dependencies at all,
+# which is deliberate: reading the savings headers should never require an install.
+client = ["httpx>=0.27"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["aegis"]

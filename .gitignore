@@ -1,0 +1,66 @@
+# Rust
+/target
+apps/gateway/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+
+# Env & secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+# Deliberate, narrow exception: a throwaway RSA key generated locally with `openssl
+# genpkey` solely to unit-test JWT assertion construction in providers/vertex.rs. Not
+# connected to any real Google Cloud project or credential — see
+# apps/gateway/testdata/README.md. Committing it is the point: CI can sign a test
+# assertion with no real secret involved. Every other *.pem stays blocked.
+!apps/gateway/testdata/vertex_test_key.pem
+# Same exception, for two throwaway keypairs used to prove RS256 signature verification
+# in the SSO id-token tests (real crypto, no real account behind either key). Generated
+# locally with `openssl genrsa` / `openssl rsa -pubout`; replaced the `rsa` crate as a
+# dev-dependency so cargo-audit's RUSTSEC-2023-0071 finding (no fix available for that
+# crate) does not have to be carried or suppressed just to generate test keys at runtime.
+!apps/gateway/testdata/sso_test_key_*.pem
+secrets/
+
+# Build output
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Logs & runtime
+*.log
+/tmp/
+coverage/
+.sqlx-offline-tmp/
+
+# Local infra volumes
+infra/data/
+
+# Local model weights (binary files)
+models/**/*.onnx
+models/**/*.bin
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.class

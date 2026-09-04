@@ -1,0 +1,24 @@
+# Aegis
+#
+# The marketing site is meant to be found. Everything behind authentication is not, and
+# is additionally marked noindex at the page level — this file is the coarse first pass,
+# the meta tag is the one that actually binds.
+
+User-agent: *
+Allow: /
+Disallow: /dashboard
+Disallow: /savings
+Disallow: /usage
+Disallow: /requests
+Disallow: /keys
+Disallow: /providers
+Disallow: /models
+Disallow: /policies
+Disallow: /budgets
+Disallow: /team
+Disallow: /billing
+Disallow: /settings
+Disallow: /login
+Disallow: /signup
+
+Sitemap: https://aegis.dev/sitemap.xml
