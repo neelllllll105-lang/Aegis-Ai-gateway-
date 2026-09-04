@@ -65,7 +65,7 @@ export default function HomePage() {
 
           {/* 4 Stat Metrics, paper-toned */}
           <div className="mt-10 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <StatBox title="Up to 90%" label="Lower cost per request" />
+            <StatBox title="Up to 70%" label="Lower cost per request" />
             <StatBox title="0" label="Code changes to adopt" />
             <StatBox title="100%" label="Of spend governed & audited" />
             <StatBox title="~10 min" label="To your first savings estimate" />

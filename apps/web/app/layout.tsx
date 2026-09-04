@@ -39,7 +39,7 @@ export const metadata: Metadata = {
     template: "%s · Aegis",
   },
   description:
-    "The intelligent routing gateway for US enterprises. Reduce LLM API spend by up to 90% with quality-aware routing, semantic caching, and auditable per-request receipts. Change one base URL.",
+    "The intelligent routing gateway for US enterprises. Reduce LLM API spend by up to 70% with quality-aware routing, semantic caching, and auditable per-request receipts. Change one base URL.",
   keywords: [
     "AI gateway",
     "LLM cost optimization",
@@ -55,13 +55,13 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     siteName: "Aegis",
-    title: "Cut your Enterprise AI bill by up to 90%. Keep full quality. Prove it.",
+    title: "Cut your Enterprise AI bill by up to 70%. Keep full quality. Prove it.",
     description:
       "Enterprise AI gateway with quality-aware routing, semantic caching, and real-time auditable savings attribution.",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Aegis — Cut Enterprise AI bills by up to 90%",
+    title: "Aegis — Cut Enterprise AI bills by up to 70%",
     description:
       "Intelligent AI gateway with quality-aware routing, semantic caching, and auditable savings.",
   },
