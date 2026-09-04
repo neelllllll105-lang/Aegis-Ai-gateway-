@@ -1101,10 +1101,7 @@ pub async fn accept_invite(
     }
 }
 
-async fn do_accept_invite(
-    state: &AppState,
-    request: AcceptInviteRequest,
-) -> Result<Response> {
+async fn do_accept_invite(state: &AppState, request: AcceptInviteRequest) -> Result<Response> {
     if request.password.len() < MIN_PASSWORD_LENGTH {
         return Err(AegisError::BadRequest(format!(
             "password must be at least {MIN_PASSWORD_LENGTH} characters"
