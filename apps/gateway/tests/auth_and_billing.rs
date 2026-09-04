@@ -1121,3 +1121,145 @@ async fn invite_and_accept_lifecycle_works() {
 
     cleanup(&pool, &fixture).await;
 }
+
+// ---------------------------------------------------------------------------
+// Per-person attribution, against a real database.
+//
+// The unit tests prove `AuthContext` carries the assignee. These prove the column
+// mapping all the way to `usage_records` and back, which is exactly the class of
+// bug `docs/adr/0004-runtime-checked-sql.md` accepts cannot be caught at compile
+// time.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_key_issued_to_a_person_attributes_its_usage_to_them() {
+    let Some((state, pool)) = setup().await else {
+        return skip("a_key_issued_to_a_person_attributes_its_usage_to_them");
+    };
+
+    use aegis_gateway::middleware::auth;
+    use common::create_key_assigned;
+
+    let fixture = create_org(&pool, "attribution").await;
+    let (plaintext, _key_id) =
+        create_key_assigned(&pool, &fixture, "alice-laptop", Some(fixture.user_id)).await;
+
+    // The assignee survives the round trip through the key-resolution query.
+    let context = auth::authenticate_api_key(&state, &plaintext)
+        .await
+        .expect("an assigned key must still authenticate");
+    assert_eq!(
+        context.user_id,
+        Some(fixture.user_id),
+        "the key's assignee must reach AuthContext through the real resolve_key query"
+    );
+
+    // And it reaches the billing record.
+    let request_id = uuid::Uuid::new_v4();
+    let mut event = aegis_gateway::metering::usage::UsageEvent::rejected(
+        request_id,
+        fixture.org_id,
+        context.api_key_id,
+        "gpt-4o".into(),
+        200,
+        "none",
+        0.4,
+    );
+    event.user_id = context.user_id;
+    repo::insert_usage_record(&pool, &event)
+        .await
+        .expect("usage insert");
+
+    let stored: Option<(Option<uuid::Uuid>,)> =
+        sqlx::query_as("SELECT user_id FROM usage_records WHERE request_id = $1")
+            .bind(request_id)
+            .fetch_optional(&pool)
+            .await
+            .expect("usage read");
+
+    assert_eq!(
+        stored.expect("the record must exist").0,
+        Some(fixture.user_id),
+        "user_id must persist to usage_records, or per-person spend cannot be reported"
+    );
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn a_shared_key_records_no_person() {
+    let Some((state, pool)) = setup().await else {
+        return skip("a_shared_key_records_no_person");
+    };
+
+    use aegis_gateway::middleware::auth;
+
+    let fixture = create_org(&pool, "shared-key").await;
+    let (plaintext, _) = create_key(&pool, &fixture, "project-shared").await;
+
+    let context = auth::authenticate_api_key(&state, &plaintext)
+        .await
+        .expect("a shared key must authenticate");
+    assert_eq!(
+        context.user_id, None,
+        "an unassigned key must not invent a person — NULL is the correct answer"
+    );
+
+    cleanup(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn a_member_sees_only_their_own_keys_and_the_shared_ones() {
+    // The permission boundary that per-person assignment creates: once a key names a
+    // person and carries their budget, listing every key in the org hands one colleague
+    // another colleague's spending limit.
+    let Some((_state, pool)) = setup().await else {
+        return skip("a_member_sees_only_their_own_keys_and_the_shared_ones");
+    };
+
+    use common::create_key_assigned;
+
+    let fixture = create_org(&pool, "key-visibility").await;
+
+    // A second person in the same organisation.
+    let colleague = repo::create_user(
+        &pool,
+        &format!("colleague-{}@aegis-test.local", uuid::Uuid::new_v4()),
+        Some("hash"),
+        None,
+    )
+    .await
+    .expect("colleague");
+    repo::add_member(&pool, fixture.org_id, colleague.id, "member", None)
+        .await
+        .expect("membership");
+
+    let (_, mine) = create_key_assigned(&pool, &fixture, "mine", Some(fixture.user_id)).await;
+    let (_, theirs) = create_key_assigned(&pool, &fixture, "theirs", Some(colleague.id)).await;
+    let (_, shared) = create_key(&pool, &fixture, "shared").await;
+
+    let visible = repo::list_api_keys_for_member(&pool, fixture.org_id, fixture.user_id)
+        .await
+        .expect("scoped list");
+    let ids: Vec<uuid::Uuid> = visible.iter().map(|k| k.id).collect();
+
+    assert!(ids.contains(&mine), "a member must see their own key");
+    assert!(
+        ids.contains(&shared),
+        "a member must see shared project keys"
+    );
+    assert!(
+        !ids.contains(&theirs),
+        "a member must NOT see a colleague's personal key"
+    );
+
+    // An admin still sees everything — the narrow view is a member restriction, not a
+    // hole in administration.
+    let all = repo::list_api_keys(&pool, fixture.org_id)
+        .await
+        .expect("admin list");
+    let all_ids: Vec<uuid::Uuid> = all.iter().map(|k| k.id).collect();
+    assert!(all_ids.contains(&theirs), "an admin must see every key");
+
+    cleanup(&pool, &fixture).await;
+}

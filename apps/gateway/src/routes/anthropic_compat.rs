@@ -795,6 +795,7 @@ async fn stream_messages(
             event.input_cost_mc = pricing.input_cost_of(&tokens).as_i64();
             event.output_cost_mc = pricing.output_cost_of(&tokens).as_i64();
         }
+        event.user_id = auth_for_stream.user_id;
 
         event.error_type = stream_error;
         event.reserved_mc = reservation.commit();
@@ -1492,6 +1493,7 @@ mod tests {
             api_key_id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
             team_id: None,
+            assigned_to_user_id: None,
             rate_limit_per_minute: 1_000,
             monthly_budget_mc: None,
             allowed_models: None,

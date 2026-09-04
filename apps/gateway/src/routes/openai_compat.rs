@@ -197,6 +197,11 @@ impl PipelineOutcome {
         event.output_cost_mc = self.output_cost_mc;
         event.tokens_saved_by_compression = self.tokens_saved_by_compression;
         event.region = Some(region.to_string());
+        // Who sent it, when the key names a person. Set here rather than passed into
+        // `UsageEvent::new` because that constructor is already at fifteen positional
+        // arguments and a sixteenth silently mis-ordered would be a billing bug nobody
+        // would see.
+        event.user_id = auth.user_id;
         event
     }
 }
@@ -1675,6 +1680,7 @@ async fn stream_chat(
             event.input_cost_mc = pricing.input_cost_of(&tokens).as_i64();
             event.output_cost_mc = pricing.output_cost_of(&tokens).as_i64();
         }
+        event.user_id = auth_for_stream.user_id;
 
         event.error_type = stream_error;
         // Convert the held projection into the real cost, exactly as the non-streaming
@@ -2231,6 +2237,7 @@ mod tests {
             api_key_id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
             team_id: None,
+            assigned_to_user_id: None,
             rate_limit_per_minute: 1_000,
             monthly_budget_mc: None,
             allowed_models: None,
@@ -2917,6 +2924,7 @@ mod tests {
             api_key_id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
             team_id: None,
+            assigned_to_user_id: None,
             rate_limit_per_minute: 1_000,
             monthly_budget_mc: None,
             allowed_models: None,

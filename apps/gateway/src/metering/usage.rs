@@ -39,6 +39,13 @@ pub struct UsageEvent {
     pub org_id: Uuid,
     pub api_key_id: Option<Uuid>,
     pub team_id: Option<Uuid>,
+    /// The person who sent this request, when the key was issued to one.
+    ///
+    /// Copied from the key's assignee and frozen here, never resolved through the key
+    /// later: a key can be reassigned, and last month's spend must not move when it is.
+    /// `None` means a shared key, which is a real answer, not missing data.
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
 
     /// What the caller asked for — the savings baseline.
     pub requested_model: String,
@@ -137,6 +144,7 @@ impl UsageEvent {
             org_id,
             api_key_id,
             team_id,
+            user_id: None,
             requested_model,
             served_model,
             provider,
@@ -184,6 +192,7 @@ impl UsageEvent {
             org_id,
             api_key_id,
             team_id: None,
+            user_id: None,
             requested_model: requested_model.clone(),
             served_model: requested_model,
             provider: "none".to_string(),

@@ -159,6 +159,12 @@ export interface ApiKey {
   id: string;
   org_id: string;
   team_id: string | null;
+  /**
+   * The person this key was issued to, if any. `null` is a shared project or service
+   * key — a real answer, not missing data. Traffic on an assigned key is attributed to
+   * that person in usage records.
+   */
+  assigned_to_user_id: string | null;
   name: string;
   key_prefix: string;
   rate_limit_per_minute: number;
@@ -407,6 +413,12 @@ export const api = {
     rate_limit_per_minute?: number;
     monthly_budget_mc?: number;
     allowed_models?: string[];
+    /**
+     * Issue the key to a named person so their spend is attributed to them. Only an
+     * owner or admin may name someone other than themselves; the gateway rejects it
+     * otherwise, and rejects an assignee who is not a member of the organisation.
+     */
+    assigned_to_user_id?: string;
   }) => apiRequest<CreatedKey>("/api/keys", { method: "POST", body: input }),
 
   revokeKey: (id: string) =>

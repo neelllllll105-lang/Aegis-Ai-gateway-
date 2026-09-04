@@ -631,6 +631,7 @@ mod tests {
             api_key_id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
             team_id: None,
+            assigned_to_user_id: None,
             rate_limit_per_minute: 60,
             monthly_budget_mc: None,
             allowed_models: None,

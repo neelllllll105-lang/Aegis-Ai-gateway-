@@ -4,7 +4,7 @@
 > This file is the handoff protocol. It tells you where the project is, what genuinely
 > works, what does not, what was decided and why, and exactly what to do next.
 >
-> **Last updated:** 2026-09-01
+> **Last updated:** 2026-09-04
 > **Updated by:** Claude Opus 5 (Claude Code)
 > **Update this file before ending any session.** See `CLAUDE.md`.
 
@@ -827,6 +827,68 @@ Each of these cost real time during the build.
 ## Session Log
 
 Newest first.
+
+### 2026-09-04 — Session 13 — Claude Opus 5
+
+Three pieces, each closing something that was live and wrong rather than merely absent.
+
+**A credentialed-CORS hole, which is the most serious thing found in this project to
+date.** `router::cors_layer` called `AllowOrigin::mirror_request()` alongside
+`allow_credentials(true)`. Mirroring reflects the caller's own `Origin` back and tells it
+credentials are permitted — so any page a signed-in user visited could `fetch()` the
+gateway with their session cookie attached and read the response: keys, usage, budgets,
+members. Two paths reached it. One was `app_url.contains("localhost")`, which
+`https://localhost.evil.com` satisfies. The other was worse: an `AEGIS_APP_URL` that
+failed to parse logged a warning and *then mirrored*, so one typo in one production
+environment variable silently removed the boundary — failing open on the exact control
+that exists to fail closed. Replaced with an explicit predicate: production allows exactly
+the configured dashboard origin; development additionally allows loopback and private-LAN
+origins parsed properly via `url::Host` (which is what keeps the new `getApiUrl()` LAN mode
+working), and nothing else, ever, as a consequence of misconfiguration. `Config::validate`
+now refuses to start a production-like process whose `app_url` is unparseable. Six tests,
+including the `localhost.evil.com` case the old substring check admitted.
+
+**Per-person attribution, end to end.** `AuthContext::from_key` hardcoded `user_id: None`,
+and `usage_records` had no `user_id` column — so for API-key traffic, which is all the
+billable traffic there is, no request carried a human identity and "what did this employee
+spend" had no answer at any layer. Migration 0009 adds `api_keys.assigned_to_user_id`
+(nullable: a shared project key genuinely has no person behind it, and `NULL` is the right
+answer rather than a guess) and `usage_records.user_id`, stamped from the key's assignee at
+request time and frozen — never resolved back through the key later, because a key can be
+reassigned and last month's spend must not move when it is. Threaded through `KeyContext`,
+`AuthContext`, `UsageEvent`, the writer's INSERT, and both streaming paths. `POST /api/keys`
+accepts `assigned_to_user_id`, refuses it from a non-admin naming somebody else, and refuses
+an assignee who is not a member of the organisation (otherwise an admin could stamp another
+tenant's user id onto this tenant's billing records).
+
+That assignment also created a permission problem, so it is fixed in the same change: every
+reader could list every key in the org, which was defensible when a key belonged only to an
+organisation and stops being defensible the moment keys carry a named person and their
+personal budget. `list_keys` now returns everything for owners and admins, and own-plus-
+shared for everyone else.
+
+**Routing modes made real.** `RoutingHint::Cheap` was parsed from the header and then never
+branched on — the router only ever tested `Passthrough` — so a customer sending the
+documented `cheap` header to save money got default behaviour and no indication they had
+been ignored. Replaced with a five-mode ladder (`passthrough` / `quality` / `balanced` /
+`economy`, plus `auto` as the default alias for balanced), expressed as a table on
+`RoutingHint::target_tier` and consumed by the router. `cheap` is retained as a synonym for
+`economy` rather than broken. The complex band returns `None` in every mode *and* the router
+returns before tier logic runs: the quality guarantee is now enforced twice on purpose, so a
+mode added later cannot opt out of it by accident. Documented on the `/connect` page as a
+fourth tab, which is the first time these were documented anywhere.
+
+895 tests passing (840 lib + 55 integration), `fmt --check` clean, `clippy --all-targets -D
+warnings` clean, web `tsc`/`eslint`/design-token guard clean, new tab verified rendering in
+a real browser with no console errors.
+
+**Not verified, and worth stating plainly:** the three new database-level tests
+(`a_key_issued_to_a_person_attributes_its_usage_to_them`, `a_shared_key_records_no_person`,
+`a_member_sees_only_their_own_keys_and_the_shared_ones`) compile and skip cleanly but have
+not executed their assertions here — Docker is still down on this machine (the
+`sailor-ingest.sock` reparse-point failure from session 12, which needs a machine restart).
+They run in CI, which provisions Postgres. Migration 0009 has therefore never been applied
+to a live database.
 
 ### 2026-09-01 — Session 12 — Claude Sonnet 5
 

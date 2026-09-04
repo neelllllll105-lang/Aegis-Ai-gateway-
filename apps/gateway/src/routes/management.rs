@@ -617,13 +617,44 @@ pub struct CreateKeyRequest {
     pub allowed_models: Option<Vec<String>>,
     #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
+    /// Issue this key to a named person, so their spend can be attributed to them.
+    ///
+    /// Omit for a shared project or service key. Only an owner or admin may set it — a
+    /// member cannot mint a key in someone else's name.
+    #[serde(default)]
+    pub assigned_to_user_id: Option<Uuid>,
 }
 
 /// `GET /api/keys`
+///
+/// An owner or admin sees every key in the organisation. Anyone else sees the keys issued
+/// to them plus the org's shared, unassigned keys.
+///
+/// The narrower view exists because keys now carry an assignee: once a key names a person
+/// and carries their personal budget, "list every key" hands one colleague another
+/// colleague's spending limit. That was defensible when a key belonged only to an
+/// organisation and is not defensible now.
 pub async fn list_keys(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match async {
         let context = require_reader(&state, &headers).await?;
-        let keys = repo::list_api_keys(state.db()?, context.org_id).await?;
+        let pool = state.db()?;
+
+        // `can_write` is the owner/admin test the rest of the management API uses, and it
+        // is false for API-key callers by construction — so a leaked key cannot enumerate
+        // the organisation's people through this route either.
+        let keys = if context.can_write() {
+            repo::list_api_keys(pool, context.org_id).await?
+        } else {
+            match context.user_id {
+                Some(user_id) => {
+                    repo::list_api_keys_for_member(pool, context.org_id, user_id).await?
+                }
+                // A caller with no user identity and no admin rights — an API key acting
+                // on its own behalf. It may see the shared keys and nothing personal.
+                None => repo::list_api_keys_for_member(pool, context.org_id, Uuid::nil()).await?,
+            }
+        };
+
         Ok::<_, AegisError>(respond(StatusCode::OK, serde_json::json!({"keys": keys})))
     }
     .await
@@ -657,6 +688,33 @@ async fn do_create_key(
         return Err(AegisError::BadRequest("a key name is required".into()));
     }
 
+    // Assigning a key to someone else is an administrative act: the assignee's spend will
+    // be attributed to them and their personal budget enforced against them, so a member
+    // must not be able to mint a key in a colleague's name. Assigning a key to *yourself*
+    // is always allowed.
+    let assignee = match request.assigned_to_user_id {
+        None => None,
+        Some(target) => {
+            if !context.can_write() && context.user_id != Some(target) {
+                return Err(AegisError::Forbidden(
+                    "only an owner or admin can issue a key in another person's name".into(),
+                ));
+            }
+            // The assignee must actually belong to this organisation. Without this an
+            // administrator could attribute spend to a user id from another tenant, which
+            // would put one org's identifier on another org's billing record.
+            if repo::role_in_org(pool, context.org_id, target)
+                .await?
+                .is_none()
+            {
+                return Err(AegisError::BadRequest(
+                    "the assignee is not a member of this organisation".into(),
+                ));
+            }
+            Some(target)
+        }
+    };
+
     let generated = crypto::generate_api_key();
     let key = repo::create_api_key(
         pool,
@@ -672,6 +730,7 @@ async fn do_create_key(
         request.monthly_budget_mc,
         request.allowed_models.map(|m| serde_json::json!(m)),
         request.expires_at,
+        assignee,
     )
     .await?;
 
@@ -681,7 +740,13 @@ async fn do_create_key(
         "key.created",
         "api_key",
         Some(key.id),
-        Some(serde_json::json!({"name": key.name, "prefix": key.key_prefix})),
+        Some(serde_json::json!({
+            "name": key.name,
+            "prefix": key.key_prefix,
+            // Who the key was issued to, so the audit trail explains whose spend this key
+            // will produce — not just that a key appeared.
+            "assigned_to_user_id": assignee,
+        })),
     )
     .await;
 

@@ -26,12 +26,13 @@ import { CodeBlock } from "@/components/ui";
  * above — shown explicitly in its own tab below rather than left for someone to guess.
  */
 
-type ProviderId = "openai" | "anthropic" | "google";
+type ProviderId = "openai" | "anthropic" | "google" | "modes";
 
 const PROVIDERS: { id: ProviderId; label: string; sub: string }[] = [
   { id: "openai", label: "OpenAI-compatible", sub: "/v1/chat/completions" },
   { id: "anthropic", label: "Anthropic", sub: "/v1/messages" },
   { id: "google", label: "Google / Gemini", sub: "via either surface" },
+  { id: "modes", label: "Routing modes", sub: "X-Aegis-Routing-Hint" },
 ];
 
 export function IntegrationGuides() {
@@ -70,6 +71,7 @@ export function IntegrationGuides() {
       {active === "openai" && <OpenAiPanel />}
       {active === "anthropic" && <AnthropicPanel />}
       {active === "google" && <GooglePanel />}
+      {active === "modes" && <RoutingModes />}
     </div>
   );
 }
@@ -267,6 +269,91 @@ response = client.chat.completions.create(
   "messages": [{"role": "user", "content": "Hello Aegis!"}]
 }`}
         language="json"
+      />
+    </div>
+  );
+}
+
+/**
+ * Routing modes, documented because they are a real header a customer can send and were
+ * previously undocumented anywhere in the product.
+ */
+function RoutingModes() {
+  return (
+    <div className="mx-auto max-w-3xl space-y-4">
+      <div className="rounded-2xl border border-[var(--color-ink)] bg-[var(--color-surface2)] p-5 shadow-[3px_3px_0_var(--shadow-color)]">
+        <h3 className="text-sm font-bold text-[var(--color-ink)]">
+          Choose how hard Aegis trades cost against quality
+        </h3>
+        <p className="mt-1.5 text-xs sm:text-sm leading-relaxed text-[var(--color-muted)] font-medium">
+          Send <code className="font-mono">X-Aegis-Routing-Hint</code> on any request. The
+          classifier decides what is eligible to move; the mode decides how far it goes.
+          One rule holds in every mode: a request classified <b>complex</b> is always served
+          on the model you asked for.
+        </p>
+
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full min-w-[420px] border-collapse text-left">
+            <thead>
+              <tr className="border-b-2 border-[var(--color-ink)]">
+                <th className="py-2 pr-3 font-mono text-[10px] uppercase tracking-wide text-[var(--color-muted-light)]">
+                  Mode
+                </th>
+                <th className="py-2 pr-3 font-mono text-[10px] uppercase tracking-wide text-[var(--color-muted-light)]">
+                  Simple
+                </th>
+                <th className="py-2 pr-3 font-mono text-[10px] uppercase tracking-wide text-[var(--color-muted-light)]">
+                  Medium
+                </th>
+                <th className="py-2 font-mono text-[10px] uppercase tracking-wide text-[var(--color-muted-light)]">
+                  Complex
+                </th>
+              </tr>
+            </thead>
+            <tbody className="text-xs font-medium text-[var(--color-muted)]">
+              {[
+                ["passthrough", "requested", "requested", "requested"],
+                ["quality", "mid tier", "requested", "requested"],
+                ["balanced (default)", "cheap tier", "mid tier", "requested"],
+                ["economy", "cheap tier", "cheap tier", "requested"],
+              ].map(([mode, simple, medium, complex]) => (
+                <tr key={mode} className="border-b border-[var(--color-line)]">
+                  <td className="py-2 pr-3 font-mono text-[11px] font-bold text-[var(--color-ink)]">
+                    {mode}
+                  </td>
+                  <td className="py-2 pr-3">{simple}</td>
+                  <td className="py-2 pr-3">{medium}</td>
+                  <td className="py-2 font-semibold text-[var(--color-ink)]">{complex}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p className="mt-3 text-[11px] text-[var(--color-muted-light)] font-medium">
+          <code className="font-mono">cheap</code> is still accepted as a synonym for{" "}
+          <code className="font-mono">economy</code>.
+        </p>
+      </div>
+
+      <GuideItem
+        title="Set a mode on a single request"
+        instruction="Any surface, any SDK — it is just a header:"
+        code={`curl http://localhost:8080/v1/chat/completions \\
+  -H "Authorization: Bearer aegis_sk_live_your_key_here" \\
+  -H "X-Aegis-Routing-Hint: economy" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Summarise this changelog."}]
+  }'`}
+      />
+
+      <GuideItem
+        title="Never substitute, for one request"
+        instruction="The escape hatch. Outranks every routing rule and organisation policy — always available, by design:"
+        code={`X-Aegis-Routing-Hint: passthrough`}
+        language="text"
       />
     </div>
   );

@@ -20,8 +20,24 @@
 //! 1. Caller's `X-Aegis-Routing-Hint: passthrough` — the escape hatch of Part 13 item 5.
 //!    Nothing overrides it.
 //! 2. Organisation policy (`deny`, `pin_model`, `passthrough`, tier target/ceiling).
-//! 3. Classifier complexity band.
+//! 3. Classifier complexity band, as traded by the caller's routing mode.
 //! 4. Passthrough.
+//!
+//! # Routing modes
+//!
+//! `X-Aegis-Routing-Hint` selects how hard to trade cost against quality. The band the
+//! classifier assigns decides what is eligible; the mode decides how far to go:
+//!
+//! | Mode | Simple | Medium | Complex |
+//! |---|---|---|---|
+//! | `passthrough` | requested | requested | requested |
+//! | `quality` | mid | requested | requested |
+//! | `balanced` / `auto` | cheap | mid | requested |
+//! | `economy` (or legacy `cheap`) | cheap | cheap | requested |
+//!
+//! The complex column is the product's central promise and no mode can change it. It is
+//! enforced twice on purpose: [`RoutingHint::target_tier`] returns `None` for that band in
+//! every mode, and [`Router::route`] returns before any tier logic runs.
 
 use crate::engine::bandit::RoutingBandit;
 use crate::engine::classifier::{Classification, Classifier, TaskDomain};
@@ -29,7 +45,7 @@ use crate::engine::fallback::{HealthScore, ProviderHealth};
 use crate::engine::policy::{PolicyContext, RoutingPolicy};
 use crate::error::{AegisError, Result};
 use crate::metering::pricing::{PricingTable, Requirements};
-use crate::types::{Complexity, ModelTier, NormalizedRequest, RoutingHint, RoutingReason};
+use crate::types::{ModelTier, NormalizedRequest, RoutingHint, RoutingReason};
 
 /// The outcome of routing one request.
 #[derive(Debug, Clone, PartialEq)]
@@ -250,23 +266,26 @@ impl Router {
             }
         }
 
-        // [3] Complexity-driven selection.
-        let target_tier = match classification.complexity {
-            // Never downgrade a hard request. This is the line that protects quality, and
-            // budget pressure does not move it: serving a worse answer to save money is
-            // the one trade this product must never make silently.
-            Complexity::Complex => {
-                return Ok(self.passthrough_capped(
-                    requested,
-                    pricing,
-                    health,
-                    requirements,
-                    inputs,
-                    Some(classification.score),
-                ))
-            }
-            Complexity::Medium => ModelTier::Mid,
-            Complexity::Simple => ModelTier::Cheap,
+        // [3] Complexity-driven selection, as tightened or loosened by the caller's mode.
+        //
+        // The mode decides how hard to trade; the complexity band decides what is on the
+        // table. `target_tier` returns `None` when this combination must not be
+        // substituted at all — always for a complex request, and additionally for a
+        // medium one under `quality`.
+        //
+        // Complex returning `None` is belt and braces: the mode table says so, and this
+        // branch returns before any tier logic runs. Serving a worse answer to save money
+        // is the one trade this product must never make silently, so it is expressed
+        // twice on purpose.
+        let Some(target_tier) = inputs.hint.target_tier(classification.complexity) else {
+            return Ok(self.passthrough_capped(
+                requested,
+                pricing,
+                health,
+                requirements,
+                inputs,
+                Some(classification.score),
+            ));
         };
 
         // Budget pressure tightens the ceiling for requests that were already going to be
@@ -751,6 +770,7 @@ fn infer_provider(model: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Complexity;
     use crate::types::{Message, Role};
 
     fn pricing() -> PricingTable {
@@ -1511,5 +1531,183 @@ mod tests {
 
         assert_eq!(decision.served_model, "openai/gpt-4o-mini");
         assert!(decision.explanation[0].contains("conversation affinity"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Routing modes.
+    //
+    // `RoutingHint::Cheap` was parsed from the header and then never branched on:
+    // the router only ever tested for `Passthrough`, so a caller asking to save
+    // money got default behaviour and no indication that their request had been
+    // ignored. These prove each mode now changes what actually gets served.
+    // -----------------------------------------------------------------------
+
+    fn medium_request() -> NormalizedRequest {
+        // Explanatory, no code, no tools — lands in the medium band.
+        NormalizedRequest::simple(
+            "openai/gpt-4o",
+            "Explain the difference between TCP and UDP in a few paragraphs.",
+        )
+    }
+
+    fn tier_of(table: &PricingTable, model: &str) -> ModelTier {
+        table.get(model).expect("served model must be priced").tier
+    }
+
+    #[test]
+    fn economy_mode_sends_a_medium_request_cheaper_than_balanced_does() {
+        // The whole point of the mode: it trades harder than the default. Before this,
+        // `cheap` and `auto` produced byte-identical decisions.
+        let table = pricing();
+        let request = medium_request();
+        assert_eq!(
+            Router::new().classify(&request).complexity,
+            Complexity::Medium,
+            "this test is calibrated on a medium-band prompt"
+        );
+
+        let balanced = Router::new()
+            .route(
+                &request,
+                &table,
+                &healthy(),
+                &RoutingInputs {
+                    hint: RoutingHint::Balanced,
+                    ..RoutingInputs::default()
+                },
+            )
+            .unwrap();
+        let economy = Router::new()
+            .route(
+                &request,
+                &table,
+                &healthy(),
+                &RoutingInputs {
+                    hint: RoutingHint::Economy,
+                    ..RoutingInputs::default()
+                },
+            )
+            .unwrap();
+
+        assert!(
+            tier_of(&table, &economy.served_model) <= tier_of(&table, &balanced.served_model),
+            "economy ({}) must not be more expensive than balanced ({})",
+            economy.served_model,
+            balanced.served_model
+        );
+    }
+
+    #[test]
+    fn quality_mode_refuses_to_downgrade_a_medium_request() {
+        // The complement: a mode that trades *less* than the default, for traffic where a
+        // marginal saving is not worth a marginal risk.
+        let table = pricing();
+        let request = medium_request();
+
+        let decision = Router::new()
+            .route(
+                &request,
+                &table,
+                &healthy(),
+                &RoutingInputs {
+                    hint: RoutingHint::Quality,
+                    ..RoutingInputs::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            decision.served_model, "openai/gpt-4o",
+            "quality mode must serve a medium request on the requested model"
+        );
+    }
+
+    #[test]
+    fn quality_mode_still_takes_the_free_saving_on_a_simple_request() {
+        // Quality is not passthrough. A trivial question still moves off a frontier model.
+        let table = pricing();
+        let decision = Router::new()
+            .route(
+                &simple_request(),
+                &table,
+                &healthy(),
+                &RoutingInputs {
+                    hint: RoutingHint::Quality,
+                    ..RoutingInputs::default()
+                },
+            )
+            .unwrap();
+
+        assert_ne!(
+            decision.served_model, "openai/gpt-4o",
+            "quality mode should still downgrade a trivial request"
+        );
+    }
+
+    #[test]
+    fn no_mode_downgrades_a_complex_request() {
+        // The guarantee, exercised through the real router in every mode rather than only
+        // against the mode table.
+        let table = pricing();
+        for mode in [
+            RoutingHint::Auto,
+            RoutingHint::Balanced,
+            RoutingHint::Quality,
+            RoutingHint::Economy,
+            RoutingHint::Passthrough,
+        ] {
+            let decision = Router::new()
+                .route(
+                    &complex_request(),
+                    &table,
+                    &healthy(),
+                    &RoutingInputs {
+                        hint: mode,
+                        ..RoutingInputs::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                decision.served_model, "openai/gpt-4o",
+                "{mode:?} downgraded a complex request"
+            );
+        }
+    }
+
+    #[test]
+    fn the_legacy_cheap_header_now_actually_routes_cheaply() {
+        // The defect this closes, stated as the customer would experience it: sending the
+        // documented `cheap` header used to change nothing at all.
+        let table = pricing();
+        let request = medium_request();
+
+        let ignored_before = Router::new()
+            .route(
+                &request,
+                &table,
+                &healthy(),
+                &RoutingInputs {
+                    hint: RoutingHint::Auto,
+                    ..RoutingInputs::default()
+                },
+            )
+            .unwrap();
+        let with_cheap_header = Router::new()
+            .route(
+                &request,
+                &table,
+                &healthy(),
+                &RoutingInputs {
+                    hint: RoutingHint::parse(Some("cheap")),
+                    ..RoutingInputs::default()
+                },
+            )
+            .unwrap();
+
+        assert!(
+            tier_of(&table, &with_cheap_header.served_model)
+                <= tier_of(&table, &ignored_before.served_model),
+            "the cheap header must now produce a cheaper-or-equal tier, not be ignored"
+        );
     }
 }

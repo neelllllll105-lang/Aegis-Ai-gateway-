@@ -518,23 +518,78 @@ impl CacheOutcome {
 /// be available: trust outranks savings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RoutingHint {
-    /// Let the engine decide.
+    /// Let the engine decide. Behaves as [`RoutingHint::Balanced`].
     #[default]
     Auto,
     /// Use exactly the requested model. Never downgrade.
+    ///
+    /// The escape hatch of `MASTER_BUILD.md` Part 13 item 5: it outranks every other
+    /// consideration, including organisation policy, and always remains available.
     Passthrough,
-    /// Prefer the cheapest capable model.
-    Cheap,
+    /// Substitute only where the saving is nearly free.
+    ///
+    /// Simple requests drop one tier; medium and complex ones are served on the model the
+    /// caller asked for. For customer-facing output, where a marginal saving is not worth
+    /// a marginal risk.
+    Quality,
+    /// The default trade: simple requests go cheap, medium go mid, complex are untouched.
+    Balanced,
+    /// Trade harder. Simple *and* medium requests go to the cheap tier.
+    ///
+    /// For internal tooling, batch work, and high-volume low-stakes traffic. Complex
+    /// requests are still never downgraded — no mode can do that.
+    Economy,
 }
 
 impl RoutingHint {
     /// Parse the header value. Unknown values fall back to `Auto` rather than erroring —
     /// a typo in a hint should not fail a paid request.
+    ///
+    /// `cheap` is accepted as a synonym for `economy`: it was the documented value before
+    /// the modes were named, and breaking a header a customer already sends to save money
+    /// would be a poor way to reward them for using it.
     pub fn parse(raw: Option<&str>) -> RoutingHint {
         match raw.map(|r| r.trim().to_ascii_lowercase()).as_deref() {
             Some("passthrough") => RoutingHint::Passthrough,
-            Some("cheap") => RoutingHint::Cheap,
+            Some("quality") => RoutingHint::Quality,
+            Some("balanced") => RoutingHint::Balanced,
+            Some("economy") | Some("cheap") => RoutingHint::Economy,
             _ => RoutingHint::Auto,
+        }
+    }
+
+    /// Wire value, for logging and for the routing explanation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RoutingHint::Auto => "auto",
+            RoutingHint::Passthrough => "passthrough",
+            RoutingHint::Quality => "quality",
+            RoutingHint::Balanced => "balanced",
+            RoutingHint::Economy => "economy",
+        }
+    }
+
+    /// The tier this mode targets for a given complexity band.
+    ///
+    /// `None` means "do not substitute at all" — serve the requested model. Complex is
+    /// `None` in every mode: that is the quality guarantee, and it is expressed here as
+    /// well as enforced by control flow in [`crate::engine::router::Router::route`] so
+    /// that a future mode cannot accidentally opt out of it.
+    pub fn target_tier(self, complexity: Complexity) -> Option<ModelTier> {
+        match complexity {
+            Complexity::Complex => None,
+            Complexity::Medium => match self {
+                RoutingHint::Passthrough | RoutingHint::Quality => None,
+                RoutingHint::Auto | RoutingHint::Balanced => Some(ModelTier::Mid),
+                RoutingHint::Economy => Some(ModelTier::Cheap),
+            },
+            Complexity::Simple => match self {
+                RoutingHint::Passthrough => None,
+                RoutingHint::Quality => Some(ModelTier::Mid),
+                RoutingHint::Auto | RoutingHint::Balanced | RoutingHint::Economy => {
+                    Some(ModelTier::Cheap)
+                }
+            },
         }
     }
 }
@@ -577,9 +632,79 @@ mod tests {
             RoutingHint::parse(Some("  PASSTHROUGH ")),
             RoutingHint::Passthrough
         );
-        assert_eq!(RoutingHint::parse(Some("cheap")), RoutingHint::Cheap);
+        // `cheap` is the legacy spelling of `economy` and must keep working: a customer
+        // already sending it is trying to save money, and silently downgrading them to
+        // default behaviour would be the worst possible response to that.
+        assert_eq!(RoutingHint::parse(Some("cheap")), RoutingHint::Economy);
+        assert_eq!(RoutingHint::parse(Some("economy")), RoutingHint::Economy);
+        assert_eq!(RoutingHint::parse(Some("quality")), RoutingHint::Quality);
+        assert_eq!(RoutingHint::parse(Some("balanced")), RoutingHint::Balanced);
         assert_eq!(RoutingHint::parse(Some("nonsense")), RoutingHint::Auto);
         assert_eq!(RoutingHint::parse(None), RoutingHint::Auto);
+    }
+
+    #[test]
+    fn no_mode_can_downgrade_a_complex_request() {
+        // The quality guarantee, asserted against the mode table itself rather than only
+        // against the router's control flow — so a mode added later cannot opt out of it
+        // by accident.
+        for mode in [
+            RoutingHint::Auto,
+            RoutingHint::Passthrough,
+            RoutingHint::Quality,
+            RoutingHint::Balanced,
+            RoutingHint::Economy,
+        ] {
+            assert_eq!(
+                mode.target_tier(Complexity::Complex),
+                None,
+                "{mode:?} must never target a tier for a complex request"
+            );
+        }
+    }
+
+    #[test]
+    fn the_modes_form_a_monotonic_ladder() {
+        // Each mode must trade at least as hard as the one above it, or the names lie.
+        // Quality never substitutes a medium request; balanced sends it mid; economy
+        // sends it cheap.
+        assert_eq!(RoutingHint::Quality.target_tier(Complexity::Medium), None);
+        assert_eq!(
+            RoutingHint::Balanced.target_tier(Complexity::Medium),
+            Some(ModelTier::Mid)
+        );
+        assert_eq!(
+            RoutingHint::Economy.target_tier(Complexity::Medium),
+            Some(ModelTier::Cheap)
+        );
+
+        // On simple requests quality still takes the easy saving, and economy takes the
+        // cheapest available.
+        assert_eq!(
+            RoutingHint::Quality.target_tier(Complexity::Simple),
+            Some(ModelTier::Mid)
+        );
+        assert_eq!(
+            RoutingHint::Economy.target_tier(Complexity::Simple),
+            Some(ModelTier::Cheap)
+        );
+
+        // Passthrough substitutes nothing, at any band.
+        for band in [Complexity::Simple, Complexity::Medium, Complexity::Complex] {
+            assert_eq!(RoutingHint::Passthrough.target_tier(band), None);
+        }
+    }
+
+    #[test]
+    fn auto_and_balanced_are_the_same_trade() {
+        // `auto` is the default and is documented as balanced behaviour. If these ever
+        // diverge, the default silently changes for every customer who sends no header.
+        for band in [Complexity::Simple, Complexity::Medium, Complexity::Complex] {
+            assert_eq!(
+                RoutingHint::Auto.target_tier(band),
+                RoutingHint::Balanced.target_tier(band)
+            );
+        }
     }
 
     #[test]

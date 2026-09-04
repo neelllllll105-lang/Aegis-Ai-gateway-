@@ -105,6 +105,7 @@ fn auth_for(org_id: Uuid) -> AuthContext {
         api_key_id: Uuid::new_v4(),
         org_id,
         team_id: None,
+        assigned_to_user_id: None,
         // High enough that the rate limiter never rejects. We are measuring the cost of
         // *checking* the limit, not the cost of being blocked by it.
         rate_limit_per_minute: 1_000_000,

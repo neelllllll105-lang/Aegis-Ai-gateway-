@@ -131,8 +131,19 @@ pub async fn create_org(pool: &PgPool, label: &str) -> Fixture {
     }
 }
 
-/// Create an API key for an organisation, returning the plaintext and its id.
+/// Create a shared (unassigned) API key for an organisation, returning the plaintext and
+/// its id.
 pub async fn create_key(pool: &PgPool, fixture: &Fixture, name: &str) -> (String, Uuid) {
+    create_key_assigned(pool, fixture, name, None).await
+}
+
+/// Create an API key issued to a specific person, so its traffic attributes to them.
+pub async fn create_key_assigned(
+    pool: &PgPool,
+    fixture: &Fixture,
+    name: &str,
+    assigned_to: Option<Uuid>,
+) -> (String, Uuid) {
     use aegis_gateway::crypto;
     use aegis_gateway::db::repo;
 
@@ -149,6 +160,7 @@ pub async fn create_key(pool: &PgPool, fixture: &Fixture, name: &str) -> (String
         None,
         None,
         None,
+        assigned_to,
     )
     .await
     .expect("key creation");

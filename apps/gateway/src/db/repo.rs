@@ -87,6 +87,10 @@ pub struct ApiKey {
     pub id: Uuid,
     pub org_id: Uuid,
     pub team_id: Option<Uuid>,
+    /// The person this key was issued to. `None` for a shared project or service key.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub assigned_to_user_id: Option<Uuid>,
     pub name: String,
     pub key_prefix: String,
     #[serde(skip)]
@@ -233,6 +237,14 @@ pub struct KeyContext {
     pub api_key_id: Uuid,
     pub org_id: Uuid,
     pub team_id: Option<Uuid>,
+    /// The person this key was issued to, when it was issued to one.
+    ///
+    /// Carried on the hot path so every usage record can be attributed to a human without
+    /// a second query. `None` is a shared key — a project or service key — which is a
+    /// legitimate case, not missing data.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub assigned_to_user_id: Option<Uuid>,
     pub rate_limit_per_minute: i32,
     pub monthly_budget_mc: Option<i64>,
     pub allowed_models: Option<serde_json::Value>,
@@ -752,15 +764,17 @@ pub async fn create_api_key(
     monthly_budget_mc: Option<i64>,
     allowed_models: Option<serde_json::Value>,
     expires_at: Option<DateTime<Utc>>,
+    assigned_to_user_id: Option<Uuid>,
 ) -> Result<ApiKey> {
     sqlx::query_as::<_, ApiKey>(
         "INSERT INTO api_keys
             (org_id, team_id, created_by, name, key_prefix, key_hash,
-             rate_limit_per_minute, monthly_budget_mc, allowed_models, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         RETURNING id, org_id, team_id, name, key_prefix, key_hash, rate_limit_per_minute,
-                   monthly_budget_mc, allowed_models, last_used_at, expires_at, revoked_at,
-                   created_at",
+             rate_limit_per_minute, monthly_budget_mc, allowed_models, expires_at,
+             assigned_to_user_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING id, org_id, team_id, assigned_to_user_id, name, key_prefix, key_hash,
+                   rate_limit_per_minute, monthly_budget_mc, allowed_models, last_used_at,
+                   expires_at, revoked_at, created_at",
     )
     .bind(org_id)
     .bind(team_id)
@@ -772,6 +786,7 @@ pub async fn create_api_key(
     .bind(monthly_budget_mc)
     .bind(allowed_models)
     .bind(expires_at)
+    .bind(assigned_to_user_id)
     .fetch_one(pool)
     .await
     .map_err(AegisError::Database)
@@ -782,7 +797,8 @@ pub async fn create_api_key(
 /// Only ever reached on a cache miss; the result is cached in Redis for 60 seconds.
 pub async fn resolve_key(pool: &PgPool, key_hash: &str) -> Result<Option<KeyContext>> {
     sqlx::query_as::<_, KeyContext>(
-        "SELECT k.id AS api_key_id, k.org_id, k.team_id, k.rate_limit_per_minute,
+        "SELECT k.id AS api_key_id, k.org_id, k.team_id, k.assigned_to_user_id,
+                k.rate_limit_per_minute,
                 k.monthly_budget_mc, k.allowed_models,
                 o.plan, o.savings_share_bp, o.zero_retention, o.region AS org_region
          FROM api_keys k
@@ -800,12 +816,43 @@ pub async fn resolve_key(pool: &PgPool, key_hash: &str) -> Result<Option<KeyCont
 /// List an organisation's keys.
 pub async fn list_api_keys(pool: &PgPool, org_id: Uuid) -> Result<Vec<ApiKey>> {
     sqlx::query_as::<_, ApiKey>(
-        "SELECT id, org_id, team_id, name, key_prefix, key_hash, rate_limit_per_minute,
-                monthly_budget_mc, allowed_models, last_used_at, expires_at, revoked_at,
-                created_at
+        "SELECT id, org_id, team_id, assigned_to_user_id, name, key_prefix, key_hash,
+                rate_limit_per_minute, monthly_budget_mc, allowed_models, last_used_at,
+                expires_at, revoked_at, created_at
          FROM api_keys WHERE org_id = $1 ORDER BY created_at DESC",
     )
     .bind(org_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// List only the keys issued to one person, plus the org's shared (unassigned) keys.
+///
+/// The list an ordinary member is entitled to see. Before per-person assignment existed
+/// every reader saw every key in the organisation, which was defensible when a key
+/// belonged only to an org — and stops being defensible the moment keys are issued to
+/// named individuals, because "whose key is this and what is its budget" becomes personal
+/// information about a colleague.
+///
+/// Shared keys are included deliberately: a project key with no assignee is meant to be
+/// used by the whole team, so hiding it would break the common case to protect nothing.
+pub async fn list_api_keys_for_member(
+    pool: &PgPool,
+    org_id: Uuid,
+    user_id: Uuid,
+) -> Result<Vec<ApiKey>> {
+    sqlx::query_as::<_, ApiKey>(
+        "SELECT id, org_id, team_id, assigned_to_user_id, name, key_prefix, key_hash,
+                rate_limit_per_minute, monthly_budget_mc, allowed_models, last_used_at,
+                expires_at, revoked_at, created_at
+         FROM api_keys
+         WHERE org_id = $1
+           AND (assigned_to_user_id = $2 OR assigned_to_user_id IS NULL)
+         ORDER BY created_at DESC",
+    )
+    .bind(org_id)
+    .bind(user_id)
     .fetch_all(pool)
     .await
     .map_err(AegisError::Database)
@@ -1292,9 +1339,9 @@ pub async fn insert_usage_record(
              gross_savings_mc, aegis_fee_mc, latency_ms, gateway_overhead_us, cache_hit,
              cache_type, routing_reason, complexity_score_milli, tokens_saved_by_compression,
              status_code, error_type, created_at, cached_input_tokens, cache_write_tokens,
-             input_cost_mc, output_cost_mc)
+             input_cost_mc, output_cost_mc, user_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                 $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+                 $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
          ON CONFLICT (request_id, created_at) DO NOTHING",
     )
     .bind(event.request_id)
@@ -1325,6 +1372,7 @@ pub async fn insert_usage_record(
     .bind(event.cache_write_tokens as i64)
     .bind(event.input_cost_mc)
     .bind(event.output_cost_mc)
+    .bind(event.user_id)
     .execute(pool)
     .await
     .map_err(AegisError::Database)?;
@@ -2135,6 +2183,7 @@ mod tests {
             id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
             team_id: None,
+            assigned_to_user_id: None,
             name: "test".into(),
             key_prefix: "aegis_sk_abcdefg".into(),
             key_hash: "hash".into(),
@@ -2173,6 +2222,7 @@ mod tests {
             id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
             team_id: None,
+            assigned_to_user_id: None,
             name: "k".into(),
             key_prefix: "p".into(),
             key_hash: "h".into(),

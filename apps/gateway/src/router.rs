@@ -212,7 +212,10 @@ pub fn build_router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         // The dashboard is served from a different origin, and credentials must be
         // allowed for the session cookie to travel.
-        .layer(cors_layer(&state.config.app_url))
+        .layer(cors_layer(
+            &state.config.app_url,
+            state.config.environment.is_production_like(),
+        ))
         .with_state(state)
 }
 
@@ -313,18 +316,42 @@ async fn security_headers_layer(
 ///
 /// A specific origin rather than a wildcard: `Access-Control-Allow-Credentials` and `*`
 /// are mutually exclusive, and the session cookie needs credentials.
-fn cors_layer(app_url: &str) -> CorsLayer {
-    let origin_config = if app_url.contains("localhost") || app_url.contains("127.0.0.1") {
-        tower_http::cors::AllowOrigin::mirror_request()
-    } else {
-        match app_url.parse::<axum::http::HeaderValue>() {
-            Ok(origin) => tower_http::cors::AllowOrigin::exact(origin),
-            Err(_) => {
-                tracing::warn!(app_url, "invalid AEGIS_APP_URL; mirroring request origin");
-                tower_http::cors::AllowOrigin::mirror_request()
+///
+/// # Why this is not `mirror_request`
+///
+/// This layer used to mirror the caller's own `Origin` back whenever `app_url` mentioned
+/// localhost, and *also* whenever `AEGIS_APP_URL` failed to parse — logging a warning and
+/// carrying on. Mirroring combined with `allow_credentials(true)` tells every origin on
+/// the internet that it may make credentialed requests and read the response: any page a
+/// signed-in user visits could have read that org's keys, usage, and budgets with their
+/// session cookie attached. The parse-failure branch made it worse by failing *open*, so a
+/// typo in one production environment variable silently removed the boundary.
+///
+/// Now the allowed set is always explicit. Production permits exactly the configured
+/// dashboard origin. Development additionally permits loopback and private-LAN origins on
+/// any port — which is what makes `getApiUrl()`'s LAN mode work — but never an arbitrary
+/// internet origin, and never as a consequence of misconfiguration.
+fn cors_layer(app_url: &str, production_like: bool) -> CorsLayer {
+    let configured = app_url.parse::<axum::http::HeaderValue>().ok();
+    if configured.is_none() {
+        // Not fatal here — `Config::validate` already refuses to start a production-like
+        // process with an unparseable app_url, so reaching this in production is not
+        // possible. In development it means the dev allowlist below is the only thing
+        // granting access, which is the safe direction to fail.
+        tracing::warn!(
+            app_url,
+            "AEGIS_APP_URL is not a valid origin header; it will not be granted CORS access"
+        );
+    }
+
+    let origin_config = tower_http::cors::AllowOrigin::predicate(
+        move |origin: &axum::http::HeaderValue, _parts: &axum::http::request::Parts| {
+            if configured.as_ref().is_some_and(|allowed| allowed == origin) {
+                return true;
             }
-        }
-    };
+            !production_like && is_local_origin(origin)
+        },
+    );
 
     CorsLayer::new()
         .allow_origin(origin_config)
@@ -343,4 +370,140 @@ fn cors_layer(app_url: &str) -> CorsLayer {
             axum::http::Method::DELETE,
             axum::http::Method::OPTIONS,
         ])
+}
+
+/// Whether an `Origin` header points at this machine or the local network.
+///
+/// Used only outside production, to let a developer reach the gateway from
+/// `http://localhost:3000`, from `http://127.0.0.1:3000`, or from the LAN address a phone
+/// or a second machine on the same network would use. Deliberately parsed rather than
+/// substring-matched: `https://localhost.evil.com` contains "localhost" and must not pass,
+/// which a `contains()` check would have allowed.
+fn is_local_origin(origin: &axum::http::HeaderValue) -> bool {
+    let Ok(text) = origin.to_str() else {
+        return false;
+    };
+    let Ok(url) = url::Url::parse(text) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn origin(value: &str) -> HeaderValue {
+        HeaderValue::from_str(value).expect("test origin must be a valid header value")
+    }
+
+    // -----------------------------------------------------------------------
+    // CORS origin classification.
+    //
+    // These exist because the previous implementation mirrored the caller's own
+    // `Origin` back while also setting `Access-Control-Allow-Credentials: true`,
+    // which authorises every site on the internet to make credentialed requests
+    // and read the response. The tests below are the boundary.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn loopback_and_lan_origins_are_recognised_as_local() {
+        // The developer cases that must keep working, including the LAN address a
+        // second device on the same network uses to reach a dev gateway.
+        for value in [
+            "http://localhost:3000",
+            "http://localhost",
+            "https://localhost:8443",
+            "http://127.0.0.1:3000",
+            "http://192.168.1.108:3000",
+            "http://10.0.0.5:3000",
+            "http://172.16.4.2:3000",
+            "http://[::1]:3000",
+        ] {
+            assert!(
+                is_local_origin(&origin(value)),
+                "{value} should be treated as local"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hostname_merely_containing_localhost_is_not_local() {
+        // The exact attack the old `app_url.contains("localhost")` check allowed
+        // through: an attacker-controlled domain that contains the magic substring.
+        for value in [
+            "https://localhost.evil.com",
+            "https://notlocalhost",
+            "https://evil.com/?x=localhost",
+            "https://127.0.0.1.evil.com",
+        ] {
+            assert!(
+                !is_local_origin(&origin(value)),
+                "{value} must NOT be treated as local"
+            );
+        }
+    }
+
+    #[test]
+    fn public_origins_are_never_local() {
+        for value in [
+            "https://example.com",
+            "https://8.8.8.8",
+            "http://203.0.113.10:3000",
+        ] {
+            assert!(
+                !is_local_origin(&origin(value)),
+                "{value} must NOT be treated as local"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_origin_is_not_local() {
+        // A value that is a legal header but not a legal URL must fail closed.
+        assert!(!is_local_origin(&origin("not-a-url")));
+        assert!(!is_local_origin(&origin("null")));
+    }
+
+    // -----------------------------------------------------------------------
+    // Configuration refuses to start production with an origin it cannot honour.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn production_refuses_an_unparseable_app_url() {
+        // The fail-open path that used to exist: an invalid AEGIS_APP_URL logged a
+        // warning and then mirrored every origin. Now it cannot start at all.
+        let mut config = crate::config::Config::for_tests();
+        config.environment = crate::config::Environment::Prod;
+        config.database_url = Some("postgres://x/y".into());
+        config.redis_url = Some("redis://x".into());
+        config.base_url = "https://api.aegis.dev".into();
+        config.app_url = "not a valid header\nvalue".into();
+
+        let error = config
+            .validate_for_tests()
+            .expect_err("an unparseable app_url must refuse to start in production");
+        assert!(
+            format!("{error}").contains("AEGIS_APP_URL"),
+            "the error must name the variable at fault: {error}"
+        );
+    }
+
+    #[test]
+    fn production_accepts_a_valid_app_url() {
+        let mut config = crate::config::Config::for_tests();
+        config.environment = crate::config::Environment::Prod;
+        config.database_url = Some("postgres://x/y".into());
+        config.redis_url = Some("redis://x".into());
+        config.base_url = "https://api.aegis.dev".into();
+        config.app_url = "https://app.aegis.dev".into();
+
+        assert!(config.validate_for_tests().is_ok());
+    }
 }

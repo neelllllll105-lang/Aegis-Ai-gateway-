@@ -73,7 +73,12 @@ impl AuthContext {
             org_id: context.org_id,
             api_key_id: Some(context.api_key_id),
             team_id: context.team_id,
-            user_id: None,
+            // The person the key was issued to, when there is one. This was hardcoded
+            // `None`, which meant no gateway request — and gateway requests are all the
+            // billable traffic there is — ever carried a human identity, so "what did this
+            // employee spend" had no answer at any layer. A shared project key still
+            // resolves to `None`, which is correct: nobody in particular sent it.
+            user_id: context.assigned_to_user_id,
             plan: context.plan.clone(),
             savings_share_bp: context.savings_share_bp.max(0) as u32,
             zero_retention: context.zero_retention,
@@ -382,6 +387,7 @@ mod tests {
             api_key_id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
             team_id: None,
+            assigned_to_user_id: None,
             rate_limit_per_minute: 60,
             monthly_budget_mc: Some(1_000_000),
             allowed_models: None,
@@ -661,5 +667,56 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.error_type(), "unauthorized");
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-person attribution.
+    //
+    // `from_key` used to hardcode `user_id: None`, so no gateway request — which
+    // is all the billable traffic there is — ever carried a human identity.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_key_issued_to_a_person_carries_that_person_into_the_auth_context() {
+        let assignee = Uuid::new_v4();
+        let context = KeyContext {
+            assigned_to_user_id: Some(assignee),
+            ..key_context()
+        };
+
+        let auth = AuthContext::from_key(context);
+
+        assert_eq!(
+            auth.user_id,
+            Some(assignee),
+            "the assignee must reach AuthContext, or nothing downstream can attribute spend"
+        );
+    }
+
+    #[test]
+    fn a_shared_key_attributes_to_nobody_rather_than_to_someone_wrong() {
+        // A project or service key genuinely has no person behind it. `None` here is a
+        // real answer and must not be papered over with the key's creator, who may not
+        // be the one sending traffic.
+        let auth = AuthContext::from_key(key_context());
+        assert_eq!(auth.user_id, None);
+    }
+
+    #[test]
+    fn assignment_does_not_grant_administrative_rights() {
+        // Attribution is not authorisation. A key that names a person still cannot
+        // administer the organisation — otherwise assigning a key would quietly be a
+        // privilege escalation.
+        let auth = AuthContext::from_key(KeyContext {
+            assigned_to_user_id: Some(Uuid::new_v4()),
+            ..key_context()
+        });
+
+        assert!(
+            !auth.can_write(),
+            "an assigned key must still not be a writer"
+        );
+        assert!(!auth.is_admin);
+        assert_eq!(auth.role, None);
     }
 }

@@ -240,6 +240,16 @@ impl Config {
     }
 
     /// Reject configurations that are individually valid but collectively unsafe.
+    /// Run [`Config::validate`] from another module's tests.
+    ///
+    /// `validate` is deliberately private — it runs exactly once, inside `from_env` — but
+    /// the CORS boundary it now enforces is asserted from `router`'s tests, which need a
+    /// way in that does not widen the real API.
+    #[cfg(test)]
+    pub fn validate_for_tests(&self) -> Result<()> {
+        self.validate()
+    }
+
     fn validate(&self) -> Result<()> {
         if !(0.0..=1.0).contains(&self.semantic_similarity_threshold) {
             return Err(AegisError::Config(
@@ -274,6 +284,19 @@ impl Config {
             if !self.base_url.starts_with("https://") {
                 return Err(AegisError::Config(
                     "AEGIS_BASE_URL must be https outside development".into(),
+                ));
+            }
+            // CORS grants credentialed access to exactly this origin and nothing else
+            // (see `router::cors_layer`). An origin that cannot be turned into a header
+            // value would leave the dashboard unable to reach the API at all, and the
+            // previous behaviour — warn, then mirror whatever origin asked — turned a
+            // typo here into "every site on the internet may make credentialed requests".
+            // Refusing to start is the only safe reading of a malformed value.
+            if self.app_url.parse::<axum::http::HeaderValue>().is_err() {
+                return Err(AegisError::Config(
+                    "AEGIS_APP_URL must be a valid origin (it is the only origin granted \
+                     credentialed CORS access outside development)"
+                        .into(),
                 ));
             }
         }
