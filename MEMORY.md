@@ -886,7 +886,30 @@ a real browser with no console errors.
 (`a_key_issued_to_a_person_attributes_its_usage_to_them`, `a_shared_key_records_no_person`,
 `a_member_sees_only_their_own_keys_and_the_shared_ones`) compile and skip cleanly but have
 not executed their assertions here — Docker is still down on this machine (the
-`sailor-ingest.sock` reparse-point failure from session 12, which needs a machine restart).
+`sailor-ingest.sock` reparse-point failure from session 12 — see the corrected diagnosis
+below, which is worse than "needs a restart").
+
+**Correction to the Docker diagnosis, established at the end of session 13.** Sessions 12
+and 13 both recorded this as a stale socket left by an unclean shutdown, fixable by
+restarting the machine. That is wrong, and the correction matters because it changes who
+can fix it. Evidence: `%LOCALAPPDATA%\Docker\run` was renamed aside so Docker would start
+from a clean directory. Docker then started, recreated `run`, created a brand-new
+`sailor-ingest.sock` — and failed on that *newly created* file with the identical "file
+cannot be accessed by the system" error, timestamped six minutes old at the moment of
+inspection. A second, independent socket directory (`%LOCALAPPDATA%\docker-secrets-engine`)
+failed the same way and was renamed aside too.
+
+So the problem is not a leftover file. **This machine cannot create usable AF_UNIX socket
+reparse points**, which points at a filesystem filter driver — an antivirus or EDR product
+— or a damaged Windows AF_UNIX subsystem. Deleting the sockets cannot help, because they
+are broken at creation. A restart may or may not clear it; the realistic fixes are Docker
+Desktop's "Reset to factory defaults", excluding `%LOCALAPPDATA%\Docker` from the security
+product's real-time scanning, or reinstalling Docker Desktop. None of these are reachable
+from a shell session.
+
+Two inert directories were left behind by the attempts and can be deleted once Docker
+works: `%LOCALAPPDATA%\Docker\run.stale` and `%LOCALAPPDATA%\docker-secrets-engine.stale`.
+They contain only the unusable sockets.
 They run in CI, which provisions Postgres. Migration 0009 has therefore never been applied
 to a live database.
 
