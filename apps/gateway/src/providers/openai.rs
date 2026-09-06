@@ -102,8 +102,17 @@ fn parse_usage(u: &serde_json::Value) -> TokenUsage {
     }
 }
 
-/// Parse an OpenAI-format chat completion response.
-pub fn parse_response(body: &serde_json::Value) -> Result<NormalizedResponse> {
+/// Parse an OpenAI-format chat completion response, with a caller-supplied usage parser.
+///
+/// Exists so OpenAI-*compatible* providers whose usage block diverges from OpenAI's own —
+/// DeepSeek reports cache tokens under different field names entirely, see
+/// [`crate::providers::deepseek`] — can reuse every other translation rule here (choice
+/// extraction, tool calls, finish reason) without duplicating them just to swap out the one
+/// part that actually differs.
+pub fn parse_response_with_usage(
+    body: &serde_json::Value,
+    parse_usage: fn(&serde_json::Value) -> TokenUsage,
+) -> Result<NormalizedResponse> {
     let choice = body
         .pointer("/choices/0")
         .ok_or_else(|| malformed("response contained no choices"))?;
@@ -145,8 +154,18 @@ pub fn parse_response(body: &serde_json::Value) -> Result<NormalizedResponse> {
     })
 }
 
-/// Parse one OpenAI-format SSE payload.
-pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
+/// Parse an OpenAI-format chat completion response.
+pub fn parse_response(body: &serde_json::Value) -> Result<NormalizedResponse> {
+    parse_response_with_usage(body, parse_usage)
+}
+
+/// Parse one OpenAI-format SSE payload, with a caller-supplied usage parser.
+///
+/// See [`parse_response_with_usage`] for why this exists.
+pub fn parse_stream_chunk_with_usage(
+    data: &str,
+    parse_usage: fn(&serde_json::Value) -> TokenUsage,
+) -> Result<Option<StreamChunk>> {
     if data.is_empty() || is_done(data) {
         return Ok(None);
     }
@@ -218,6 +237,11 @@ pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
         source_shape: Some(WireShape::OpenAiCompatible),
         tool_call,
     }))
+}
+
+/// Parse one OpenAI-format SSE payload.
+pub fn parse_stream_chunk(data: &str) -> Result<Option<StreamChunk>> {
+    parse_stream_chunk_with_usage(data, parse_usage)
 }
 
 fn malformed(message: &str) -> AegisError {
