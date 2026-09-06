@@ -311,6 +311,7 @@ async fn handle_messages(
 
     // [10] Metering.
     let mut event = outcome.usage_event(&auth_context, 200, &state.config.region);
+    event.reserved_tokens = reservation.reserved_tokens();
     event.reserved_mc = reservation.commit();
     // Only count a request as metered when it was actually persisted. This endpoint kept
     // the discarded-Result form after the other three call sites were corrected, which
@@ -798,6 +799,7 @@ async fn stream_messages(
         event.user_id = auth_for_stream.user_id;
 
         event.error_type = stream_error;
+        event.reserved_tokens = reservation.reserved_tokens();
         event.reserved_mc = reservation.commit();
 
         // Metering completeness must reflect whether the event was actually durable, not
@@ -1369,6 +1371,11 @@ mod tests {
             requested_model: "anthropic/claude-sonnet-4-5".into(),
             provider: "openai".into(),
             savings: SavingsBreakdown::compute(MicroCents(5_000), MicroCents(500), 2_000),
+            savings_components: crate::metering::savings::SavingsComponents::compute(
+                MicroCents(4_500),
+                MicroCents::ZERO,
+                MicroCents::ZERO,
+            ),
             input_cost_mc: 0,
             output_cost_mc: 0,
             cache: CacheOutcome::Miss,
@@ -1383,6 +1390,7 @@ mod tests {
             gateway_overhead_ms: 0.4,
             total_latency_ms: 200,
             tokens_saved_by_compression: 0,
+            cache_bust_hits: 0,
             explanation: Vec::new(),
         }
     }

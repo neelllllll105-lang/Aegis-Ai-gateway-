@@ -218,6 +218,9 @@ mod tests {
             actual_cost_mc: savings_mc,
             gross_savings_mc: savings_mc,
             aegis_fee_mc: fee_mc,
+            routing_savings_mc: savings_mc,
+            compression_savings_mc: 0,
+            cache_savings_mc: 0,
         }
     }
 

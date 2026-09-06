@@ -77,6 +77,18 @@ pub struct UsageEvent {
     pub output_cost_mc: i64,
     pub gross_savings_mc: i64,
     pub aegis_fee_mc: i64,
+    /// `gross_savings_mc`, decomposed into what routing, compression, and caching each
+    /// explain. See [`crate::metering::savings::SavingsComponents`] — routing is a
+    /// residual by construction, so the three always sum to `gross_savings_mc` exactly.
+    /// Defaults to zero on every path that predates this decomposition (a rejection, a
+    /// test fixture); zero routing/compression/cache savings on a non-zero gross saving is
+    /// a real, if unusual, state — it just means nothing has attributed the figure yet.
+    #[serde(default)]
+    pub routing_savings_mc: i64,
+    #[serde(default)]
+    pub compression_savings_mc: i64,
+    #[serde(default)]
+    pub cache_savings_mc: i64,
 
     pub latency_ms: u32,
     /// Our own added latency. Part 13 item 4: we display this and never game it.
@@ -93,6 +105,12 @@ pub struct UsageEvent {
 
     /// Tokens removed by context compression, if any.
     pub tokens_saved_by_compression: u64,
+
+    /// Volatile spans (timestamps, UUIDs, request ids, nonces) found in the system prompt
+    /// that would bust the provider's own prefix cache on every turn. Detect-only — see
+    /// [`crate::engine::cache_bust`]. Zero on a cache hit, since no provider was called.
+    #[serde(default)]
+    pub cache_bust_hits: u32,
 
     /// The region that served this request.
     ///
@@ -115,6 +133,12 @@ pub struct UsageEvent {
     /// onto `usage_records` columns, where there is no column for it and should not be.
     #[serde(skip)]
     pub reserved_mc: i64,
+    /// As `reserved_mc`, but for the token counters — the projected total tokens already
+    /// added to any applicable token-budget counter by
+    /// [`crate::middleware::budget::check_and_reserve`]. Zero on every request that touched
+    /// no token-limited scope, which is every request until a customer configures one.
+    #[serde(skip)]
+    pub reserved_tokens: i64,
 
     pub created_at: DateTime<Utc>,
 }
@@ -159,6 +183,9 @@ impl UsageEvent {
             output_cost_mc: 0,
             gross_savings_mc: savings.gross_savings.as_i64(),
             aegis_fee_mc: savings.aegis_fee.as_i64(),
+            routing_savings_mc: 0,
+            compression_savings_mc: 0,
+            cache_savings_mc: 0,
             latency_ms,
             gateway_overhead_ms,
             cache_hit: cache.is_hit(),
@@ -169,7 +196,9 @@ impl UsageEvent {
             error_type: None,
             region: None,
             reserved_mc: 0,
+            reserved_tokens: 0,
             tokens_saved_by_compression: 0,
+            cache_bust_hits: 0,
             created_at: Utc::now(),
         }
     }
@@ -207,6 +236,9 @@ impl UsageEvent {
             output_cost_mc: 0,
             gross_savings_mc: 0,
             aegis_fee_mc: 0,
+            routing_savings_mc: 0,
+            compression_savings_mc: 0,
+            cache_savings_mc: 0,
             latency_ms: gateway_overhead_ms.round() as u32,
             gateway_overhead_ms,
             cache_hit: false,
@@ -217,7 +249,9 @@ impl UsageEvent {
             error_type: Some(error_type.to_string()),
             region: None,
             reserved_mc: 0,
+            reserved_tokens: 0,
             tokens_saved_by_compression: 0,
+            cache_bust_hits: 0,
             created_at: Utc::now(),
         }
     }
@@ -266,6 +300,45 @@ pub fn key_spend_key(api_key_id: Uuid, at: DateTime<Utc>) -> String {
         at.year(),
         at.month()
     )
+}
+
+/// Redis key for one person's monthly spend counter, across every key issued to them.
+///
+/// Distinct from [`key_spend_key`]: a person can hold more than one key, and "what did this
+/// employee spend" must add them up, not report whichever key happened to be used last.
+pub fn user_spend_key(user_id: Uuid, at: DateTime<Utc>) -> String {
+    format!(
+        "aegis:user:{}:spend:{}{:02}",
+        user_id,
+        at.year(),
+        at.month()
+    )
+}
+
+/// Redis key for one person's monthly token-usage counter (input + output + cached +
+/// cache-write), for enforcing a token budget independently of a money budget.
+pub fn user_tokens_key(user_id: Uuid, at: DateTime<Utc>) -> String {
+    format!(
+        "aegis:user:{}:tokens:{}{:02}",
+        user_id,
+        at.year(),
+        at.month()
+    )
+}
+
+/// Redis key for a team's monthly token-usage counter. See [`user_tokens_key`].
+pub fn team_tokens_key(team_id: Uuid, at: DateTime<Utc>) -> String {
+    format!(
+        "aegis:team:{}:tokens:{}{:02}",
+        team_id,
+        at.year(),
+        at.month()
+    )
+}
+
+/// Redis key for an organisation's monthly token-usage counter. See [`user_tokens_key`].
+pub fn org_tokens_key(org_id: Uuid, at: DateTime<Utc>) -> String {
+    format!("aegis:org:{}:tokens:{}{:02}", org_id, at.year(), at.month())
 }
 
 /// Redis key for an org's accumulated savings, used by the dashboard's live counter.
@@ -349,6 +422,43 @@ pub async fn emit(store: &dyn KvStore, event: &UsageEvent) -> Result<String> {
                 .incr_by(
                     &org_region_spend_key(event.org_id, region, at),
                     spend_delta,
+                    Some(COUNTER_TTL),
+                )
+                .await;
+        }
+    }
+
+    // Token counters, corrected by the same reserve-then-true-up shape as money above:
+    // `check_and_reserve` may already have added the *projected* token count to a scope
+    // with a token budget configured (`reserved_tokens` is zero when it did not, so
+    // `token_delta` is then simply the full total). These are always written, exactly like
+    // the regional spend counter above and for the identical reason: a customer who adds a
+    // token budget mid-month must not start from an empty counter and get the rest of the
+    // month free. The cost is one extra INCR per request, same trade already accepted for
+    // the regional counter.
+    let token_delta = event.total_tokens() as i64 - event.reserved_tokens;
+    if token_delta != 0 {
+        let _ = store
+            .incr_by(
+                &org_tokens_key(event.org_id, at),
+                token_delta,
+                Some(COUNTER_TTL),
+            )
+            .await;
+        if let Some(team_id) = event.team_id {
+            let _ = store
+                .incr_by(
+                    &team_tokens_key(team_id, at),
+                    token_delta,
+                    Some(COUNTER_TTL),
+                )
+                .await;
+        }
+        if let Some(user_id) = event.user_id {
+            let _ = store
+                .incr_by(
+                    &user_tokens_key(user_id, at),
+                    token_delta,
                     Some(COUNTER_TTL),
                 )
                 .await;

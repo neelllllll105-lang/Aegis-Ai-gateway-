@@ -5,6 +5,7 @@
 //! fail over cleanly when a provider breaks.
 
 pub mod bandit;
+pub mod cache_bust;
 pub mod classifier;
 pub mod compressor;
 pub mod fallback;
