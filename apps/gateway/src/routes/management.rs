@@ -65,6 +65,40 @@ async fn require_reader(state: &AppState, headers: &HeaderMap) -> Result<AuthCon
     Ok(context)
 }
 
+/// The shared guard for every project(team)-scoped endpoint.
+///
+/// Org owner/admin may access any team in their organisation. A team **lead**
+/// (`team_memberships.role = 'lead'`) may access only the team(s) they lead. Everyone
+/// else — an ordinary org member, a lead of a *different* team, a caller from another
+/// organisation entirely — gets **404, not 403**: a project-scoped resource must not even
+/// confirm it exists to someone with no standing to ask.
+///
+/// This exists as one function, called at the top of every project-scoped handler, per
+/// IG-1 §1.4: a handler that hand-rolled this check inline instead is exactly the shape of
+/// bug that let scope checks silently drift out of sync across endpoints before.
+async fn assert_project_access(
+    state: &AppState,
+    context: &AuthContext,
+    team_id: Uuid,
+) -> Result<()> {
+    let pool = state.db()?;
+    if !repo::team_belongs_to_org(pool, team_id, context.org_id).await? {
+        return Err(AegisError::NotFound("project not found".into()));
+    }
+    if context.can_write() {
+        // Org owner/admin. `can_write` is false for a bare API key, so a leaked key can
+        // never claim project-lead authority it was never assigned.
+        return Ok(());
+    }
+    let Some(user_id) = context.user_id else {
+        return Err(AegisError::NotFound("project not found".into()));
+    };
+    match repo::role_in_team(pool, team_id, user_id).await? {
+        Some(role) if role == "lead" => Ok(()),
+        _ => Err(AegisError::NotFound("project not found".into())),
+    }
+}
+
 /// Record a mutation in the audit log.
 ///
 /// A failure here is logged but never propagated: an audit write must not undo the action
@@ -1872,6 +1906,125 @@ pub async fn delete_team(
     }
 }
 
+/// `GET /api/org/teams/{id}/members` — a project's roster. Reachable by anyone with
+/// project access (org admin, or the team's own lead) — see [`assert_project_access`].
+pub async fn list_team_members(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(team_id): Path<Uuid>,
+) -> Response {
+    match async {
+        let context = require_reader(&state, &headers).await?;
+        assert_project_access(&state, &context, team_id).await?;
+        let members = repo::list_team_members(state.db()?, team_id).await?;
+        Ok::<_, AegisError>(respond(StatusCode::OK, members))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `POST /api/org/teams/{id}/members` — add a person to a project, or change their role in
+/// it. Org owner/admin only: per the RBAC matrix (IG-1 §1.6), *who* leads a project is an
+/// organisation-level decision, not something a lead can grant to someone else or to
+/// themselves.
+pub async fn add_team_member(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(team_id): Path<Uuid>,
+    Json(request): Json<AddTeamMemberRequest>,
+) -> Response {
+    match async {
+        let context = require_writer(&state, &headers).await?;
+        let pool = state.db()?;
+        if !repo::team_belongs_to_org(pool, team_id, context.org_id).await? {
+            return Err(AegisError::NotFound("team not found".into()));
+        }
+        if !matches!(request.role.as_str(), "lead" | "member") {
+            return Err(AegisError::BadRequest(
+                "role must be 'lead' or 'member'".into(),
+            ));
+        }
+        // The person being added must actually belong to this organisation — otherwise
+        // this would be a way to grant a stranger visibility into the project's usage.
+        if repo::role_in_org(pool, context.org_id, request.user_id)
+            .await?
+            .is_none()
+        {
+            return Err(AegisError::BadRequest(
+                "user_id is not a member of this organisation".into(),
+            ));
+        }
+        repo::add_team_member(pool, team_id, request.user_id, &request.role).await?;
+        audit(
+            &state,
+            &context,
+            "team.member_added",
+            "team",
+            Some(team_id),
+            Some(serde_json::json!({"user_id": request.user_id, "role": request.role})),
+        )
+        .await;
+        Ok::<_, AegisError>(respond(
+            StatusCode::OK,
+            serde_json::json!({"team_id": team_id, "user_id": request.user_id, "role": request.role}),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `DELETE /api/org/teams/{id}/members/{user_id}` — remove a person from a project.
+/// Org owner/admin only, same reasoning as [`add_team_member`].
+pub async fn remove_team_member(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((team_id, user_id)): Path<(Uuid, Uuid)>,
+) -> Response {
+    match async {
+        let context = require_writer(&state, &headers).await?;
+        let pool = state.db()?;
+        if !repo::team_belongs_to_org(pool, team_id, context.org_id).await? {
+            return Err(AegisError::NotFound("team not found".into()));
+        }
+        let removed = repo::remove_team_member(pool, team_id, user_id).await?;
+        if !removed {
+            return Err(AegisError::NotFound("membership not found".into()));
+        }
+        audit(
+            &state,
+            &context,
+            "team.member_removed",
+            "team",
+            Some(team_id),
+            Some(serde_json::json!({"user_id": user_id})),
+        )
+        .await;
+        Ok::<_, AegisError>(respond(
+            StatusCode::OK,
+            serde_json::json!({"removed": true}),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Body for [`add_team_member`].
+#[derive(Debug, Deserialize)]
+pub struct AddTeamMemberRequest {
+    pub user_id: Uuid,
+    /// `"lead"` or `"member"`.
+    pub role: String,
+}
+
 /// `GET /api/budgets`
 pub async fn list_budgets(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match async {
@@ -1896,15 +2049,26 @@ pub struct CreateBudgetRequest {
     pub team_id: Option<Uuid>,
     #[serde(default)]
     pub api_key_id: Option<Uuid>,
+    /// Cap one person's spend, summed across every key issued to them — "how much may this
+    /// employee spend." Mutually exclusive with the other scopes below, same as they are
+    /// with each other.
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
     /// Cap one region's share of the organisation's spend, e.g. `eu-central`.
     ///
-    /// Mutually exclusive with `team_id` and `api_key_id` — a budget caps one counter, and
-    /// a row naming several scopes would be ambiguous about which.
+    /// Mutually exclusive with `team_id`, `api_key_id`, and `user_id` — a budget caps one
+    /// counter, and a row naming several scopes would be ambiguous about which.
     #[serde(default)]
     pub region: Option<String>,
     #[serde(default = "default_period")]
     pub period: String,
     pub limit_mc: i64,
+    /// An additional ceiling in tokens on the same scope, enforced independently of
+    /// `limit_mc` — a request that is cheap in dollars can still be unbounded in tokens
+    /// without one. Optional: omitting it caps money only, as every budget did before this
+    /// field existed.
+    #[serde(default)]
+    pub limit_tokens: Option<i64>,
     #[serde(default = "default_true")]
     pub hard_limit: bool,
 }
@@ -1933,6 +2097,7 @@ pub async fn create_budget(
         let scopes = [
             request.team_id.is_some(),
             request.api_key_id.is_some(),
+            request.user_id.is_some(),
             request.region.is_some(),
         ]
         .iter()
@@ -1940,8 +2105,30 @@ pub async fn create_budget(
         .count();
         if scopes > 1 {
             return Err(AegisError::BadRequest(
-                "a budget caps one scope: set at most one of team_id, api_key_id, or region".into(),
+                "a budget caps one scope: set at most one of team_id, api_key_id, user_id, \
+                 or region"
+                    .into(),
             ));
+        }
+        if let Some(limit_tokens) = request.limit_tokens {
+            if limit_tokens < 0 {
+                return Err(AegisError::BadRequest(
+                    "limit_tokens must not be negative".into(),
+                ));
+            }
+        }
+        // A budget scoped to a person must actually name someone in this organisation —
+        // otherwise it silently caps nobody, which reads as "it isn't working" to whoever
+        // configured it.
+        if let Some(user_id) = request.user_id {
+            if crate::db::repo::role_in_org(state.db()?, context.org_id, user_id)
+                .await?
+                .is_none()
+            {
+                return Err(AegisError::BadRequest(
+                    "user_id is not a member of this organisation".into(),
+                ));
+            }
         }
         if !["monthly", "daily"].contains(&request.period.as_str()) {
             return Err(AegisError::BadRequest(
@@ -1964,9 +2151,11 @@ pub async fn create_budget(
                 org_id: context.org_id,
                 team_id: request.team_id,
                 api_key_id: request.api_key_id,
+                user_id: request.user_id,
                 region: request.region.as_deref(),
                 period: &request.period,
                 limit_mc: request.limit_mc,
+                limit_tokens: request.limit_tokens,
                 hard_limit: request.hard_limit,
             },
         )
@@ -2065,29 +2254,124 @@ pub async fn usage_summary(
         let summary =
             repo::usage_summary(state.analytics_db()?, context.org_id, start, end).await?;
 
-        // Percentages are computed here rather than in the client so every surface —
-        // dashboard, CSV, invoice — shows the same number.
-        let savings_percent = if summary.baseline_cost_mc > 0 {
-            (summary.gross_savings_mc as f64 / summary.baseline_cost_mc as f64) * 100.0
-        } else {
-            0.0
-        };
-        let cache_hit_rate = if summary.requests > 0 {
-            (summary.cache_hits as f64 / summary.requests as f64) * 100.0
-        } else {
-            0.0
-        };
-
         Ok::<_, AegisError>(respond(
             StatusCode::OK,
             serde_json::json!({
                 "period": {"start": start, "end": end},
                 "summary": summary,
-                "derived": {
-                    "savings_percent": savings_percent,
-                    "cache_hit_rate": cache_hit_rate,
-                    "customer_net_mc": summary.gross_savings_mc - summary.aegis_fee_mc,
-                }
+                "derived": derived_usage_metrics(&summary),
+            }),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// The percentages and rollups every usage view derives the same way from a
+/// [`repo::UsageSummary`], so the dashboard's org, project, and "my usage" views never
+/// silently disagree about how a rate is computed.
+fn derived_usage_metrics(summary: &repo::UsageSummary) -> serde_json::Value {
+    let savings_percent = if summary.baseline_cost_mc > 0 {
+        (summary.gross_savings_mc as f64 / summary.baseline_cost_mc as f64) * 100.0
+    } else {
+        0.0
+    };
+    let cache_hit_rate = if summary.requests > 0 {
+        (summary.cache_hits as f64 / summary.requests as f64) * 100.0
+    } else {
+        0.0
+    };
+    serde_json::json!({
+        "savings_percent": savings_percent,
+        "cache_hit_rate": cache_hit_rate,
+        "customer_net_mc": summary.gross_savings_mc - summary.aegis_fee_mc,
+        "savings_breakdown_mc": {
+            "routing": summary.routing_savings_mc,
+            "compression": summary.compression_savings_mc,
+            "cache": summary.cache_savings_mc,
+        },
+    })
+}
+
+/// `GET /api/projects/{id}/usage` — a project (team) lead's or org admin's view of one
+/// project's spend. See [`assert_project_access`] for who may reach this and why a caller
+/// with no standing gets 404 rather than 403.
+pub async fn project_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(team_id): Path<Uuid>,
+    Query(range): Query<RangeQuery>,
+) -> Response {
+    match async {
+        let context = require_reader(&state, &headers).await?;
+        assert_project_access(&state, &context, team_id).await?;
+        let (start, end) = range.resolve();
+        let summary = repo::usage_summary_for_team(
+            state.analytics_db()?,
+            context.org_id,
+            team_id,
+            start,
+            end,
+        )
+        .await?;
+
+        Ok::<_, AegisError>(respond(
+            StatusCode::OK,
+            serde_json::json!({
+                "team_id": team_id,
+                "period": {"start": start, "end": end},
+                "summary": summary,
+                "derived": derived_usage_metrics(&summary),
+            }),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `GET /api/me/usage` — a member's own attributed spend: every request made with a key
+/// issued to them, in this organisation, summed. Available to anyone authenticated —
+/// a member views only ever their own figures, never anyone else's, so there is no
+/// escalation to guard against.
+pub async fn my_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(range): Query<RangeQuery>,
+) -> Response {
+    match async {
+        let context = require_reader(&state, &headers).await?;
+        let Some(user_id) = context.user_id else {
+            // A bare API key with no assignee has no "me" to report on — an org-wide
+            // service key was never issued to a person.
+            return Err(AegisError::BadRequest(
+                "this credential is not assigned to a person; there is no per-person usage \
+                 to report"
+                    .into(),
+            ));
+        };
+        let (start, end) = range.resolve();
+        let summary = repo::usage_summary_for_user(
+            state.analytics_db()?,
+            context.org_id,
+            user_id,
+            start,
+            end,
+        )
+        .await?;
+
+        Ok::<_, AegisError>(respond(
+            StatusCode::OK,
+            serde_json::json!({
+                "user_id": user_id,
+                "period": {"start": start, "end": end},
+                "summary": summary,
+                "derived": derived_usage_metrics(&summary),
             }),
         ))
     }
@@ -2976,6 +3260,9 @@ pub async fn compression_preview(
         };
 
         let before_text = normalized.all_text();
+        // Scanned before compression, on the prompt as the caller actually sent it —
+        // technique #7 (detect-only): see `crate::engine::cache_bust`.
+        let cache_bust_report = crate::engine::cache_bust::scan(&normalized.system_text());
         let result = crate::engine::compressor::compress(
             &mut normalized,
             &crate::engine::compressor::CompressorConfig::default(),
@@ -3021,6 +3308,14 @@ pub async fn compression_preview(
                     "prompt_before": before_text,
                     "prompt_after": after_text,
                     "messages_after": normalized.messages,
+                    // Detect-only (technique #7): does this system prompt contain a
+                    // timestamp, UUID, request id, or nonce that would bust the provider's
+                    // own prefix cache on every single turn? See `engine::cache_bust`.
+                    "cache_bust": {
+                        "detected": cache_bust_report.detected(),
+                        "occurrences": cache_bust_report.count(),
+                        "kinds": cache_bust_report.hits.iter().map(|h| h.kind).collect::<Vec<_>>(),
+                    },
                 })),
             )
                 .into_response(),

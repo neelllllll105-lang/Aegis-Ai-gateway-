@@ -135,6 +135,7 @@ async fn budget_reservation_is_atomic_against_real_redis() {
                 &limits,
                 None,
                 cost_per_request,
+                0,
             )
             .await
             .unwrap()
@@ -198,7 +199,7 @@ async fn a_refused_reservation_leaves_the_real_counter_untouched() {
         .expect("prime spend at the limit");
 
     for _ in 0..5 {
-        let outcome = budget::check_and_reserve(&store, &context, &limits, None, 100_000)
+        let outcome = budget::check_and_reserve(&store, &context, &limits, None, 100_000, 0)
             .await
             .unwrap();
         assert!(matches!(outcome, BudgetOutcome::Denied(_)));
