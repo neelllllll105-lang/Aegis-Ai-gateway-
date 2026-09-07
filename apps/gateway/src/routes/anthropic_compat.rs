@@ -282,10 +282,11 @@ async fn handle_messages(
         Err(error) => return Err(error),
     };
 
-    let hint = RoutingHint::parse(
+    let hint = RoutingHint::resolve(
         headers
             .get("x-aegis-routing-hint")
             .and_then(|v| v.to_str().ok()),
+        auth_context.default_routing_mode.as_deref(),
     );
 
     if request.stream {
@@ -558,10 +559,17 @@ async fn stream_messages(
         None
     };
 
+    // Was hardcoded `policy: None` — every organisation policy (deny/pin/tier/routing_mode
+    // rules) was silently unenforceable for any caller using Anthropic's native wire
+    // format, with no error or warning anywhere: `/v1/messages` traffic simply never
+    // consulted it, while the identical policy fully applied to the same org's traffic on
+    // `/v1/chat/completions`. Found wiring `team`/`user` conditions into this same call.
+    let policy = crate::routes::openai_compat::load_policy(state, auth_context).await;
     let inputs = RoutingInputs {
         hint,
-        policy: None,
-        team: None,
+        policy: policy.as_ref(),
+        team: auth_context.team_name.clone(),
+        user: auth_context.user_email.clone(),
         allowed_models: auth_context.allowed_models.clone(),
         plan_tier_ceiling: crate::routes::openai_compat::plan_tier_ceiling(&auth_context.plan),
         budget_headroom_mc: None,
@@ -792,6 +800,7 @@ async fn stream_messages(
         }
 
         event.tokens_saved_by_compression = compression.tokens_saved();
+        event.techniques_fired = crate::routes::openai_compat::techniques_fired_json(&compression);
         if let Some(pricing) = state_for_stream.pricing().get(&served_model) {
             event.input_cost_mc = pricing.input_cost_of(&tokens).as_i64();
             event.output_cost_mc = pricing.output_cost_of(&tokens).as_i64();
@@ -1390,6 +1399,7 @@ mod tests {
             gateway_overhead_ms: 0.4,
             total_latency_ms: 200,
             tokens_saved_by_compression: 0,
+            techniques_fired: None,
             cache_bust_hits: 0,
             explanation: Vec::new(),
         }
@@ -1509,6 +1519,11 @@ mod tests {
             savings_share_bp: 2_000,
             zero_retention: false,
             org_region: "us-east".to_string(),
+            team_name: None,
+            user_email: None,
+            key_default_routing_mode: None,
+            team_default_routing_mode: None,
+            org_default_routing_mode: None,
         };
         state
             .key_cache

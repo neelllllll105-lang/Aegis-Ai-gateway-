@@ -105,6 +105,11 @@ pub struct UsageEvent {
 
     /// Tokens removed by context compression, if any.
     pub tokens_saved_by_compression: u64,
+    /// Per-technique compression counts (duplicate messages removed, whitespace collapsed,
+    /// JSON blocks minified, and so on) — `None` when compression did not run or changed
+    /// nothing. See `routes::openai_compat::techniques_fired_json` for how this is built.
+    #[serde(default)]
+    pub techniques_fired: Option<serde_json::Value>,
 
     /// Volatile spans (timestamps, UUIDs, request ids, nonces) found in the system prompt
     /// that would bust the provider's own prefix cache on every turn. Detect-only — see
@@ -198,6 +203,7 @@ impl UsageEvent {
             reserved_mc: 0,
             reserved_tokens: 0,
             tokens_saved_by_compression: 0,
+            techniques_fired: None,
             cache_bust_hits: 0,
             created_at: Utc::now(),
         }
@@ -251,6 +257,7 @@ impl UsageEvent {
             reserved_mc: 0,
             reserved_tokens: 0,
             tokens_saved_by_compression: 0,
+            techniques_fired: None,
             cache_bust_hits: 0,
             created_at: Utc::now(),
         }

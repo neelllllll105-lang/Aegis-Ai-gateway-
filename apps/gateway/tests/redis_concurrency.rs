@@ -43,6 +43,11 @@ fn auth(plan: &str) -> AuthContext {
         savings_share_bp: 2_000,
         zero_retention: false,
         org_region: "eu-central".into(),
+        team_name: None,
+        user_email: None,
+        key_default_routing_mode: None,
+        team_default_routing_mode: None,
+        org_default_routing_mode: None,
     })
 }
 

@@ -827,6 +827,34 @@ pub struct UpdateKeyRequest {
     pub monthly_budget_mc: Option<i64>,
     #[serde(default)]
     pub allowed_models: Option<Vec<String>>,
+    /// Mode this key falls back to when the caller sends no `X-Aegis-Routing-Hint` header.
+    /// One of `passthrough`/`quality`/`balanced`/`economy`/`auto` — `auto` is also how an
+    /// operator clears a previously-set default, since it resolves identically to unset.
+    #[serde(default)]
+    pub default_routing_mode: Option<String>,
+}
+
+/// The five routing-mode strings the ladder recognises.
+const VALID_ROUTING_MODES: [&str; 5] = ["passthrough", "quality", "balanced", "economy", "auto"];
+
+/// Validate a stored default-routing-mode value and return its canonical lowercase form.
+///
+/// `RoutingHint::parse` (what reads this value back at request time) is case-insensitive
+/// on purpose — a customer's own request header must not fail on a case typo. But the
+/// database's `CHECK` constraint (migration 0012) only admits the exact lowercase strings,
+/// so an admin saving `"Balanced"` here would otherwise hit an opaque constraint-violation
+/// 500 instead of the same forgiving behaviour the header gets. Normalising here closes
+/// that gap with a clean 400 for anything genuinely unrecognised, and silent lowercasing
+/// for anything that's merely differently cased.
+fn validate_routing_mode(mode: &str) -> Result<String> {
+    let normalized = mode.trim().to_ascii_lowercase();
+    if VALID_ROUTING_MODES.contains(&normalized.as_str()) {
+        Ok(normalized)
+    } else {
+        Err(AegisError::BadRequest(format!(
+            "default_routing_mode must be one of {VALID_ROUTING_MODES:?}, got {mode:?}"
+        )))
+    }
 }
 
 /// `PATCH /api/keys/:id`
@@ -840,6 +868,12 @@ pub async fn update_key(
         let context = require_key_writer(&state, &headers).await?;
         let pool = state.db()?;
 
+        let default_routing_mode = request
+            .default_routing_mode
+            .as_deref()
+            .map(validate_routing_mode)
+            .transpose()?;
+
         let key = repo::update_api_key(
             pool,
             context.org_id,
@@ -848,6 +882,7 @@ pub async fn update_key(
             request.rate_limit_per_minute,
             request.monthly_budget_mc,
             request.allowed_models.map(|m| serde_json::json!(m)),
+            default_routing_mode.as_deref(),
         )
         .await?
         .ok_or_else(|| AegisError::NotFound("key not found".into()))?;
@@ -971,6 +1006,10 @@ pub struct UpdateOrgRequest {
     pub zero_retention: Option<bool>,
     #[serde(default)]
     pub content_capture: Option<bool>,
+    /// Organisation-wide default routing mode — the last rung before `auto`. See
+    /// [`UpdateKeyRequest::default_routing_mode`].
+    #[serde(default)]
+    pub default_routing_mode: Option<String>,
 }
 
 /// `PATCH /api/org`
@@ -983,6 +1022,12 @@ pub async fn update_org(
         let context = require_writer(&state, &headers).await?;
         let pool = state.db()?;
 
+        let default_routing_mode = request
+            .default_routing_mode
+            .as_deref()
+            .map(validate_routing_mode)
+            .transpose()?;
+
         let org = repo::update_org_settings(
             pool,
             context.org_id,
@@ -990,6 +1035,7 @@ pub async fn update_org(
             request.billing_email.as_deref(),
             request.zero_retention,
             request.content_capture,
+            default_routing_mode.as_deref(),
         )
         .await?;
 
@@ -1838,6 +1884,10 @@ pub struct CreateTeamRequest {
     pub name: String,
     #[serde(default)]
     pub monthly_budget_mc: Option<i64>,
+    /// This project's default routing mode, for keys that set none of their own. See
+    /// [`UpdateKeyRequest::default_routing_mode`].
+    #[serde(default)]
+    pub default_routing_mode: Option<String>,
 }
 
 /// `POST /api/org/teams`
@@ -1848,11 +1898,17 @@ pub async fn create_team(
 ) -> Response {
     match async {
         let context = require_writer(&state, &headers).await?;
+        let default_routing_mode = request
+            .default_routing_mode
+            .as_deref()
+            .map(validate_routing_mode)
+            .transpose()?;
         let team = repo::create_team(
             state.db()?,
             context.org_id,
             &request.name,
             request.monthly_budget_mc,
+            default_routing_mode.as_deref(),
         )
         .await?;
         audit(
@@ -2929,6 +2985,32 @@ pub fn to_display(amount: MicroCents) -> String {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn routing_mode_validation_accepts_the_five_ladder_values_and_nothing_else() {
+        for mode in ["passthrough", "quality", "balanced", "economy", "auto"] {
+            assert_eq!(validate_routing_mode(mode).unwrap(), mode);
+        }
+        // `cheap` was the legacy header spelling of `economy`, but a stored default is a
+        // deliberate admin choice, not a customer's request header — the forgiving
+        // synonym does not extend here, unlike case, which is normalised below.
+        for bogus in ["cheap", "", "not-a-mode"] {
+            assert!(
+                validate_routing_mode(bogus).is_err(),
+                "{bogus:?} should be rejected, not silently coerced"
+            );
+        }
+    }
+
+    #[test]
+    fn routing_mode_validation_normalises_case_and_whitespace_rather_than_rejecting() {
+        // The database CHECK constraint only admits exact lowercase strings, but
+        // `RoutingHint::parse` reading this value back at request time is case-insensitive
+        // — an admin typing "Balanced" must get the same forgiving treatment a customer's
+        // header gets, not an opaque constraint-violation 500.
+        assert_eq!(validate_routing_mode("Balanced").unwrap(), "balanced");
+        assert_eq!(validate_routing_mode("  ECONOMY  ").unwrap(), "economy");
+    }
 
     #[tokio::test]
     async fn signup_without_a_database_returns_503_not_a_bare_500() {

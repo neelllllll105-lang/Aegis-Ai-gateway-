@@ -229,7 +229,7 @@ async fn teams_budgets_and_policies_are_all_org_scoped() {
     let victim = create_org(&pool, "victim-sweep").await;
     let attacker = create_org(&pool, "attacker-sweep").await;
 
-    let team = repo::create_team(&pool, victim.org_id, "engineering", Some(1_000_000))
+    let team = repo::create_team(&pool, victim.org_id, "engineering", Some(1_000_000), None)
         .await
         .expect("team creation");
     let budget = repo::create_budget(
@@ -334,10 +334,10 @@ async fn a_project_lead_is_only_a_lead_of_the_team_they_were_added_to() {
         .await
         .expect("org membership");
 
-    let led_team = repo::create_team(&pool, org.org_id, "led-project", None)
+    let led_team = repo::create_team(&pool, org.org_id, "led-project", None, None)
         .await
         .expect("team creation");
-    let other_team = repo::create_team(&pool, org.org_id, "other-project", None)
+    let other_team = repo::create_team(&pool, org.org_id, "other-project", None, None)
         .await
         .expect("team creation");
     repo::add_team_member(&pool, led_team.id, lead.id, "lead")
@@ -393,10 +393,10 @@ async fn team_membership_and_budgets_do_not_leak_across_teams_in_the_same_org() 
     };
 
     let org = create_org(&pool, "same-org-teams").await;
-    let team_a = repo::create_team(&pool, org.org_id, "team-a", None)
+    let team_a = repo::create_team(&pool, org.org_id, "team-a", None, None)
         .await
         .expect("team creation");
-    let team_b = repo::create_team(&pool, org.org_id, "team-b", None)
+    let team_b = repo::create_team(&pool, org.org_id, "team-b", None, None)
         .await
         .expect("team creation");
 
@@ -541,6 +541,7 @@ async fn per_person_usage_summaries_only_include_that_persons_own_keys() {
         status_code: 200,
         error_type: None,
         tokens_saved_by_compression: 0,
+        techniques_fired: None,
         cache_bust_hits: 0,
         region: None,
         reserved_mc: 0,

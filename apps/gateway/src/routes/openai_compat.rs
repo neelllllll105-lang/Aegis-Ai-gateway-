@@ -71,6 +71,12 @@ pub struct PipelineOutcome {
     pub gateway_overhead_ms: f64,
     pub total_latency_ms: u32,
     pub tokens_saved_by_compression: u64,
+    /// Per-technique compression counts, for `usage_records.techniques_fired`. Was only
+    /// ever visible live (this response's headers, `/api/compression/preview`) — nothing
+    /// wrote it onto the record, so "how much did whitespace-collapse save us last month"
+    /// had no query that could answer it. `None` when compression did not run or changed
+    /// nothing, matching the column's own `NULL` convention.
+    pub techniques_fired: Option<serde_json::Value>,
     /// Volatile spans (timestamps, UUIDs, request ids, nonces) found in the system prompt
     /// that would invalidate the provider's own prefix cache on every turn. Detect-only —
     /// see [`crate::engine::cache_bust`]. Zero on a cache hit: no provider was called this
@@ -82,6 +88,28 @@ pub struct PipelineOutcome {
     /// which tells a customer that their request was downgraded "for complexity" and
     /// nothing about why — the question they actually ask support.
     pub explanation: Vec<String>,
+}
+
+/// Build the persisted compression breakdown, or `None` when nothing fired.
+///
+/// `None` rather than an empty object for a no-op: it matches the column's own `NULL`
+/// convention (passthrough mode, a zero-retention org, or a request compression simply
+/// found nothing to do to), so a query counting "requests where compression fired" can use
+/// `IS NOT NULL` directly instead of also excluding an all-zero object.
+pub(crate) fn techniques_fired_json(
+    compression: &compressor::CompressionResult,
+) -> Option<serde_json::Value> {
+    if compression.is_noop() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "duplicate_system_messages_removed": compression.duplicate_system_messages_removed,
+        "whitespace_chars_removed": compression.whitespace_chars_removed,
+        "messages_truncated": compression.messages_truncated,
+        "json_blocks_minified": compression.json_blocks_minified,
+        "duplicate_blocks_referenced": compression.duplicate_blocks_referenced,
+        "stale_tool_results_trimmed": compression.stale_tool_results_trimmed,
+    }))
 }
 
 impl PipelineOutcome {
@@ -221,6 +249,7 @@ impl PipelineOutcome {
         event.input_cost_mc = self.input_cost_mc;
         event.output_cost_mc = self.output_cost_mc;
         event.tokens_saved_by_compression = self.tokens_saved_by_compression;
+        event.techniques_fired = self.techniques_fired.clone();
         event.routing_savings_mc = self.savings_components.routing_savings.as_i64();
         event.compression_savings_mc = self.savings_components.compression_savings.as_i64();
         event.cache_savings_mc = self.savings_components.cache_savings.as_i64();
@@ -372,6 +401,7 @@ fn cache_hit_outcome(
         gateway_overhead_ms: clock.overhead_ms(),
         total_latency_ms: clock.total_ms(),
         tokens_saved_by_compression: 0,
+        techniques_fired: None,
         cache_bust_hits: 0,
         explanation: vec![explanation],
     }
@@ -430,6 +460,7 @@ pub async fn execute_with_headroom(
                 .await
                 .as_i64(),
             limit_micro_cents: 0,
+            also_exceeded: Vec::new(),
         });
     }
 
@@ -629,7 +660,8 @@ pub async fn execute_with_headroom(
     let inputs = RoutingInputs {
         hint,
         policy: policy.as_ref(),
-        team: None,
+        team: auth.team_name.clone(),
+        user: auth.user_email.clone(),
         allowed_models: auth.allowed_models.clone(),
         plan_tier_ceiling: plan_tier_ceiling(&auth.plan),
         budget_headroom_mc,
@@ -822,6 +854,7 @@ pub async fn execute_with_headroom(
         gateway_overhead_ms: clock.overhead_ms(),
         total_latency_ms: clock.total_ms(),
         tokens_saved_by_compression: compression.tokens_saved(),
+        techniques_fired: techniques_fired_json(&compression),
         explanation,
     })
 }
@@ -1284,7 +1317,7 @@ fn resolve_usage(response: &NormalizedResponse, request: &NormalizedRequest) -> 
 }
 
 /// Load and parse the organisation's active routing policy.
-async fn load_policy(state: &AppState, auth: &AuthContext) -> Option<RoutingPolicy> {
+pub(crate) async fn load_policy(state: &AppState, auth: &AuthContext) -> Option<RoutingPolicy> {
     let cache_key = format!("aegis:policy:{}", auth.org_id);
 
     if let Some(raw) = state.store.get(&cache_key).await.ok().flatten() {
@@ -1422,10 +1455,11 @@ async fn handle_chat(
             Err(error) => return Err(error),
         };
 
-    let hint = RoutingHint::parse(
+    let hint = RoutingHint::resolve(
         headers
             .get("x-aegis-routing-hint")
             .and_then(|v| v.to_str().ok()),
+        auth_context.default_routing_mode.as_deref(),
     );
 
     if request.stream {
@@ -1542,7 +1576,8 @@ async fn stream_chat(
     let inputs = RoutingInputs {
         hint,
         policy: policy.as_ref(),
-        team: None,
+        team: auth_context.team_name.clone(),
+        user: auth_context.user_email.clone(),
         allowed_models: auth_context.allowed_models.clone(),
         plan_tier_ceiling: plan_tier_ceiling(&auth_context.plan),
         budget_headroom_mc: None,
@@ -1746,6 +1781,7 @@ async fn stream_chat(
         }
 
         event.tokens_saved_by_compression = compression.tokens_saved();
+        event.techniques_fired = techniques_fired_json(&compression);
         if let Some(pricing) = state_for_stream.pricing().get(&served_model) {
             event.input_cost_mc = pricing.input_cost_of(&tokens).as_i64();
             event.output_cost_mc = pricing.output_cost_of(&tokens).as_i64();
@@ -1876,19 +1912,24 @@ pub(crate) async fn reserve_budget(
             let headroom = budget::headroom_mc(state.store.as_ref(), auth, &limits, region).await;
             Ok(Ok((reservation, headroom)))
         }
-        budget::BudgetOutcome::Denied(decision) => {
-            state.metrics.record_budget_blocked(decision.scope);
+        budget::BudgetOutcome::Denied(breaches) => {
+            // Every breached scope gets its own counter increment and its own log field,
+            // not just the primary one — `record_budget_blocked` and the trace both need
+            // to reflect that a request can be over on more than one scope at once.
+            for breach in &breaches {
+                state.metrics.record_budget_blocked(breach.scope);
+            }
             tracing::info!(
                 org_id = %auth.org_id,
-                scope = decision.scope,
-                spend_mc = decision.spend.as_i64(),
-                limit_mc = decision.limit.unwrap_or(MicroCents::ZERO).as_i64(),
+                scopes = ?breaches.iter().map(|b| b.scope).collect::<Vec<_>>(),
+                spend_mc = breaches[0].spend.as_i64(),
+                limit_mc = breaches[0].limit.unwrap_or(MicroCents::ZERO).as_i64(),
                 projected_mc = projected.as_i64(),
                 "request refused: hard budget would be exceeded"
             );
             record_rejection_for_model(state, auth, &request.model, path, 402, "budget_exceeded")
                 .await;
-            Ok(Err(decision.into_error()))
+            Ok(Err(budget::denial_to_error(&breaches)))
         }
     }
 }
@@ -2318,6 +2359,11 @@ mod tests {
             savings_share_bp: 2_000,
             zero_retention: false,
             org_region: "test".into(),
+            team_name: None,
+            user_email: None,
+            key_default_routing_mode: None,
+            team_default_routing_mode: None,
+            org_default_routing_mode: None,
         })
     }
 
@@ -2825,6 +2871,26 @@ mod tests {
             .unwrap();
         assert!(outcome.tokens_saved_by_compression > 0);
 
+        // The per-technique breakdown must reach both the live outcome and the usage
+        // record — before this it was only ever visible in the response and the
+        // /api/compression/preview demo endpoint, never persisted onto the record itself.
+        let breakdown = outcome
+            .techniques_fired
+            .as_ref()
+            .expect("duplicate system messages should have fired the dedupe technique");
+        assert!(
+            breakdown["duplicate_system_messages_removed"]
+                .as_u64()
+                .unwrap()
+                >= 1,
+            "{breakdown:?}"
+        );
+        let event = outcome.usage_event(&normal, 200, "us-east");
+        assert_eq!(
+            event.techniques_fired, outcome.techniques_fired,
+            "the usage record must carry the same breakdown the response reported"
+        );
+
         let mut private = auth_context("enterprise");
         private.zero_retention = true;
         let untouched = execute(&state, &private, request, RoutingHint::Auto)
@@ -2833,6 +2899,10 @@ mod tests {
         assert_eq!(
             untouched.tokens_saved_by_compression, 0,
             "a zero-retention prompt must be delivered exactly as written"
+        );
+        assert_eq!(
+            untouched.techniques_fired, None,
+            "nothing fired, so there is nothing to record"
         );
     }
 
@@ -2940,6 +3010,7 @@ mod tests {
             gateway_overhead_ms: 0.4,
             total_latency_ms: 120,
             tokens_saved_by_compression: 0,
+            techniques_fired: None,
             cache_bust_hits: 0,
             explanation: Vec::new(),
         };
@@ -2979,6 +3050,7 @@ mod tests {
             gateway_overhead_ms: 0.1,
             total_latency_ms: 5,
             tokens_saved_by_compression: 0,
+            techniques_fired: None,
             cache_bust_hits: 0,
             explanation: Vec::new(),
         };
@@ -3013,6 +3085,11 @@ mod tests {
             savings_share_bp: 2_000,
             zero_retention: false,
             org_region: org_region.to_string(),
+            team_name: None,
+            user_email: None,
+            key_default_routing_mode: None,
+            team_default_routing_mode: None,
+            org_default_routing_mode: None,
         };
         state
             .key_cache

@@ -12,6 +12,15 @@ use serde::Serialize;
 /// Base URL for error documentation. Every client-facing error links to its own anchor.
 const DOCS_BASE: &str = "https://docs.aegis.dev/errors";
 
+/// One additional budget scope a refused request also breached, alongside the primary one
+/// named on [`AegisError::BudgetExceeded`] itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BudgetBreach {
+    pub scope: String,
+    pub spend_micro_cents: i64,
+    pub limit_micro_cents: i64,
+}
+
 /// The one error type crossing every module boundary in the gateway.
 #[derive(Debug, thiserror::Error)]
 pub enum AegisError {
@@ -41,10 +50,19 @@ pub enum AegisError {
     },
 
     /// A hard budget was exceeded. HTTP 402 — the caller must raise the budget or pay.
+    ///
+    /// `spend_micro_cents`/`limit_micro_cents` are the scope that mattered most — the one
+    /// [`crate::middleware::budget::check_and_reserve`]'s scope ordering considers most
+    /// specific, or the only one for every simpler call site in this module that checks
+    /// just one thing. `also_exceeded` names every *other* scope the same request also
+    /// breached in the same atomic pass, so a request that is over on both a person's
+    /// token budget and the organisation's money budget gets told both, in one response,
+    /// rather than the second one only surfacing after the first is raised.
     #[error("budget exceeded")]
     BudgetExceeded {
         spend_micro_cents: i64,
         limit_micro_cents: i64,
+        also_exceeded: Vec<BudgetBreach>,
     },
 
     /// The requested model is not available to this org (plan gate or allowlist).
@@ -196,13 +214,22 @@ impl AegisError {
             AegisError::BudgetExceeded {
                 spend_micro_cents,
                 limit_micro_cents,
+                also_exceeded,
             } => {
                 let spend = crate::money::MicroCents(*spend_micro_cents).to_usd_string();
                 let limit = crate::money::MicroCents(*limit_micro_cents).to_usd_string();
-                format!(
-                    "Budget exceeded: {spend} spent against a {limit} limit. Raise the \
-                     budget or upgrade your plan to continue."
-                )
+                let mut message =
+                    format!("Budget exceeded: {spend} spent against a {limit} limit.");
+                for breach in also_exceeded {
+                    let s = crate::money::MicroCents(breach.spend_micro_cents).to_usd_string();
+                    let l = crate::money::MicroCents(breach.limit_micro_cents).to_usd_string();
+                    message.push_str(&format!(
+                        " Also exceeded: {} ({s} against a {l} limit).",
+                        breach.scope
+                    ));
+                }
+                message.push_str(" Raise the budget or upgrade your plan to continue.");
+                message
             }
             other => other.to_string(),
         }
@@ -244,6 +271,12 @@ pub struct ErrorDetail {
     pub docs_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upgrade_url: Option<String>,
+    /// Every budget scope this request breached, beyond the primary one already described
+    /// in `message` — structured, for a dashboard or SDK to render without parsing prose.
+    /// Absent (not just empty) on every error that is not `budget_exceeded`, and on a
+    /// `budget_exceeded` that breached only one scope, which is most of them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub also_exceeded: Vec<BudgetBreach>,
 }
 
 impl IntoResponse for AegisError {
@@ -259,6 +292,10 @@ impl IntoResponse for AegisError {
 
         let upgrade_url = matches!(self, AegisError::BudgetExceeded { .. })
             .then(|| "https://app.aegis.dev/billing".to_string());
+        let also_exceeded = match &self {
+            AegisError::BudgetExceeded { also_exceeded, .. } => also_exceeded.clone(),
+            _ => Vec::new(),
+        };
 
         let body = ErrorBody {
             error: ErrorDetail {
@@ -266,6 +303,7 @@ impl IntoResponse for AegisError {
                 message: self.client_message(),
                 docs_url: self.docs_url(),
                 upgrade_url,
+                also_exceeded,
             },
         };
 
@@ -321,7 +359,8 @@ mod tests {
         assert_eq!(
             AegisError::BudgetExceeded {
                 spend_micro_cents: 1,
-                limit_micro_cents: 0
+                limit_micro_cents: 0,
+                also_exceeded: Vec::new()
             }
             .status(),
             StatusCode::PAYMENT_REQUIRED
@@ -358,7 +397,8 @@ mod tests {
         assert_eq!(
             AegisError::BudgetExceeded {
                 spend_micro_cents: 0,
-                limit_micro_cents: 0
+                limit_micro_cents: 0,
+                also_exceeded: Vec::new()
             }
             .error_type(),
             "budget_exceeded"
@@ -393,10 +433,52 @@ mod tests {
         let err = AegisError::BudgetExceeded {
             spend_micro_cents: 5_000_000,
             limit_micro_cents: 1_000_000,
+            also_exceeded: Vec::new(),
         };
         let msg = err.client_message();
         assert!(msg.contains("$5.0000"), "{msg}");
         assert!(msg.contains("$1.0000"), "{msg}");
+    }
+
+    #[test]
+    fn a_request_that_breaches_two_scopes_at_once_names_both() {
+        // The literal question this exists to answer: "the org budget AND a person's
+        // token budget were both exceeded by the same request" must not read as if only
+        // the first one mattered.
+        let err = AegisError::BudgetExceeded {
+            spend_micro_cents: 100_000,
+            limit_micro_cents: 50_000,
+            also_exceeded: vec![BudgetBreach {
+                scope: "user".to_string(),
+                spend_micro_cents: 20_000,
+                limit_micro_cents: 10_000,
+            }],
+        };
+        let msg = err.client_message();
+        // 1 cent = 10,000 micro-cents: 100_000mc = $0.10, 50_000mc = $0.05.
+        assert!(msg.contains("$0.1000"), "primary scope missing: {msg}");
+        assert!(msg.contains("$0.0500"), "primary limit missing: {msg}");
+        assert!(msg.contains("user"), "second scope's name missing: {msg}");
+        assert!(
+            msg.contains("$0.0200") && msg.contains("$0.0100"),
+            "second scope's figures missing: {msg}"
+        );
+
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    }
+
+    #[test]
+    fn a_single_scope_breach_serializes_no_also_exceeded_noise() {
+        // The common case (one scope breached) must not grow the response body with an
+        // empty array nobody asked for.
+        let err = AegisError::BudgetExceeded {
+            spend_micro_cents: 100,
+            limit_micro_cents: 50,
+            also_exceeded: Vec::new(),
+        };
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
     }
 
     #[test]

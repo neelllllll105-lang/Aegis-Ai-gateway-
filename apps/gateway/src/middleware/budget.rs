@@ -87,6 +87,7 @@ impl BudgetDecision {
         AegisError::BudgetExceeded {
             spend_micro_cents: self.spend.as_i64(),
             limit_micro_cents: self.limit.unwrap_or(MicroCents::ZERO).as_i64(),
+            also_exceeded: Vec::new(),
         }
     }
 
@@ -434,7 +435,39 @@ pub enum BudgetOutcome {
     /// The request may proceed; the projection is held until settled.
     Allowed(Reservation),
     /// The request is refused. Nothing was left held.
-    Denied(Box<BudgetDecision>),
+    ///
+    /// Every scope this request breached in the same atomic pass, innermost/most-specific
+    /// first — never empty. Before this carried more than one, a request that breached two
+    /// scopes at once (a person's token budget and the organisation's money budget, say)
+    /// only ever learned about whichever one the loop happened to reach first; raising that
+    /// one and retrying just surfaced the second breach as a brand new 402.
+    Denied(Vec<BudgetDecision>),
+}
+
+/// Render every scope a refused request breached into the 402 the client receives — the
+/// most specific scope (`scopes()` orders innermost first) as the primary figure, every
+/// other breach alongside it in `also_exceeded` rather than silently dropped.
+pub fn denial_to_error(breaches: &[BudgetDecision]) -> AegisError {
+    let Some((primary, rest)) = breaches.split_first() else {
+        // Defensive only: `check_and_reserve` never returns `Denied` with an empty list.
+        return AegisError::BudgetExceeded {
+            spend_micro_cents: 0,
+            limit_micro_cents: 0,
+            also_exceeded: Vec::new(),
+        };
+    };
+    AegisError::BudgetExceeded {
+        spend_micro_cents: primary.spend.as_i64(),
+        limit_micro_cents: primary.limit.unwrap_or(MicroCents::ZERO).as_i64(),
+        also_exceeded: rest
+            .iter()
+            .map(|b| crate::error::BudgetBreach {
+                scope: b.scope.to_string(),
+                spend_micro_cents: b.spend.as_i64(),
+                limit_micro_cents: b.limit.unwrap_or(MicroCents::ZERO).as_i64(),
+            })
+            .collect(),
+    }
 }
 
 /// Read-only budget check. Reports where an organisation stands without reserving.
@@ -503,9 +536,16 @@ pub async fn check_and_reserve(
 
     let mut held: Vec<String> = Vec::with_capacity(scopes.len());
     let mut held_tokens: Vec<String> = Vec::new();
-    let mut breach: Option<BudgetDecision> = None;
+    let mut breaches: Vec<BudgetDecision> = Vec::new();
 
-    'scopes: for scope in &scopes {
+    // Deliberately does not stop at the first breach: a request over budget on two scopes
+    // at once (a person's token ceiling *and* the organisation's money ceiling, say) must
+    // be told about both in this one response, not just whichever scope happened to be
+    // checked first — see `BudgetOutcome::Denied`. Every scope is still reserved into
+    // (never merely read) even after a breach is already known, because that is the only
+    // way to learn whether a *later* scope is also over without reintroducing the
+    // read-then-act race this whole module exists to close.
+    for scope in &scopes {
         // Fail open on a store error: an unreachable counter must not reject a paying
         // customer. The scope is skipped rather than reserved, so nothing is left held.
         let Ok(total) = store
@@ -523,13 +563,12 @@ pub async fn check_and_reserve(
             // is zero because the model has no price.
             let committed = total - projected_mc;
             if scope.hard && (total > limit || committed >= limit) {
-                breach = Some(BudgetDecision {
+                breaches.push(BudgetDecision {
                     allowed: false,
                     spend: MicroCents(committed.max(0)),
                     limit: Some(MicroCents(limit)),
                     scope: scope.name,
                 });
-                break 'scopes;
             }
         }
 
@@ -550,20 +589,19 @@ pub async fn check_and_reserve(
                 if token_total > token_limit || committed_tokens >= token_limit {
                     // Token limits are always hard — there is no soft/alert-only mode for
                     // them yet, matching "when in doubt, be conservative."
-                    breach = Some(BudgetDecision {
+                    breaches.push(BudgetDecision {
                         allowed: false,
                         spend: MicroCents(committed_tokens.max(0)),
                         limit: Some(MicroCents(token_limit)),
                         scope: scope.name,
                     });
-                    break 'scopes;
                 }
             }
         }
     }
 
-    if let Some(decision) = breach {
-        // Roll back everything, including the scope that tripped: a refused request must
+    if !breaches.is_empty() {
+        // Roll back everything, including every scope that tripped: a refused request must
         // not consume budget — money or tokens — it was never allowed to spend.
         if projected_mc != 0 {
             for key in &held {
@@ -577,7 +615,7 @@ pub async fn check_and_reserve(
                     .await;
             }
         }
-        return Ok(BudgetOutcome::Denied(Box::new(decision)));
+        return Ok(BudgetOutcome::Denied(breaches));
     }
 
     // `reserved_tokens` reflects what was actually held, not the raw projection: when no
@@ -797,6 +835,11 @@ mod tests {
             savings_share_bp: 2_000,
             zero_retention: false,
             org_region: "eu-central".into(),
+            team_name: None,
+            user_email: None,
+            key_default_routing_mode: None,
+            team_default_routing_mode: None,
+            org_default_routing_mode: None,
         })
     }
 
@@ -1372,6 +1415,54 @@ mod tests {
             1_000_000,
             "refused requests must not accumulate spend"
         );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_breaches_two_scopes_is_denied_with_both_named() {
+        // A projected cost that alone exceeds both a person's individual budget and the
+        // organisation's, in the same atomic pass. Before this, `Denied` carried exactly
+        // one scope — whichever the loop reached first — so the second breach only ever
+        // surfaced as a brand new 402 after the first was raised and the request retried.
+        let store = MemoryStore::new();
+        let context = AuthContext {
+            user_id: Some(Uuid::new_v4()),
+            ..auth("pro")
+        };
+        let limits = BudgetLimits {
+            org: Some(Limit::hard(100)),
+            user: Some(Limit::hard(50)),
+            ..BudgetLimits::default()
+        };
+
+        let outcome = check_and_reserve(&store, &context, &limits, None, 200, 0)
+            .await
+            .unwrap();
+
+        let BudgetOutcome::Denied(breaches) = outcome else {
+            panic!("expected both the user and organization scopes to be denied");
+        };
+        let scopes: Vec<&str> = breaches.iter().map(|b| b.scope).collect();
+        assert!(scopes.contains(&"user"), "{scopes:?}");
+        assert!(scopes.contains(&"organization"), "{scopes:?}");
+        assert_eq!(scopes.len(), 2, "exactly the two breached scopes, no more");
+
+        // The rollback still covers every scope that was reserved into, not just the one
+        // that tripped first.
+        assert_eq!(
+            usage::current_spend(&store, context.org_id).await.as_i64(),
+            0,
+            "a fully refused request must leave every counter untouched"
+        );
+
+        // And the error a client actually receives names both, not just one — the
+        // message-formatting side of this is covered directly in `error.rs`'s own tests.
+        let AegisError::BudgetExceeded { also_exceeded, .. } = denial_to_error(&breaches) else {
+            panic!("expected a BudgetExceeded error");
+        };
+        assert_eq!(also_exceeded.len(), 1, "one primary breach, one additional");
+        // `scopes()` orders user ahead of organization, so "user" is the primary figure
+        // and "organization" is what would otherwise have been silently dropped.
+        assert_eq!(also_exceeded[0].scope, "organization");
     }
 
     #[tokio::test]

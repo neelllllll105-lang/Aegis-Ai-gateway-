@@ -579,7 +579,8 @@ mod tests {
         assert!(!is_retryable(&AegisError::BadRequest("x".into())));
         assert!(!is_retryable(&AegisError::BudgetExceeded {
             spend_micro_cents: 1,
-            limit_micro_cents: 0
+            limit_micro_cents: 0,
+            also_exceeded: Vec::new()
         }));
     }
 

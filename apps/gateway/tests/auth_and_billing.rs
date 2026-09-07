@@ -237,14 +237,15 @@ async fn enabling_zero_retention_forces_content_capture_off() {
     let fixture = create_org(&pool, "retention-toggle").await;
 
     let with_capture =
-        repo::update_org_settings(&pool, fixture.org_id, None, None, None, Some(true))
+        repo::update_org_settings(&pool, fixture.org_id, None, None, None, Some(true), None)
             .await
             .expect("enable capture");
     assert!(with_capture.content_capture);
 
-    let private = repo::update_org_settings(&pool, fixture.org_id, None, None, Some(true), None)
-        .await
-        .expect("enable zero retention");
+    let private =
+        repo::update_org_settings(&pool, fixture.org_id, None, None, Some(true), None, None)
+            .await
+            .expect("enable zero retention");
 
     assert!(private.zero_retention);
     assert!(
