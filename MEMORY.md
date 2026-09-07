@@ -102,6 +102,16 @@ Detail with per-criterion evidence: `docs/PHASES.md`. Machine-readable: `.aegis/
 
 ## Current Focus
 
+**Session 15 (2026-09-07), latest: the user pasted competitive research on LiteLLM/
+LangChain/Redis Iris/Red Hat and asked for an honest comparison plus gap-closing.** Domain-
+aware routing turned out to already exist (now tested, 6 new tests); semantic caching's
+`is_local()`-only gate — the reason it had never fired outside a unit test — is now
+opt-in-reachable via `semantic_lookup_worth_it()` and `AEGIS_SEMANTIC_CACHE_ALLOW_REMOTE_
+EMBEDDING`. 897 lib tests passing, fmt/clippy clean, commit `9d4c691`. **The comparison
+write-up itself — the actual thing asked for — is still owed to the user; see Next Steps.**
+Full detail in the Session Log entry dated 2026-09-07 (appended to the existing session 15
+entry, same day).
+
 **Session 15 (2026-09-07), backend half: closed the four items session 14 itself flagged
 as "no good excuse"** — full detail in the Session Log entry dated 2026-09-07, kept here
 in one line: policy rules can now match on `user` and set `routing_mode` (and, while wiring
@@ -551,7 +561,7 @@ tests. Full detail in the Session Log below and the audit artifact.
 
    | Feature | Status |
    |---|---|
-   | **Semantic cache** | **Fixed session 7.** Wired into `execute_with_headroom` behind a new `cache::embed::Embedder` trait, gated to Pro/Enterprise plans, embedding generated once per request and reused for both lookup and (on a miss) storage. A semantic hit also writes the current wording into the hot exact-match tier, so its own repeat skips the embedding call next time. Went further than the original task: a new third cache tier (`cache::durable`, Postgres, per-tenant-encrypted, 30-day sliding TTL) now promotes any fingerprint the hot tier has proven repeats, so it survives past the hot tier's 24h window too. Full design: `docs/adr/0008-tiered-durable-cache.md`. |
+   | **Semantic cache** | **Fixed session 7, then found session 15 to have never actually fired in any environment this project has run in, then made reachable session 15.** Wired into `execute_with_headroom` behind a new `cache::embed::Embedder` trait, gated to Pro/Enterprise plans, embedding generated once per request and reused for both lookup and (on a miss) storage. A semantic hit also writes the current wording into the hot exact-match tier, so its own repeat skips the embedding call next time. Went further than the original task: a new third cache tier (`cache::durable`, Postgres, per-tenant-encrypted, 30-day sliding TTL) now promotes any fingerprint the hot tier has proven repeats, so it survives past the hot tier's 24h window too. Full design: `docs/adr/0008-tiered-durable-cache.md`. **The catch, found during the checklist triage (session 15):** the lookup was gated on `state.embedder.is_local()`, and the only embedder this codebase can construct that satisfies `is_local()` needs a provisioned ONNX model — never done in any environment this project has run in — so the feature was real, tested, and permanently unreachable outside a unit test. `semantic_lookup_worth_it()` (same session, later) replaces that gate: a local embedder still always qualifies; a remote one now qualifies too, but only when the operator opts in (`AEGIS_SEMANTIC_CACHE_ALLOW_REMOTE_EMBEDDING=true`, `false`/unset preserves today's exact behaviour) and the request is past `Simple` complexity, where a guaranteed 100-300ms embedding round trip is actually worth risking. Still not exercised against a real embedding endpoint — no such endpoint has ever been reachable from this environment. |
    | **Outcome-trained bandit** | **Fixed session 6.** The router now reads the bandit back via `RoutingInputs::bandit`, folded into `select_at_tier`'s candidate scoring alongside graded provider health and price. Previously write-only. |
    | **Budget threshold alerts** | **Fixed session 6.** `workers/budget_alerts::run` sweeps every org on an interval and delivers exactly one alert per threshold crossing per period (a "last alerted" watermark), spawned from `main.rs`. |
    | **TOTP two-factor auth** | **Fixed session 6.** Repo layer, enroll/confirm/disable endpoints, a new per-user HKDF key namespace, and a real login-time check all added — proven end to end by `totp_protects_login_end_to_end`. |
@@ -640,6 +650,20 @@ tests. Full detail in the Session Log below and the audit artifact.
 ---
 
 ## Next Steps (in order)
+
+**Added by session 15's competitive-research follow-up, ahead of everything else below —
+this is unfinished work from the user's actual last request, not new work:** write and
+present the honest Aegis-vs-competitor comparison (LiteLLM, LangChain, Redis Iris/LangCache,
+Red Hat LLM Semantic Router) the user explicitly asked for when they pasted the research
+document. The code-side investigation this request triggered is done (domain routing
+confirmed real and now tested; semantic caching confirmed real and now reachable given
+operator opt-in — see the session 15 log entry's final paragraphs) but the comparison
+itself was never written up. Ground it in what's actually verified in this codebase, and be
+honest about the two real gaps found while researching: no RAG-style selective context
+retrieval (Redis Iris's Context Retriever has no Aegis equivalent), and no lossy
+summarization option (LangChain's Summarization Middleware) — the latter needs an eval
+harness + ADR before building, per IG-1's own "do not do" list, so flag it as a considered
+next step rather than rushing it in.
 
 **Added by session 14, ahead of the existing list below because it is now the newest code
 nothing has verified against real infrastructure:** once Docker works (item 2 below),
@@ -1093,6 +1117,52 @@ savings auditing; the citation was a specific-sounding claim that didn't mean an
 things an agent can obtain; Docker on this machine and a deployed instance for the load
 test both need infrastructure access this environment does not have. None of the four
 attempted here needed the user first — the other two genuinely do.
+
+**Later still: the user pasted a competitive-research document** comparing Aegis against
+LiteLLM (embedding-based/complexity routers, Redis/Qdrant semantic caching, payload
+truncation), LangChain (lossy Summarization Middleware at ~80% context, LangGraph semantic
+routing), Redis Iris/LangCache (RedisVL semantic router, LangCache claiming 73% cost
+reduction, a selective-history Context Retriever), and Red Hat's LLM Semantic Router
+(domain routing to a specialized model pool, semantic caching, PII-redaction prompt
+guards) — and asked for an honest comparison, then to close gaps and get a genuine upper
+hand, "whatever you do."
+
+Investigated the routing side first and corrected an initial wrong assumption: task-
+domain-aware routing (routing a request to a provider strong on its detected domain — code,
+reasoning, language) looked like a plausible gap against LiteLLM/Red Hat, but grepping
+`TaskDomain`/`detect_domain`/`preferred_providers`/`select_at_tier` found it was already
+fully built — a 25%-price-band soft re-rank, wired end to end — just with **zero test
+coverage**, so nobody could tell it actually worked versus merely compiling. Added 5
+classifier tests (`Code`/`Reasoning`/`Language`/`General` detection, plus the deliberate
+code-wins-over-reasoning-vocabulary tie-break) and 1 router test proving a detected domain
+actually reaches the customer-facing explanation string. Writing that router test surfaced
+a real, separate, previously-undocumented behaviour: a `Complex`-classified request never
+reaches `select_at_tier` at all (`target_tier` returns `None` for Complex unconditionally,
+by design — the quality guarantee), so the domain-preference explanation line can only ever
+be observed on a Medium or Simple request. Not a bug — the quality guarantee is intentional
+and correct — but a real gap between what the test author (this agent, mid-session) assumed
+and what the code actually does; documented on the new `reasoning_domain_medium_request()`
+test helper in `router.rs` rather than left implicit.
+
+Then closed the semantic-cache reachability gap flagged but not yet fixed by the checklist
+triage above: `semantic_lookup_worth_it()` in `openai_compat.rs` replaces the `is_local()`-
+only gate with a local-always/remote-opt-in-past-Simple-complexity rule (new config,
+`AEGIS_SEMANTIC_CACHE_ALLOW_REMOTE_EMBEDDING`, `false` by default so an unconfigured
+deployment's behaviour is unchanged). Full detail in the "Known Limitations" table's
+Semantic cache row. 4 new unit tests on the function directly. 897 lib tests passing (was
+887), fmt/clippy clean. Commit `9d4c691`.
+
+**Not yet done, and the actual point of the request:** the honest side-by-side comparison
+itself (Aegis vs. LiteLLM/LangChain/Redis Iris/Red Hat on routing, caching, and context
+compression) has not yet been written up and presented to the user — this session went
+straight to code investigation. **Next agent (or this one, next turn): write and present
+that comparison before doing anything else**, grounded in what's genuinely verified now
+(domain routing: real and now tested; semantic caching: real, tested, and now reachable
+given operator opt-in) and honest about the remaining real gaps — no RAG-style selective
+context retrieval like Redis Iris's Context Retriever, no lossy summarization option like
+LangChain's Summarization Middleware (deliberately not built without an eval harness + ADR,
+per the IG-1 guide's own "do not do" list — flag as a considered next step, not a rushed
+addition).
 
 ### 2026-09-06 — Session 14 — Claude Sonnet 5
 
