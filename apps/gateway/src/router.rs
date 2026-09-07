@@ -72,7 +72,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/org/teams",
             get(management::list_teams).post(management::create_team),
         )
-        .route("/api/org/teams/{id}", delete(management::delete_team))
+        .route(
+            "/api/org/teams/{id}",
+            patch(management::update_team).delete(management::delete_team),
+        )
         // A project (team) lead's or org admin's view of one project's spend — org owner
         // or admin may reach any team, a team lead only their own, everyone else 404s.
         // See `management::assert_project_access`.
@@ -123,6 +126,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/usage/summary", get(management::usage_summary))
         // A member's own attributed spend — every request made with a key issued to them.
         .route("/api/me/usage", get(management::my_usage))
+        .route(
+            "/api/me/onboarding-complete",
+            post(management::complete_onboarding),
+        )
         .route("/api/requests", get(management::list_requests))
         .route(
             "/api/savings/report.csv",

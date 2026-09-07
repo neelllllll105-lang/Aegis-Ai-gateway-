@@ -76,6 +76,10 @@ fn advertised_routes() -> Vec<(&'static str, &'static str)> {
         ("GET", "/api/org/teams"),
         ("POST", "/api/org/teams"),
         (
+            "PATCH",
+            "/api/org/teams/00000000-0000-0000-0000-000000000000",
+        ),
+        (
             "DELETE",
             "/api/org/teams/00000000-0000-0000-0000-000000000000",
         ),
@@ -115,6 +119,7 @@ fn advertised_routes() -> Vec<(&'static str, &'static str)> {
         ("GET", "/api/usage/chargeback"),
         ("GET", "/api/usage/chargeback.csv"),
         ("GET", "/api/requests"),
+        ("POST", "/api/me/onboarding-complete"),
         ("GET", "/api/savings/report.csv"),
         ("GET", "/api/audit-log.jsonl"),
         // Billing.

@@ -372,9 +372,11 @@ async fn owner_session_headers(
 }
 
 /// The actual exploit chain from the enterprise readiness audit, run against the real
-/// handler with a real database: a freshly signed-up organisation — the same access any
-/// free-tier signup gets automatically, no plan gate, no review — attempts to register a
-/// BYOK "custom provider" pointed at the cloud metadata service. Before
+/// handler with a real database: an organisation on a plan that actually has BYOK — the
+/// SSRF guard's job is to reject a malicious `base_url` regardless of who is asking, so
+/// this deliberately uses a Pro-plan fixture to isolate that specific guard rather than
+/// the separate plan-restriction check that now runs first (see
+/// `a_free_plan_org_is_blocked_before_the_ssrf_check_ever_runs` below for that one). Before
 /// `middleware::ssrf_guard` existed, this call succeeded and the credential was stored;
 /// the very next step in the demonstrated chain (`POST /api/providers/{id}/test`) would
 /// then have made the gateway itself issue a server-side request against it.
@@ -390,6 +392,9 @@ async fn a_freshly_signed_up_org_cannot_register_a_provider_pointed_at_cloud_met
     };
 
     let fixture = create_org(&pool, "ssrf-attacker").await;
+    repo::update_org_plan(&pool, fixture.org_id, "pro", 2_000)
+        .await
+        .expect("plan upgrade");
     let headers = owner_session_headers(&pool, &fixture).await;
 
     let request = management::CreateCredentialRequest {
@@ -435,6 +440,9 @@ async fn a_legitimate_custom_endpoint_is_still_accepted() {
     };
 
     let fixture = create_org(&pool, "ssrf-legitimate").await;
+    repo::update_org_plan(&pool, fixture.org_id, "pro", 2_000)
+        .await
+        .expect("plan upgrade");
     let headers = owner_session_headers(&pool, &fixture).await;
 
     let request = management::CreateCredentialRequest {
@@ -451,6 +459,310 @@ async fn a_legitimate_custom_endpoint_is_still_accepted() {
         response.status(),
         axum::http::StatusCode::CREATED,
         "a genuine public endpoint must not be rejected by the SSRF guard"
+    );
+
+    cleanup(&pool, &fixture).await;
+}
+
+// -----------------------------------------------------------------------------
+// Plan-gated management writes — `billing::features`, enforced server-side.
+//
+// Before this, hiding a page in the dashboard was the *only* restriction on a Free-plan
+// org's access to Pro/Team features: nothing on the backend checked plan, so a direct API
+// call reached every one of these handlers regardless of what the caller was paying for.
+// -----------------------------------------------------------------------------
+
+/// A brand-new signup — Free plan, the default `common::create_org` gives every fixture —
+/// is blocked from registering a BYOK credential at all, and blocked *before* the SSRF
+/// guard even runs: the plan check is the very first thing after role authorisation, so an
+/// attacker on a plan with no BYOK never reaches the URL-validation code path in the first
+/// place. That URL is otherwise identical to the malicious one two tests above use, so a
+/// CREATED here (or a BAD_REQUEST from the SSRF guard instead of a plan_restricted 403)
+/// would mean the ordering regressed, not just the plan gate.
+#[tokio::test]
+async fn a_free_plan_org_is_blocked_before_the_ssrf_check_ever_runs() {
+    use aegis_gateway::routes::management;
+    use axum::extract::{Json, State};
+
+    let Some((state, pool)) = setup().await else {
+        return skip("a_free_plan_org_is_blocked_before_the_ssrf_check_ever_runs");
+    };
+
+    let fixture = create_org(&pool, "free-byok-attempt").await;
+    let headers = owner_session_headers(&pool, &fixture).await;
+
+    let request = management::CreateCredentialRequest {
+        provider: "custom".to_string(),
+        api_key: "irrelevant-for-this-test".to_string(),
+        base_url: Some(
+            "http://169.254.169.254/latest/meta-data/iam/security-credentials/".to_string(),
+        ),
+        label: None,
+        is_default: Some(true),
+    };
+
+    let response = management::create_provider(State(state), headers, Json(request)).await;
+
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::FORBIDDEN,
+        "a Free-plan org must be rejected for the plan, not reach the SSRF guard at all"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["error"]["type"], "plan_restricted");
+    assert!(json["error"]["upgrade_url"].is_string());
+
+    let stored = repo::list_credentials(&pool, fixture.org_id)
+        .await
+        .expect("query");
+    assert!(stored.is_empty());
+
+    cleanup(&pool, &fixture).await;
+}
+
+/// The same restriction, proven against `create_team` instead of `create_provider` — a
+/// different gated feature (`TeamManagement`, Team plan, not `Byok`/Pro), and a different
+/// handler, so this is not just re-testing the same guard twice under a new name.
+#[tokio::test]
+async fn a_free_plan_org_cannot_create_a_team() {
+    use aegis_gateway::routes::management;
+    use axum::extract::{Json, State};
+
+    let Some((state, pool)) = setup().await else {
+        return skip("a_free_plan_org_cannot_create_a_team");
+    };
+
+    let fixture = create_org(&pool, "free-team-attempt").await;
+    let headers = owner_session_headers(&pool, &fixture).await;
+
+    let request = management::CreateTeamRequest {
+        name: "shadow-project".to_string(),
+        monthly_budget_mc: None,
+        default_routing_mode: None,
+    };
+    let response =
+        management::create_team(State(state.clone()), headers.clone(), Json(request)).await;
+    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["error"]["type"], "plan_restricted");
+
+    // And once upgraded to Team, the identical request succeeds — proving this is a plan
+    // check, not a role or validation problem that happened to also return 403.
+    repo::update_org_plan(&pool, fixture.org_id, "team", 1_500)
+        .await
+        .expect("plan upgrade");
+    let request = management::CreateTeamRequest {
+        name: "shadow-project".to_string(),
+        monthly_budget_mc: None,
+        default_routing_mode: None,
+    };
+    let response = management::create_team(State(state), headers, Json(request)).await;
+    assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+
+    cleanup(&pool, &fixture).await;
+}
+
+// -----------------------------------------------------------------------------
+// Project (team) rename — `repo::update_team`.
+// -----------------------------------------------------------------------------
+
+/// A project's usage figures are keyed by `team_id`, never by name (confirmed by reading
+/// `usage_summary_for_team`'s own `WHERE` clause) — renaming it must not touch a single row
+/// in `usage_records`. This is the concrete proof behind that claim, not just a reading of
+/// the query.
+#[tokio::test]
+async fn renaming_a_project_does_not_disturb_its_usage_history() {
+    use aegis_gateway::metering::savings::SavingsBreakdown;
+    use aegis_gateway::metering::usage::UsageEvent;
+    use aegis_gateway::money::MicroCents;
+    use aegis_gateway::types::{CacheOutcome, RoutingReason, TokenUsage};
+    use chrono::{Duration, Utc};
+
+    let Some((_, pool)) = setup().await else {
+        return skip("renaming_a_project_does_not_disturb_its_usage_history");
+    };
+
+    let fixture = create_org(&pool, "rename-analytics").await;
+    let team = repo::create_team(&pool, fixture.org_id, "genesis", None, None)
+        .await
+        .expect("team creation");
+
+    let event = UsageEvent::new(
+        uuid::Uuid::new_v4(),
+        fixture.org_id,
+        None,
+        Some(team.id),
+        "gpt-4o".into(),
+        "gpt-4o-mini".into(),
+        "openai".into(),
+        TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            estimated: false,
+            ..Default::default()
+        },
+        SavingsBreakdown::compute(MicroCents(7_500), MicroCents(450), 2_000),
+        200,
+        0.4,
+        CacheOutcome::Miss,
+        RoutingReason::Complexity,
+        Some(0.2),
+        200,
+    );
+    repo::insert_usage_record(&pool, &event)
+        .await
+        .expect("insert");
+
+    let from = Utc::now() - Duration::hours(1);
+    let to = Utc::now() + Duration::hours(1);
+    let before = repo::usage_summary_for_team(&pool, fixture.org_id, team.id, from, to)
+        .await
+        .expect("query");
+    assert_eq!(before.requests, 1);
+
+    let renamed = repo::update_team(&pool, fixture.org_id, team.id, "renamed-project")
+        .await
+        .expect("query")
+        .expect("team exists");
+    assert_eq!(
+        renamed.id, team.id,
+        "renaming must not change the project's identity"
+    );
+    assert_eq!(renamed.name, "renamed-project");
+
+    let after = repo::usage_summary_for_team(&pool, fixture.org_id, team.id, from, to)
+        .await
+        .expect("query");
+    assert_eq!(after.requests, before.requests, "requests");
+    assert_eq!(
+        after.baseline_cost_mc, before.baseline_cost_mc,
+        "baseline_cost_mc"
+    );
+    assert_eq!(
+        after.actual_cost_mc, before.actual_cost_mc,
+        "actual_cost_mc"
+    );
+    assert_eq!(
+        after.gross_savings_mc, before.gross_savings_mc,
+        "gross_savings_mc"
+    );
+
+    cleanup(&pool, &fixture).await;
+}
+
+/// The table's real `UNIQUE (org_id, name)` constraint must surface as a clean, expected
+/// error a client can act on, not a raw database error.
+#[tokio::test]
+async fn renaming_a_project_to_a_name_already_taken_is_a_clean_conflict_not_a_500() {
+    let Some((_, pool)) = setup().await else {
+        return skip("renaming_a_project_to_a_name_already_taken_is_a_clean_conflict_not_a_500");
+    };
+
+    let fixture = create_org(&pool, "rename-conflict").await;
+    repo::create_team(&pool, fixture.org_id, "alpha", None, None)
+        .await
+        .expect("team creation");
+    let bravo = repo::create_team(&pool, fixture.org_id, "bravo", None, None)
+        .await
+        .expect("team creation");
+
+    match repo::update_team(&pool, fixture.org_id, bravo.id, "alpha").await {
+        Err(aegis_gateway::error::AegisError::BadRequest(msg)) => {
+            assert!(msg.contains("already exists"), "{msg}");
+        }
+        other => panic!("expected a clean BadRequest conflict, got {other:?}"),
+    }
+
+    cleanup(&pool, &fixture).await;
+}
+
+// -----------------------------------------------------------------------------
+// Request log, filterable by project — `repo::list_requests`'s new `team_id` parameter.
+// -----------------------------------------------------------------------------
+
+/// Two projects in the same org, one request each: filtering by a project's id returns
+/// only that project's row, and no filter still returns both — this is an org-wide log
+/// narrowed by an optional filter, not two different code paths that could disagree.
+#[tokio::test]
+async fn the_request_log_can_be_narrowed_to_one_project() {
+    use aegis_gateway::metering::savings::SavingsBreakdown;
+    use aegis_gateway::metering::usage::UsageEvent;
+    use aegis_gateway::money::MicroCents;
+    use aegis_gateway::types::{CacheOutcome, RoutingReason, TokenUsage};
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+
+    let Some((_, pool)) = setup().await else {
+        return skip("the_request_log_can_be_narrowed_to_one_project");
+    };
+
+    let fixture = create_org(&pool, "request-log-by-project").await;
+    let alpha = repo::create_team(&pool, fixture.org_id, "alpha", None, None)
+        .await
+        .expect("team creation");
+    let bravo = repo::create_team(&pool, fixture.org_id, "bravo", None, None)
+        .await
+        .expect("team creation");
+
+    let make_event = |team_id: Uuid| {
+        UsageEvent::new(
+            uuid::Uuid::new_v4(),
+            fixture.org_id,
+            None,
+            Some(team_id),
+            "gpt-4o".into(),
+            "gpt-4o-mini".into(),
+            "openai".into(),
+            TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                estimated: false,
+                ..Default::default()
+            },
+            SavingsBreakdown::compute(MicroCents(750), MicroCents(45), 2_000),
+            120,
+            0.3,
+            CacheOutcome::Miss,
+            RoutingReason::Complexity,
+            Some(0.1),
+            200,
+        )
+    };
+    repo::insert_usage_record(&pool, &make_event(alpha.id))
+        .await
+        .expect("insert");
+    repo::insert_usage_record(&pool, &make_event(bravo.id))
+        .await
+        .expect("insert");
+
+    let from = Utc::now() - Duration::hours(1);
+    let to = Utc::now() + Duration::hours(1);
+
+    let alpha_only = repo::list_requests(&pool, fixture.org_id, from, to, 100, 0, Some(alpha.id))
+        .await
+        .expect("query");
+    assert_eq!(alpha_only.len(), 1);
+    assert_eq!(alpha_only[0].team_id, Some(alpha.id));
+
+    let bravo_only = repo::list_requests(&pool, fixture.org_id, from, to, 100, 0, Some(bravo.id))
+        .await
+        .expect("query");
+    assert_eq!(bravo_only.len(), 1);
+    assert_eq!(bravo_only[0].team_id, Some(bravo.id));
+
+    let unfiltered = repo::list_requests(&pool, fixture.org_id, from, to, 100, 0, None)
+        .await
+        .expect("query");
+    assert_eq!(
+        unfiltered.len(),
+        2,
+        "no team_id filter must return the whole org's log, same as before this filter existed"
     );
 
     cleanup(&pool, &fixture).await;
@@ -1261,6 +1573,51 @@ async fn a_member_sees_only_their_own_keys_and_the_shared_ones() {
         .expect("admin list");
     let all_ids: Vec<uuid::Uuid> = all.iter().map(|k| k.id).collect();
     assert!(all_ids.contains(&theirs), "an admin must see every key");
+
+    cleanup(&pool, &fixture).await;
+}
+
+// -----------------------------------------------------------------------------
+// Onboarding tour completion.
+// -----------------------------------------------------------------------------
+
+/// A fresh signup has never completed onboarding; marking it complete persists (so
+/// `GET /api/auth/me` reflects it on a later request, not just the response to the call
+/// that set it) and is idempotent — replaying the tour from Settings and finishing it again
+/// must not error just because it was already marked once.
+#[tokio::test]
+async fn completing_onboarding_persists_and_is_idempotent() {
+    use aegis_gateway::routes::management;
+    use axum::extract::State;
+
+    let Some((state, pool)) = setup().await else {
+        return skip("completing_onboarding_persists_and_is_idempotent");
+    };
+
+    let fixture = create_org(&pool, "onboarding").await;
+
+    let before = repo::find_user_by_id(&pool, fixture.user_id)
+        .await
+        .expect("query")
+        .expect("user exists");
+    assert!(
+        before.onboarding_completed_at.is_none(),
+        "a fresh signup must not already be marked onboarded"
+    );
+
+    let headers = owner_session_headers(&pool, &fixture).await;
+    let response = management::complete_onboarding(State(state.clone()), headers.clone()).await;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+    let after = repo::find_user_by_id(&pool, fixture.user_id)
+        .await
+        .expect("query")
+        .expect("user exists");
+    assert!(after.onboarding_completed_at.is_some());
+
+    // Replaying the tour and finishing it again must not error.
+    let response_again = management::complete_onboarding(State(state), headers).await;
+    assert_eq!(response_again.status(), axum::http::StatusCode::OK);
 
     cleanup(&pool, &fixture).await;
 }

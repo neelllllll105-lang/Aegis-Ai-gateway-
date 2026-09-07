@@ -65,6 +65,34 @@ async fn require_reader(state: &AppState, headers: &HeaderMap) -> Result<AuthCon
     Ok(context)
 }
 
+/// Require that the calling organisation's plan includes `feature`, on top of whatever role
+/// check already ran (`require_writer`, most often — a plan restriction and a role
+/// restriction are independent: a Free-plan owner is still an owner, just not on a plan
+/// that includes this).
+///
+/// Returns `AegisError::PlanRestricted` (403, carrying an `upgrade_url`) rather than
+/// silently allowing a write the dashboard would never have shown a control for. Before
+/// this existed, nothing on the backend checked plan at all for any of the endpoints that
+/// call this — hiding the page in the UI was the only restriction, which any direct API
+/// call bypassed entirely. See `billing::features` for the plan/feature mapping.
+async fn require_plan_feature(
+    state: &AppState,
+    org_id: Uuid,
+    feature: crate::billing::features::Feature,
+) -> Result<()> {
+    let org = repo::find_org(state.db()?, org_id)
+        .await?
+        .ok_or_else(|| AegisError::NotFound("organisation not found".into()))?;
+    if crate::billing::features::plan_includes(&org.plan, feature) {
+        Ok(())
+    } else {
+        Err(AegisError::PlanRestricted {
+            feature: feature.as_str().to_string(),
+            required_plan: feature.min_plan().as_str().to_string(),
+        })
+    }
+}
+
 /// The shared guard for every project(team)-scoped endpoint.
 ///
 /// Org owner/admin may access any team in their organisation. A team **lead**
@@ -1487,6 +1515,12 @@ pub async fn create_provider(
 ) -> Response {
     match async {
         let context = require_writer(&state, &headers).await?;
+        require_plan_feature(
+            &state,
+            context.org_id,
+            crate::billing::features::Feature::Byok,
+        )
+        .await?;
         let pool = state.db()?;
 
         if state.providers.get(&request.provider).is_none() {
@@ -1782,6 +1816,12 @@ pub async fn create_policy(
 ) -> Response {
     match async {
         let context = require_writer(&state, &headers).await?;
+        require_plan_feature(
+            &state,
+            context.org_id,
+            crate::billing::features::Feature::Policies,
+        )
+        .await?;
         let pool = state.db()?;
 
         // Validate before storing. A policy that fails to parse degrades silently to
@@ -1898,6 +1938,12 @@ pub async fn create_team(
 ) -> Response {
     match async {
         let context = require_writer(&state, &headers).await?;
+        require_plan_feature(
+            &state,
+            context.org_id,
+            crate::billing::features::Feature::TeamManagement,
+        )
+        .await?;
         let default_routing_mode = request
             .default_routing_mode
             .as_deref()
@@ -1921,6 +1967,51 @@ pub async fn create_team(
         )
         .await;
         Ok::<_, AegisError>(respond(StatusCode::CREATED, team))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTeamRequest {
+    pub name: String,
+}
+
+/// `PATCH /api/org/teams/:id` — rename a project. This is the only field a project's
+/// identity has that changes independently of its usage: `usage_summary_for_team` and
+/// `project_usage` are both keyed by `team_id`, never by name, so a rename touches zero
+/// rows in `usage_records` — the dashboard's analytics for this project keep working under
+/// the new label the instant it re-fetches the team list.
+pub async fn update_team(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(team_id): Path<Uuid>,
+    Json(request): Json<UpdateTeamRequest>,
+) -> Response {
+    match async {
+        let context = require_writer(&state, &headers).await?;
+        let name = request.name.trim();
+        if name.is_empty() {
+            return Err(AegisError::BadRequest(
+                "a project name must not be empty".into(),
+            ));
+        }
+        let team = repo::update_team(state.db()?, context.org_id, team_id, name)
+            .await?
+            .ok_or_else(|| AegisError::NotFound("team not found".into()))?;
+        audit(
+            &state,
+            &context,
+            "team.renamed",
+            "team",
+            Some(team.id),
+            Some(serde_json::json!({"name": team.name})),
+        )
+        .await;
+        Ok::<_, AegisError>(respond(StatusCode::OK, team))
     }
     .await
     {
@@ -2145,6 +2236,12 @@ pub async fn create_budget(
 ) -> Response {
     match async {
         let context = require_writer(&state, &headers).await?;
+        require_plan_feature(
+            &state,
+            context.org_id,
+            crate::billing::features::Feature::Budgets,
+        )
+        .await?;
         if request.limit_mc < 0 {
             return Err(AegisError::BadRequest("limit must not be negative".into()));
         }
@@ -2287,6 +2384,11 @@ pub struct RangeQuery {
     pub limit: Option<i64>,
     #[serde(default)]
     pub offset: Option<i64>,
+    /// Narrow to one project. Only `list_requests`/`savings_report_csv` read this today;
+    /// every other `RangeQuery` consumer simply ignores it, same as they already ignore
+    /// `limit`/`offset` when it doesn't apply to them.
+    #[serde(default)]
+    pub team_id: Option<Uuid>,
 }
 
 impl RangeQuery {
@@ -2438,6 +2540,32 @@ pub async fn my_usage(
     }
 }
 
+/// `POST /api/me/onboarding-complete` — marks the calling person's dashboard onboarding
+/// tour as seen, so `GET /api/auth/me`'s `onboarding_completed_at` stops being `null` and
+/// the tour does not auto-show again. Self-scoped only: any authenticated person may mark
+/// their own record, and there is no path to mark anyone else's — same reasoning as
+/// `my_usage` just above.
+pub async fn complete_onboarding(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match async {
+        let context = require_reader(&state, &headers).await?;
+        let Some(user_id) = context.user_id else {
+            return Err(AegisError::BadRequest(
+                "this credential is not assigned to a person".into(),
+            ));
+        };
+        repo::mark_onboarding_complete(state.db()?, user_id).await?;
+        Ok::<_, AegisError>(respond(
+            StatusCode::OK,
+            serde_json::json!({"onboarding_completed": true}),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
 /// `GET /api/requests` — the metadata log. Never includes prompt or response content.
 pub async fn list_requests(
     State(state): State<AppState>,
@@ -2454,6 +2582,7 @@ pub async fn list_requests(
             end,
             range.limit.unwrap_or(100),
             range.offset.unwrap_or(0),
+            range.team_id,
         )
         .await?;
         Ok::<_, AegisError>(respond(
@@ -2477,9 +2606,16 @@ pub async fn savings_report_csv(
     match async {
         let context = require_reader(&state, &headers).await?;
         let (start, end) = range.resolve();
-        let rows =
-            repo::list_requests(state.analytics_db()?, context.org_id, start, end, 10_000, 0)
-                .await?;
+        let rows = repo::list_requests(
+            state.analytics_db()?,
+            context.org_id,
+            start,
+            end,
+            10_000,
+            0,
+            range.team_id,
+        )
+        .await?;
 
         let mut csv = String::from(
             "request_id,timestamp,requested_model,served_model,provider,input_tokens,\
@@ -2608,6 +2744,20 @@ pub async fn billing_plan(State(state): State<AppState>, headers: HeaderMap) -> 
             .await?
             .ok_or_else(|| AegisError::NotFound("organisation not found".into()))?;
 
+        // Every dashboard nav item and gated page reads this, not a hardcoded plan string
+        // of its own — see `billing::features` for the mapping and the write-endpoint
+        // guards (`require_plan_feature`) that enforce the same thing server-side.
+        let features: std::collections::HashMap<&'static str, bool> =
+            crate::billing::features::Feature::ALL
+                .into_iter()
+                .map(|f| {
+                    (
+                        f.as_str(),
+                        crate::billing::features::plan_includes(&org.plan, f),
+                    )
+                })
+                .collect();
+
         Ok::<_, AegisError>(respond(
             StatusCode::OK,
             serde_json::json!({
@@ -2622,8 +2772,9 @@ pub async fn billing_plan(State(state): State<AppState>, headers: HeaderMap) -> 
                     } else {
                         None
                     },
-                    "byok": org.plan != "free",
-                }
+                    "byok": features[crate::billing::features::Feature::Byok.as_str()],
+                },
+                "features": features,
             }),
         ))
     }
@@ -3380,6 +3531,7 @@ mod tests {
             end: None,
             limit: None,
             offset: None,
+            team_id: None,
         };
         let (start, end) = range.resolve();
         let span = end - start;
@@ -3395,6 +3547,7 @@ mod tests {
             end: Some(end),
             limit: None,
             offset: None,
+            team_id: None,
         };
         let (resolved_start, resolved_end) = range.resolve();
         assert_eq!(resolved_start, start);

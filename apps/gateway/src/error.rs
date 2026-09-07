@@ -69,6 +69,16 @@ pub enum AegisError {
     #[error("{0}")]
     ModelNotAllowed(String),
 
+    /// A management-API write the caller is otherwise authorised for (by role) is gated
+    /// behind a plan this organisation is not on. Distinct from `Forbidden`: a role problem
+    /// is fixed by asking someone else to do it; a plan problem is fixed by upgrading, which
+    /// is exactly what `upgrade_url` on the response points at.
+    #[error("{feature} requires the {required_plan} plan or higher")]
+    PlanRestricted {
+        feature: String,
+        required_plan: String,
+    },
+
     /// Payload exceeded the size cap.
     #[error("request body too large")]
     PayloadTooLarge,
@@ -146,6 +156,7 @@ impl AegisError {
             AegisError::RateLimited { .. } => "rate_limit_exceeded",
             AegisError::BudgetExceeded { .. } => "budget_exceeded",
             AegisError::ModelNotAllowed(_) => "model_not_allowed",
+            AegisError::PlanRestricted { .. } => "plan_restricted",
             AegisError::PayloadTooLarge => "payload_too_large",
             AegisError::TotpRequired => "totp_required",
             AegisError::Provider { .. } => "provider_error",
@@ -170,6 +181,7 @@ impl AegisError {
             AegisError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             AegisError::BudgetExceeded { .. } => StatusCode::PAYMENT_REQUIRED,
             AegisError::ModelNotAllowed(_) => StatusCode::FORBIDDEN,
+            AegisError::PlanRestricted { .. } => StatusCode::FORBIDDEN,
             AegisError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             // 401, same as a wrong password: this must not distinguish "right password,
             // wrong/missing code" from "wrong password" by status code alone, or the
@@ -231,6 +243,13 @@ impl AegisError {
                 message.push_str(" Raise the budget or upgrade your plan to continue.");
                 message
             }
+            AegisError::PlanRestricted {
+                feature,
+                required_plan,
+            } => format!(
+                "{feature} requires the {required_plan} plan or higher. Upgrade to unlock \
+                 it — nothing about your current usage or data changes until you do."
+            ),
             other => other.to_string(),
         }
     }
@@ -290,8 +309,11 @@ impl IntoResponse for AegisError {
             tracing::warn!(error.type = self.error_type(), error.detail = %self, "request rejected");
         }
 
-        let upgrade_url = matches!(self, AegisError::BudgetExceeded { .. })
-            .then(|| "https://app.aegis.dev/billing".to_string());
+        let upgrade_url = matches!(
+            self,
+            AegisError::BudgetExceeded { .. } | AegisError::PlanRestricted { .. }
+        )
+        .then(|| "https://app.aegis.dev/billing".to_string());
         let also_exceeded = match &self {
             AegisError::BudgetExceeded { also_exceeded, .. } => also_exceeded.clone(),
             _ => Vec::new(),
@@ -466,6 +488,37 @@ mod tests {
 
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    }
+
+    #[test]
+    fn plan_restricted_is_a_403_naming_the_feature_and_the_plan_that_unlocks_it() {
+        let err = AegisError::PlanRestricted {
+            feature: "budgets".to_string(),
+            required_plan: "team".to_string(),
+        };
+        assert_eq!(err.error_type(), "plan_restricted");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        let msg = err.client_message();
+        assert!(msg.contains("budgets"), "{msg}");
+        assert!(msg.contains("team"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn plan_restricted_carries_an_upgrade_url_same_as_budget_exceeded() {
+        let err = AegisError::PlanRestricted {
+            feature: "byok".to_string(),
+            required_plan: "pro".to_string(),
+        };
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["error"]["upgrade_url"],
+            "https://app.aegis.dev/billing"
+        );
     }
 
     #[test]
