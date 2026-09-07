@@ -102,7 +102,34 @@ Detail with per-criterion evidence: `docs/PHASES.md`. Machine-readable: `.aegis/
 
 ## Current Focus
 
-**Session 15 (2026-09-07), latest: the user pasted competitive research on LiteLLM/
+**Session 15 (2026-09-07), newest: the user asked for the dashboard to actually look
+different per plan (Free/Pro/Team/Enterprise), a quick onboarding walkthrough for Team/
+Enterprise admins, project renaming with analytics that follow the new name, and request
+logs filterable by project.** Entered plan mode, researched the codebase (confirmed: zero
+plan-based gating existed anywhere, backend or frontend; `teams` had create+delete but no
+rename; `list_requests` was org-wide only), got the user's sign-off on a concrete page-to-
+plan mapping and on adding server-side enforcement (not just hiding pages), then built all
+four. Backend: new `billing::features` module (`PlanTier`/`Feature`, single source of truth
+for `GET /api/billing/plan` and 5 write guards — `create_provider`/`create_budget`/
+`create_policy`/`create_team`/`invite_member`), new `AegisError::PlanRestricted`,
+`PATCH /api/org/teams/{id}` (rename, proven not to touch `usage_records`), `list_requests`
+gains an optional `team_id` filter, migration 0013 (`users.onboarding_completed_at`) +
+`POST /api/me/onboarding-complete`. 909 lib tests (was 897), full suite green, fmt/clippy
+clean. Frontend: `auth-context.tsx` gains `planFeatures`, `shell.tsx`'s nav filters against
+it, a new `UpgradeRequired` component gates the 5 pages directly, a new hand-built
+`onboarding-tour.tsx` (no tour library exists in this app) auto-triggers for Team/Enterprise
+owner/admin and replays from Settings, `team/page.tsx` gets this app's first inline-rename
+UI, `requests/page.tsx` gets a project filter. **Verified live in a real browser** against a
+throwaway local mock of the management API (no Docker here, so this substitutes for the
+real gateway) — nav genuinely changes between a Free and a Team mock session, the tour
+renders and correctly shows 6 of 7 steps on Team plan, `/providers` under Free shows the
+upgrade card with working navigation, and renaming a project in the browser left its spend/
+savings/cache-hit-rate figures untouched while the new name propagated to the Requests
+page's filter. Full detail in the Session Log entry dated 2026-09-07 (this is a third
+addition to that same day's entry — see the two paragraphs above this one for what came
+immediately before).
+
+**Session 15 (2026-09-07), earlier: the user pasted competitive research on LiteLLM/
 LangChain/Redis Iris/Red Hat and asked for an honest comparison plus gap-closing.** Domain-
 aware routing turned out to already exist (now tested, 6 new tests); semantic caching's
 `is_local()`-only gate — the reason it had never fired outside a unit test — is now
@@ -230,6 +257,28 @@ before building it.
 ---
 
 ## What Actually Works — Verified
+
+**As of session 15's final commit (2026-09-07):** `cargo test --lib` → **909 passing, 0
+failing, 0 ignored**. Full `cargo test` (lib + every integration binary) → **974 passing**.
+`clippy --all-targets -D warnings` clean. `cargo fmt --check` clean. Dashboard: `tsc
+--noEmit`, `eslint . && check-design-tokens.mjs` clean, `next build` produces 24 static
+routes with no errors. (The two paragraphs below are session 6/7's own numbers, left as
+historical record rather than silently overwritten — see the Session Log for what changed
+between then and now.)
+
+**New this session, verified live in a real browser** (a throwaway local mock of the
+management API stood in for the real gateway — Docker is still unavailable here): plan-
+gated navigation genuinely adds/removes sidebar items switching a mock session between
+Free and Team plans; a direct visit to a gated page under Free plan renders the
+`UpgradeRequired` card with a working "View plans" link to `/billing`; the onboarding tour
+renders, its Back/Next/Skip mechanics work, and it correctly shows 6 of its 7 steps for a
+Team-plan account (skipping the Enterprise-only step); renaming a project in `/team`'s
+Manage panel updates the table and panel header immediately while `THIS PROJECT SPENT`/
+`SAVED`/cache-hit-rate stay byte-identical, and the new name shows up in `/requests`'
+project filter afterward. Backend-side, this is additionally proven by real integration
+tests against a database (`tests/auth_and_billing.rs`): a Free-plan org is blocked with
+`plan_restricted` (403) *before* the SSRF guard on `create_provider` even runs, and the
+identical `create_team` request that gets refused on Free succeeds once upgraded to Team.
 
 `cargo test --lib` → **774 passing, 0 failing, 0 ignored** (the session-5 budget-race
 `#[ignore]`d proof no longer exists as a documented-bypass — it was replaced by a passing
@@ -651,19 +700,25 @@ tests. Full detail in the Session Log below and the audit artifact.
 
 ## Next Steps (in order)
 
-**Added by session 15's competitive-research follow-up, ahead of everything else below —
-this is unfinished work from the user's actual last request, not new work:** write and
-present the honest Aegis-vs-competitor comparison (LiteLLM, LangChain, Redis Iris/LangCache,
-Red Hat LLM Semantic Router) the user explicitly asked for when they pasted the research
-document. The code-side investigation this request triggered is done (domain routing
-confirmed real and now tested; semantic caching confirmed real and now reachable given
-operator opt-in — see the session 15 log entry's final paragraphs) but the comparison
-itself was never written up. Ground it in what's actually verified in this codebase, and be
-honest about the two real gaps found while researching: no RAG-style selective context
-retrieval (Redis Iris's Context Retriever has no Aegis equivalent), and no lossy
-summarization option (LangChain's Summarization Middleware) — the latter needs an eval
-harness + ADR before building, per IG-1's own "do not do" list, so flag it as a considered
-next step rather than rushing it in.
+**Added by session 15's newest work (plan-gated dashboard), ahead of everything below:**
+1. **Visually verify against the real gateway, not just the local mock**, once Docker
+   works — the mock's JSON shapes were hand-typed to match `lib/api.ts`'s TypeScript
+   interfaces, which is good evidence but not the same claim as a real `GET
+   /api/billing/plan` response.
+2. **Decide whether Free/Pro should keep a single-seat cap enforced somewhere concrete**,
+   or whether `team_management` gating `invite_member` is sufficient — right now a Free/Pro
+   org's *owner* is simply the only person who can ever be a member, with no explicit
+   "upgrade to add teammates" prompt anywhere except the now-hidden `/team` page itself.
+   Worth a dedicated empty-state or CTA on `/settings` if this comes up in practice.
+3. **The `"api"` plan** (`billing::stripe::is_valid_plan` sells it, but it has no place in
+   `MASTER_BUILD.md`'s 4-tier table) currently falls to `PlanTier::Free` in
+   `billing::features::PlanTier::parse` — confirm that's actually the intended behaviour
+   for whatever this plan is for, rather than an oversight.
+
+(Resolved since it was last listed here: the honest Aegis-vs-competitor comparison the user
+asked for after pasting competitive research on LiteLLM/LangChain/Redis Iris/Red Hat — this
+was written and presented in the same session, immediately before the plan-gated-dashboard
+request came in.)
 
 **Added by session 14, ahead of the existing list below because it is now the newest code
 nothing has verified against real infrastructure:** once Docker works (item 2 below),
@@ -913,6 +968,27 @@ Each of these cost real time during the build.
   optional-feature-bearing crate remains workspace-visible — the correct fix is a scoped,
   evidence-cited ignore in **`.cargo/audit.toml`** (a root-level `audit.toml` does *not*
   work; the location is load-bearing, confirmed by testing both).
+- **`cargo test`/`cargo check` on this machine can intermittently fail with `failed to
+  remove file ...\aegis-gateway.exe: Access is denied` (session 15).** Root cause not fully
+  pinned down (Windows Defender or another handle briefly holding the binary), but the fix
+  is always the same: `tasklist //FI "IMAGENAME eq aegis-gateway.exe"` finds a lingering
+  process holding the file, `taskkill //F //IM aegis-gateway.exe` clears it, retry the
+  build. Happened repeatedly across a single session's build cycle — don't assume one kill
+  fixes it for the rest of the session.
+- **On this machine, `python`/`python3` on PATH resolve to the Windows Store's App
+  Execution Alias stub first, which hangs waiting for an install prompt rather than
+  erroring** (session 15) — `which python` and any script invoked as `python ...` from the
+  Bash tool blocks until its own timeout rather than failing fast. `where python` lists
+  every candidate; the real interpreter was at
+  `C:\Users\Acer\AppData\Local\Programs\Python\Python312\python.exe` — call that full path
+  directly rather than the bare command.
+- **A throwaway local mock server used to verify frontend behaviour without a real gateway
+  needs `ThreadingHTTPServer`, not plain `http.server.HTTPServer`** (session 15) — a
+  browser opens several concurrent connections (a CORS preflight plus the real request, in
+  parallel across `Promise.all`), and the single-threaded default serialises/drops them,
+  which reads exactly like a hung API call on the frontend side and wastes time debugging
+  the wrong layer. `class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+  daemon_threads = True` fixed it immediately.
 
 ---
 
@@ -1152,17 +1228,30 @@ deployment's behaviour is unchanged). Full detail in the "Known Limitations" tab
 Semantic cache row. 4 new unit tests on the function directly. 897 lib tests passing (was
 887), fmt/clippy clean. Commit `9d4c691`.
 
-**Not yet done, and the actual point of the request:** the honest side-by-side comparison
-itself (Aegis vs. LiteLLM/LangChain/Redis Iris/Red Hat on routing, caching, and context
-compression) has not yet been written up and presented to the user — this session went
-straight to code investigation. **Next agent (or this one, next turn): write and present
-that comparison before doing anything else**, grounded in what's genuinely verified now
-(domain routing: real and now tested; semantic caching: real, tested, and now reachable
-given operator opt-in) and honest about the remaining real gaps — no RAG-style selective
-context retrieval like Redis Iris's Context Retriever, no lossy summarization option like
-LangChain's Summarization Middleware (deliberately not built without an eval harness + ADR,
-per the IG-1 guide's own "do not do" list — flag as a considered next step, not a rushed
-addition).
+**Then: the honest side-by-side comparison was written and presented** — Aegis vs.
+LiteLLM/LangChain/Redis Iris/Red Hat across smart routing, semantic caching, and context
+compression, grounded in what the code above actually proved (domain-aware routing real and
+now tested; semantic caching real, tested, and now reachable given operator opt-in;
+domain-adaptive similarity threshold flagged as a genuine differentiator no competitor's
+docs describe) and honest about the two real gaps found — no RAG-style selective context
+retrieval like Redis Iris's Context Retriever, no lossy summarization option like
+LangChain's Summarization Middleware (both deliberately not built without an eval harness +
+ADR, per the IG-1 guide's own "do not do" list).
+
+**Later the same session: the user asked for the dashboard to look different per plan, a
+walkthrough for Team/Enterprise admins, project renaming, and per-project request logs.**
+Used plan mode: explored first (confirmed zero plan-gating existed anywhere, backend or
+frontend), got the user's sign-off on a concrete page-to-plan mapping and on adding
+server-side enforcement rather than UI-only, then built and shipped all of it. Full detail
+in "Current Focus" above and commits `f1a3d31`/`e63954e`/`7f49663` — kept brief here since
+Current Focus already carries the complete account and this entry is already long. The one
+thing worth restating here: this is the first genuinely thorough **live-browser**
+verification this project has managed without Docker — a throwaway local mock of the
+management API (Python, killed and discarded at session end, never committed) stood in for
+the real gateway well enough to click through the actual rename flow, watch the nav change
+shape between plans, and step through the onboarding tour, rather than stopping at "the
+shell renders its error state without crashing" the way every prior Docker-less session's
+frontend verification had to.
 
 ### 2026-09-06 — Session 14 — Claude Sonnet 5
 
