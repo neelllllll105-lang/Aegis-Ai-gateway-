@@ -83,7 +83,7 @@ export default function HomePage() {
             Real-time sub-millisecond routing simulator
           </h2>
           <p className="mx-auto mt-1 max-w-xl text-xs sm:text-sm text-[var(--color-muted-on-desk)] font-semibold">
-            See how prompt classification, semantic cache hits, and downscaled models reduce costs down to the micro-cent.
+            See how prompt classification, exact-match cache hits, and downscaled models reduce costs down to the micro-cent.
           </p>
         </div>
         <div className="mt-4">
