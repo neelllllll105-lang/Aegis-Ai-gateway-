@@ -761,6 +761,46 @@ pub async fn update_org_plan(
     .map_err(AegisError::Database)
 }
 
+/// Record the Stripe customer created for this organisation, the first time it checks out.
+/// A no-op on every later checkout for the same org — `checkout_or_create_stripe_customer`
+/// checks first, so this only ever runs once per organisation.
+pub async fn set_stripe_customer_id(
+    pool: &PgPool,
+    org_id: Uuid,
+    stripe_customer_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE organizations SET stripe_customer_id = $2, updated_at = NOW() WHERE id = $1",
+    )
+    .bind(org_id)
+    .bind(stripe_customer_id)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(AegisError::Database)
+}
+
+/// Find the organisation a Stripe customer id belongs to.
+///
+/// The webhook handler prefers `WebhookEvent::org_reference()` (the `client_reference_id`/
+/// `metadata.aegis_org_id` set at checkout) — this is the fallback for the rarer event that
+/// carries a customer id but not the metadata, so a webhook is never silently dropped just
+/// because one of the two paths back to an organisation happened to be absent.
+pub async fn find_org_by_stripe_customer_id(
+    pool: &PgPool,
+    stripe_customer_id: &str,
+) -> Result<Option<Organization>> {
+    sqlx::query_as::<_, Organization>(
+        "SELECT id, name, slug, plan, savings_share_bp, billing_email, zero_retention,
+                content_capture, region, stripe_customer_id, created_at, default_routing_mode
+         FROM organizations WHERE stripe_customer_id = $1",
+    )
+    .bind(stripe_customer_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
 /// List members of an organisation.
 pub async fn list_members(pool: &PgPool, org_id: Uuid) -> Result<Vec<Member>> {
     sqlx::query_as::<_, Member>(

@@ -83,6 +83,12 @@ pub struct Config {
     /// Stripe secret key and webhook signing secret (Phase 4).
     pub stripe_secret_key: Option<String>,
     pub stripe_webhook_secret: Option<String>,
+    /// Stripe Price ids for the two self-serve plans. `enterprise` is deliberately absent
+    /// — that plan is sales-assisted, never a self-checkout, so there is no price to look
+    /// up here. `None` means checkout for that plan is not configured yet; the checkout
+    /// handler refuses with a clear 503 rather than calling Stripe with an empty price.
+    pub stripe_price_pro: Option<String>,
+    pub stripe_price_team: Option<String>,
 
     /// Ed25519-style HMAC secret used to sign self-hosted licenses (Phase 6).
     pub license_signing_secret: Option<String>,
@@ -178,6 +184,8 @@ impl Config {
 
             stripe_secret_key: opt("STRIPE_SECRET_KEY"),
             stripe_webhook_secret: opt("STRIPE_WEBHOOK_SECRET"),
+            stripe_price_pro: opt("STRIPE_PRICE_PRO"),
+            stripe_price_team: opt("STRIPE_PRICE_TEAM"),
 
             license_signing_secret: opt("AEGIS_LICENSE_SIGNING_SECRET"),
 
@@ -223,6 +231,8 @@ impl Config {
             email_from: "Aegis <noreply@aegis.dev>".to_string(),
             stripe_secret_key: None,
             stripe_webhook_secret: None,
+            stripe_price_pro: None,
+            stripe_price_team: None,
             license_signing_secret: Some("test-license-secret".to_string()),
             region: "test".to_string(),
             read_replica_url: None,

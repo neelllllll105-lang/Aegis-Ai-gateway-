@@ -247,6 +247,114 @@ pub fn checkout_session_body(
     ]
 }
 
+/// Stripe's own API root. A parameter, not a constant, only so a future test can point it
+/// at a local server — nothing in this codebase overrides it today.
+pub const API_BASE: &str = "https://api.stripe.com/v1";
+
+fn provider_error(status: u16, message: String) -> AegisError {
+    AegisError::Provider {
+        provider: "stripe".to_string(),
+        status,
+        message,
+    }
+}
+
+/// Extract a top-level string field from a Stripe JSON response, or turn a missing one into
+/// the same `Provider` error a malformed response gets — a field Stripe stopped sending is
+/// exactly as actionable to a caller as a field it never sent.
+fn require_str_field(body: &serde_json::Value, field: &str) -> Result<String> {
+    body.get(field)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            provider_error(
+                502,
+                format!("Stripe response had no \"{field}\" field: {body}"),
+            )
+        })
+}
+
+/// Turn a non-2xx Stripe response into a `Provider` error carrying whatever Stripe's own
+/// `error.message` says — the same "surface the upstream's own words" rule every LLM
+/// provider adapter already follows, not a generic "Stripe request failed".
+async fn stripe_error(response: reqwest::Response) -> AegisError {
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    let message = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or(body);
+    provider_error(status, message)
+}
+
+/// `POST /v1/customers` — create a Stripe customer for an organisation that has never
+/// checked out before. Called at most once per organisation; the id it returns is stored on
+/// `organizations.stripe_customer_id` and every later checkout reuses it.
+pub async fn create_customer(
+    http: &reqwest::Client,
+    secret_key: &str,
+    org_id: uuid::Uuid,
+    org_name: &str,
+    email: Option<&str>,
+) -> Result<String> {
+    let mut form = vec![
+        ("name".to_string(), org_name.to_string()),
+        ("metadata[aegis_org_id]".to_string(), org_id.to_string()),
+    ];
+    if let Some(email) = email {
+        form.push(("email".to_string(), email.to_string()));
+    }
+
+    let response = http
+        .post(format!("{API_BASE}/customers"))
+        .basic_auth(secret_key, None::<&str>)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| provider_error(502, format!("could not reach Stripe: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(stripe_error(response).await);
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| provider_error(502, format!("unparseable Stripe response: {e}")))?;
+    require_str_field(&body, "id")
+}
+
+/// `POST /v1/checkout/sessions` — start a Checkout session and return its hosted URL, which
+/// the dashboard redirects the browser to. `body` is `checkout_session_body`'s output, with
+/// `customer` appended by the caller once the organisation's Stripe customer id is known.
+pub async fn create_checkout_session(
+    http: &reqwest::Client,
+    secret_key: &str,
+    body: Vec<(String, String)>,
+) -> Result<String> {
+    let response = http
+        .post(format!("{API_BASE}/checkout/sessions"))
+        .basic_auth(secret_key, None::<&str>)
+        .form(&body)
+        .send()
+        .await
+        .map_err(|e| provider_error(502, format!("could not reach Stripe: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(stripe_error(response).await);
+    }
+
+    let parsed: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| provider_error(502, format!("unparseable Stripe response: {e}")))?;
+    require_str_field(&parsed, "url")
+}
+
 /// Build an invoice item for the savings-share fee.
 ///
 /// Stripe bills in whole cents, so the micro-cent figure is floored. Rounding up would
@@ -510,6 +618,22 @@ mod tests {
 
         assert_eq!(map.get("amount").unwrap(), "200");
         assert_eq!(map.get("currency").unwrap(), "usd");
+    }
+
+    #[test]
+    fn required_string_fields_extract_cleanly() {
+        let body = serde_json::json!({"id": "cus_abc123", "object": "customer"});
+        assert_eq!(require_str_field(&body, "id").unwrap(), "cus_abc123");
+    }
+
+    #[test]
+    fn a_missing_required_field_is_a_provider_error_not_a_panic() {
+        // A field Stripe stopped sending must surface as an ordinary 502, not a crash —
+        // this is exactly the shape a breaking API change on Stripe's side would take.
+        let body = serde_json::json!({"object": "checkout.session"});
+        let err = require_str_field(&body, "url").unwrap_err();
+        assert_eq!(err.error_type(), "provider_error");
+        assert!(format!("{err}").contains("url"));
     }
 
     #[test]

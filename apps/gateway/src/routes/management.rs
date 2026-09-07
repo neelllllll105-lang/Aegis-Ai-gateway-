@@ -2971,6 +2971,229 @@ pub async fn claim_referral(
     }
 }
 
+/// `POST /api/billing/checkout`
+#[derive(Debug, Deserialize)]
+pub struct CreateCheckoutRequest {
+    /// One of the self-serve plans. `enterprise` is sales-assisted, not sold here.
+    pub plan: String,
+}
+
+/// The two plans a checkout session can actually be started for. `enterprise` is
+/// deliberately excluded — see `Config::stripe_price_pro`/`stripe_price_team`'s own doc
+/// comment for why.
+fn stripe_price_for_plan<'a>(config: &'a crate::config::Config, plan: &str) -> Option<&'a str> {
+    match plan {
+        "pro" => config.stripe_price_pro.as_deref(),
+        "team" => config.stripe_price_team.as_deref(),
+        _ => None,
+    }
+}
+
+/// `POST /api/billing/checkout` — start a Stripe Checkout session and hand back its hosted
+/// URL for the dashboard to redirect the browser to.
+///
+/// The organisation's Stripe customer is created here, exactly once: the first checkout for
+/// an org that has never had one mints a customer and stores its id, and every later
+/// checkout (a plan change, a lapsed subscription resumed) reuses it, so an organisation
+/// never accumulates more than one Stripe customer no matter how many times it checks out.
+pub async fn create_checkout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateCheckoutRequest>,
+) -> Response {
+    match async {
+        let context = require_writer(&state, &headers).await?;
+        let pool = state.db()?;
+
+        let Some(secret_key) = state.config.stripe_secret_key.as_deref() else {
+            return Err(AegisError::ServiceUnavailable(
+                "billing is not configured on this deployment yet (STRIPE_SECRET_KEY unset)".into(),
+            ));
+        };
+        let Some(price_id) = stripe_price_for_plan(&state.config, &request.plan) else {
+            return Err(AegisError::ServiceUnavailable(format!(
+                "no Stripe price is configured for the \"{}\" plan yet",
+                request.plan
+            )));
+        };
+
+        let org = repo::find_org(pool, context.org_id)
+            .await?
+            .ok_or_else(|| AegisError::NotFound("organisation not found".into()))?;
+
+        // Reuse the existing Stripe customer if this organisation already checked out once;
+        // otherwise mint one and remember it, so it is never created twice.
+        let customer_id = match &org.stripe_customer_id {
+            Some(id) => id.clone(),
+            None => {
+                let created = crate::billing::stripe::create_customer(
+                    &state.http,
+                    secret_key,
+                    org.id,
+                    &org.name,
+                    org.billing_email.as_deref(),
+                )
+                .await?;
+                repo::set_stripe_customer_id(pool, org.id, &created).await?;
+                created
+            }
+        };
+
+        let success_url = format!("{}/billing?checkout=success", state.config.app_url);
+        let cancel_url = format!("{}/billing?checkout=cancelled", state.config.app_url);
+        let mut body = crate::billing::stripe::checkout_session_body(
+            org.id,
+            &request.plan,
+            price_id,
+            &success_url,
+            &cancel_url,
+        );
+        body.push(("customer".to_string(), customer_id));
+
+        let checkout_url =
+            crate::billing::stripe::create_checkout_session(&state.http, secret_key, body).await?;
+
+        audit(
+            &state,
+            &context,
+            "billing.checkout_started",
+            "organization",
+            Some(org.id),
+            Some(serde_json::json!({"plan": request.plan})),
+        )
+        .await;
+
+        Ok::<_, AegisError>(respond(
+            StatusCode::OK,
+            serde_json::json!({"checkout_url": checkout_url}),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `POST /api/billing/webhook` — receives events Stripe sends, never a call the dashboard
+/// or an SDK makes. Authenticated by `Stripe-Signature` alone, never a session or API key:
+/// Stripe cannot present either, and the signature is exactly as strong an authenticator as
+/// this deliberately public endpoint needs. See `billing::stripe`'s own module doc for why
+/// verification runs against the **raw** body — `axum::body::Bytes` here, never `Json<T>`,
+/// which would parse (and silently reformat) the body before the signature could be checked
+/// against the exact bytes Stripe signed.
+pub async fn stripe_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    match async {
+        let Some(webhook_secret) = state.config.stripe_webhook_secret.as_deref() else {
+            // Fails closed, same as `verify_signature` itself: an unconfigured secret must
+            // never be read as "accept everything Stripe-shaped".
+            return Err(AegisError::ServiceUnavailable(
+                "Stripe webhooks are not configured on this deployment (STRIPE_WEBHOOK_SECRET unset)"
+                    .into(),
+            ));
+        };
+        let signature = headers
+            .get("stripe-signature")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| AegisError::Unauthorized("missing Stripe-Signature header".into()))?;
+
+        let event = crate::billing::stripe::parse_webhook(
+            &body,
+            signature,
+            Some(webhook_secret),
+            Utc::now().timestamp(),
+        )?;
+
+        if !event.is_handled() {
+            // A real, verified event we simply don't act on (Stripe sends dozens of event
+            // types). 200 tells Stripe not to retry; there is nothing to retry into.
+            return Ok::<_, AegisError>(respond(
+                StatusCode::OK,
+                serde_json::json!({"handled": false}),
+            ));
+        }
+
+        let pool = state.db()?;
+
+        // `org_reference()` is set at checkout and propagates onto the subscription, so it
+        // covers every handled event type; the customer-id lookup is a fallback for the
+        // rarer shape that carries one but not the other, so a webhook is never silently
+        // dropped just because one of the two paths back to an organisation was absent.
+        let org = match event.org_reference() {
+            Some(org_id) => repo::find_org(pool, org_id).await?,
+            None => match event.customer_id() {
+                Some(customer_id) => {
+                    repo::find_org_by_stripe_customer_id(pool, &customer_id).await?
+                }
+                None => None,
+            },
+        };
+        let Some(org) = org else {
+            // A verified event this deployment has no organisation for — most likely a
+            // customer created directly in the Stripe dashboard rather than through
+            // checkout. Acknowledge it so Stripe stops retrying; there is nothing to apply
+            // it to.
+            return Ok(respond(
+                StatusCode::OK,
+                serde_json::json!({"handled": false, "reason": "no matching organisation"}),
+            ));
+        };
+
+        let change = crate::billing::stripe::plan_change_for(&event);
+        match &change {
+            crate::billing::stripe::PlanChange::Upgrade { plan } => {
+                repo::update_org_plan(pool, org.id, plan, savings_share_basis_points(plan) as i32)
+                    .await?;
+            }
+            crate::billing::stripe::PlanChange::Downgrade => {
+                repo::update_org_plan(
+                    pool,
+                    org.id,
+                    "free",
+                    savings_share_basis_points("free") as i32,
+                )
+                .await?;
+            }
+            // Stripe retries a failed payment for days; cutting the organisation off on the
+            // first failure (often just an expired card) is worse than carrying it through
+            // the retry window. Recorded in the audit log below so it is visible, not acted
+            // on automatically.
+            crate::billing::stripe::PlanChange::PaymentFailed
+            | crate::billing::stripe::PlanChange::None => {}
+        }
+
+        repo::write_audit_log(
+            pool,
+            org.id,
+            None,
+            "billing.webhook_processed",
+            "organization",
+            Some(org.id),
+            Some(serde_json::json!({
+                "event_type": event.event_type,
+                "event_id": event.id,
+                "change": format!("{change:?}"),
+            })),
+        )
+        .await
+        .ok();
+
+        Ok(respond(
+            StatusCode::OK,
+            serde_json::json!({"handled": true, "event_type": event.event_type}),
+        ))
+    }
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
 /// Expected savings-share rate for a plan, for the pricing calculator.
 pub fn expected_rate(plan: &str) -> u32 {
     savings_share_basis_points(plan)

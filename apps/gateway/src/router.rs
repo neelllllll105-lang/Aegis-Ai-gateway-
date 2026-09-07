@@ -137,6 +137,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/billing/plan", get(management::billing_plan))
         .route("/api/billing/credits", get(management::list_credits))
         .route("/api/billing/referral", post(management::claim_referral))
+        .route("/api/billing/checkout", post(management::create_checkout))
+        // Stripe calls this directly — no session cookie, no API key. Authenticated by
+        // Stripe-Signature alone, verified inside the handler itself; see its own doc
+        // comment for why that is exactly as strong an authenticator as this endpoint needs.
+        .route("/api/billing/webhook", post(management::stripe_webhook))
         .route("/api/usage/anomalies", get(management::spend_anomalies))
         .route("/api/usage/chargeback", get(management::chargeback_report))
         .route("/api/usage/chargeback.csv", get(management::chargeback_csv));
