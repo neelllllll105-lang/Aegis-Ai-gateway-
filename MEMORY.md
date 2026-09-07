@@ -102,15 +102,24 @@ Detail with per-criterion evidence: `docs/PHASES.md`. Machine-readable: `.aegis/
 
 ## Current Focus
 
-**Session 15 (2026-09-07) closed the four items session 14 itself flagged as "no good
-excuse"** — full detail in the Session Log entry dated 2026-09-07, kept here in one line:
-policy rules can now match on `user` and set `routing_mode` (and, while wiring `team`
-condition-matching through for real, found and fixed a fully-live independent bug — an
-org's policy was silently never even loaded for `/v1/messages` traffic); a 402 now names
+**Session 15 (2026-09-07), backend half: closed the four items session 14 itself flagged
+as "no good excuse"** — full detail in the Session Log entry dated 2026-09-07, kept here
+in one line: policy rules can now match on `user` and set `routing_mode` (and, while wiring
+`team` condition-matching through for real, found and fixed a fully-live independent bug —
+an org's policy was silently never even loaded for `/v1/messages` traffic); a 402 now names
 every budget scope a request breached, not just the first one found; a default routing
 mode is resolvable key → project → org, with a real write path on all three levels; and
 the per-technique compression breakdown is now persisted onto `usage_records`, not just
 returned live. 885 lib tests passing (was 871), full suite green.
+
+**Session 15, frontend half, same session: the dashboard UI gap flagged in both session 14
+and the backend half above is now closed for project-lead management, per-project/person
+usage, token budgets, the savings decomposition, and routing-mode defaults** — six pages
+(`/team`, `/budgets`, `/savings`, `/usage`, `/settings`, `/keys`), `lib/api.ts` extended to
+match. Verified by `tsc`/`next build`/`next lint` and confirmed to render without crashing
+in a real browser; **not** verified against real data — Docker/Postgres are still
+unavailable on this machine, so no page here has actually been seen populated. See the same
+Session Log entry.
 
 **Session 14 (2026-09-06) closed out a third-party implementation guide's audit** — full
 detail in the Session Log entry dated 2026-09-06, kept here in one line so this section
@@ -957,13 +966,38 @@ not re-touched).
 and pass/skip per the environment exactly as every prior session's did — Docker is still
 unavailable on this machine, nothing about that changed) all green, `cargo fmt --check`
 clean, `clippy --all-targets -D warnings` clean (both with and without `--all-features`).
-`apps/web` not touched this session — the dashboard still has no UI for anything built in
-sessions 14 or 15 (project-lead management, per-project/per-person usage views, token
-budgets, the savings decomposition, or any of today's routing-mode/policy additions); the
-API surface is real and tested, the pages are not, and that remains a deliberate,
-previously-flagged scope cut, not new to this session.
 
+**Later the same session: the dashboard UI gap called out above was closed, on request.**
+Every one of the following had a real, tested gateway API and zero frontend — the API
+surface was real, the pages were not. `lib/api.ts` extended first (new types and endpoint
+functions checked directly against the Rust structs and handlers, not guessed from memory),
+then six pages:
 
+- **`/team`** — a "Manage" panel per project: roster (add/remove a person, set lead vs.
+  member via `POST`/`GET`/`DELETE /api/org/teams/{id}/members`), that project's own spend
+  for the last 30 days (`GET /api/org/teams/{id}/usage`), and a default routing mode at
+  creation. This is the write path `team_memberships` had none of before session 14 — it
+  had a real endpoint with no way to reach it from the product until now.
+- **`/budgets`** — the scope selector gained a person option alongside org/team, and the
+  create form gained an independent token-ceiling field. Both were already enforced
+  server-side (migration 0011) and unreachable from the dashboard until now.
+- **`/savings`** — a new "where the savings came from" section decomposes the gross figure
+  into routing/compression/cache (a proportion bar plus three stat tiles), priced apart
+  server-side since earlier this session but only ever shown as one lump number.
+- **`/usage`** — a "your own usage" card scoped to the signed-in person via
+  `GET /api/me/usage`, above the existing org-wide chart.
+- **`/settings`, `/keys`** — an editable default routing mode at the org level and per key.
+  The key -> project -> org -> auto resolution chain built earlier this session had a read
+  side and no way to actually set any of it from the product.
+
+Verified: full `tsc --noEmit`, `next build` (24 routes, 0 errors), `next lint` clean
+(including the design-token guard), and every new page confirmed to render — not crash —
+in a real browser. **Not verified: the actual populated UI against real data.**
+Docker/Postgres remain unavailable on this machine, so nothing here has been checked
+against a live gateway; every page currently falls to the dashboard's existing "API
+Connection Notice" state rather than a blank screen, which proves no client-side exception
+on load and nothing more. First real verification needs Docker fixed, a database migrated
+through 0012, and a signed-in session — none of which exist here yet.
 
 ### 2026-09-06 — Session 14 — Claude Sonnet 5
 
