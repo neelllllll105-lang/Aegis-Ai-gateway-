@@ -771,6 +771,67 @@ mod tests {
     }
 
     #[test]
+    fn code_requests_are_detected_as_the_code_domain() {
+        // `TaskDomain` exists specifically so routing can prefer a provider strong on this
+        // class of work (`preferred_providers()`) — untested until now, despite being wired
+        // into `Router::select_at_tier`'s candidate re-rank.
+        for prompt in [
+            "```python\ndef foo():\n    pass\n```\nRefactor this function to be async.",
+            "Write a unit test for this function and fix the failing assertion.",
+            "Debug why this SQL query returns duplicate rows and rewrite it.",
+        ] {
+            let result = Classifier::new().classify(&NormalizedRequest::simple("gpt-4o", prompt));
+            assert_eq!(result.domain, TaskDomain::Code, "{prompt:?}");
+        }
+    }
+
+    #[test]
+    fn multi_step_analysis_is_detected_as_the_reasoning_domain() {
+        // No code vocabulary here on purpose — `detect_domain` checks code intent first,
+        // so a reasoning-domain example has to stay clear of it to actually exercise the
+        // reasoning branch (see `code_intent_wins_over_reasoning_vocabulary...` below for
+        // the mixed case).
+        let result = Classifier::new().classify(&NormalizedRequest::simple(
+            "gpt-4o",
+            "Analyze this business proposal, evaluate the trade-offs between the two \
+             market strategies, and diagnose which one carries the greater long-term risk.",
+        ));
+        assert_eq!(result.domain, TaskDomain::Reasoning);
+    }
+
+    #[test]
+    fn mechanical_tasks_are_detected_as_the_language_domain() {
+        for prompt in [
+            "Translate hello into Spanish",
+            "Rephrase this more formally: hi there",
+        ] {
+            let result = Classifier::new().classify(&NormalizedRequest::simple("gpt-4o", prompt));
+            assert_eq!(result.domain, TaskDomain::Language, "{prompt:?}");
+        }
+    }
+
+    #[test]
+    fn a_prompt_with_no_strong_signal_is_the_general_domain() {
+        let result = Classifier::new().classify(&NormalizedRequest::simple(
+            "gpt-4o",
+            "What do you think about this?",
+        ));
+        assert_eq!(result.domain, TaskDomain::General);
+    }
+
+    #[test]
+    fn code_intent_wins_over_reasoning_vocabulary_when_both_are_present() {
+        // detect_domain checks code before reasoning — a request that is clearly about code
+        // but also uses analytical language (a very common real shape: "analyze this bug and
+        // fix it") should still route to code-preferring providers, not reasoning ones.
+        let result = Classifier::new().classify(&NormalizedRequest::simple(
+            "gpt-4o",
+            "Analyze this function and fix the bug:\n```python\ndef broken(): return 1/0\n```",
+        ));
+        assert_eq!(result.domain, TaskDomain::Code);
+    }
+
+    #[test]
     fn long_context_raises_complexity() {
         let short = Classifier::new().classify(&NormalizedRequest::simple("gpt-4o", "summarize"));
         let long = Classifier::new().classify(&NormalizedRequest::simple(

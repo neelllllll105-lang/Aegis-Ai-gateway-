@@ -37,7 +37,8 @@ use crate::money::MicroCents;
 
 use crate::providers::{Credential, Provider};
 use crate::types::{
-    CacheOutcome, NormalizedRequest, NormalizedResponse, RoutingHint, RoutingReason, TokenUsage,
+    CacheOutcome, Complexity, NormalizedRequest, NormalizedResponse, RoutingHint, RoutingReason,
+    TokenUsage,
 };
 use crate::AppState;
 use axum::body::Body;
@@ -570,17 +571,24 @@ pub async fn execute_with_headroom(
     // no hash-based fingerprint ever can. The embedding is computed at most once per
     // request: reused below to populate the semantic store on a true miss, so a novel
     // question costs one embedding call, not two.
+    //
+    // Classified once, up front, rather than only inside the old `is_local()`-gated branch:
+    // its `complexity` now feeds `semantic_lookup_worth_it` below, and its `domain` still
+    // scopes the cache lookup exactly as before — one classification serving both, not two.
+    let semantic_classification = Classifier::new().classify(&request);
     let mut request_embedding: Option<Vec<f32>> = None;
     if smart_caching_enabled
         && !auth.zero_retention
         && fingerprint::cacheability(&request, auth.zero_retention).is_cacheable()
-        // Local-only embedder guard: Skip semantic check if embedder requires external HTTP network
-        // calls (e.g. 300ms remote embedding API), preserving sub-millisecond hot-path P99 SLA.
-        && state.embedder.is_local()
+        && semantic_lookup_worth_it(
+            state.embedder.is_local(),
+            state.config.semantic_cache_allow_remote_embedding,
+            semantic_classification.complexity,
+        )
     {
         let text = semantic::embedding_text(&request);
         if let Some(embedding) = state.embedder.embed(&text).await {
-            let domain = Classifier::new().classify(&request).domain;
+            let domain = semantic_classification.domain;
             let semantic_cache = SemanticCache::with_domain(
                 state.semantic_store.as_ref(),
                 state.config.semantic_similarity_threshold,
@@ -1350,6 +1358,30 @@ pub fn plan_tier_ceiling(plan: &str) -> Option<crate::types::ModelTier> {
         "free" => Some(crate::types::ModelTier::Cheap),
         _ => None,
     }
+}
+
+/// Whether a semantic-cache lookup is worth paying an embedder's latency for.
+///
+/// A **local** embedder is always worth it: no network hop, so there is no cost to weigh
+/// against. A **remote** embedder is a real round trip — a hosted embedding endpoint is
+/// typically 100-300ms — stacked in front of whatever provider call it might avoid, so it
+/// is offered only when both are true: the operator has explicitly opted in
+/// (`AEGIS_SEMANTIC_CACHE_ALLOW_REMOTE_EMBEDDING`, `false` by default — this must never
+/// change behaviour for a deployment that hasn't asked for it), and the request is not
+/// `Simple`. A simple request already routes to the cheapest capable model; there is little
+/// left to save and no reason to add a guaranteed 100ms+ on the chance of finding out.
+///
+/// This is what makes semantic caching reachable at all on a deployment that has not
+/// provisioned a local embedding model — before this, `is_local()` alone gated it, and the
+/// only embedder this codebase can construct that satisfies `is_local()` needs an ONNX
+/// model this project has never actually provisioned in any environment. The feature was
+/// real, tested, and wired end to end, and had still never fired once outside a test.
+pub(crate) fn semantic_lookup_worth_it(
+    embedder_is_local: bool,
+    allow_remote: bool,
+    complexity: Complexity,
+) -> bool {
+    embedder_is_local || (allow_remote && complexity != Complexity::Simple)
 }
 
 // ---------------------------------------------------------------------------
@@ -3194,6 +3226,33 @@ mod tests {
         let mut request = NormalizedRequest::simple("mock/mock-premium", "hi");
         request.max_tokens = Some(1_000);
         assert!(!clamp_max_tokens(&mut request, 1_000));
+    }
+
+    // ---- Semantic cache reachability -------------------------------------------------
+
+    #[test]
+    fn a_local_embedder_is_always_worth_it_regardless_of_the_remote_flag_or_complexity() {
+        assert!(semantic_lookup_worth_it(true, false, Complexity::Simple));
+        assert!(semantic_lookup_worth_it(true, false, Complexity::Complex));
+        assert!(semantic_lookup_worth_it(true, true, Complexity::Simple));
+    }
+
+    #[test]
+    fn a_remote_embedder_is_never_worth_it_when_the_operator_has_not_opted_in() {
+        assert!(!semantic_lookup_worth_it(false, false, Complexity::Simple));
+        assert!(!semantic_lookup_worth_it(false, false, Complexity::Medium));
+        assert!(!semantic_lookup_worth_it(false, false, Complexity::Complex));
+    }
+
+    #[test]
+    fn a_remote_embedder_skips_simple_requests_even_when_opted_in() {
+        assert!(!semantic_lookup_worth_it(false, true, Complexity::Simple));
+    }
+
+    #[test]
+    fn a_remote_embedder_is_worth_it_for_medium_or_complex_requests_when_opted_in() {
+        assert!(semantic_lookup_worth_it(false, true, Complexity::Medium));
+        assert!(semantic_lookup_worth_it(false, true, Complexity::Complex));
     }
 
     fn state_with_low_token_ceiling(mock: Arc<MockProvider>) -> AppState {

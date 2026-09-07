@@ -124,6 +124,12 @@ pub struct Config {
     pub cache_ttl: Duration,
     /// Minimum cosine similarity for a semantic cache hit. Part 5 stage [5b].
     pub semantic_similarity_threshold: f32,
+    /// Allow a semantic-cache lookup to pay a **remote** embedder's network latency, on
+    /// requests past `Simple` complexity, when no local (ONNX) embedding model is
+    /// provisioned. `false` by default: a deployment that has not asked for this keeps its
+    /// exact behaviour today, where a remote embedder's `is_local() == false` skips the
+    /// semantic tier entirely. See `routes::openai_compat::semantic_lookup_worth_it`.
+    pub semantic_cache_allow_remote_embedding: bool,
     /// How long a query that has been asked more than once stays in the durable
     /// (Postgres, encrypted) cache tier, sliding on every further hit.
     ///
@@ -203,6 +209,11 @@ impl Config {
             default_rate_limit_per_minute: num("AEGIS_DEFAULT_RATE_LIMIT", 60)?,
             cache_ttl: Duration::from_secs(num("AEGIS_CACHE_TTL_SECS", 86_400)?),
             semantic_similarity_threshold: fnum("AEGIS_SEMANTIC_THRESHOLD", 0.80)?,
+            semantic_cache_allow_remote_embedding: opt(
+                "AEGIS_SEMANTIC_CACHE_ALLOW_REMOTE_EMBEDDING",
+            )
+            .as_deref()
+                == Some("true"),
             durable_cache_ttl_days: num("AEGIS_DURABLE_CACHE_TTL_DAYS", 30)?,
             max_tokens_per_request: num("AEGIS_MAX_TOKENS_PER_REQUEST", 16_384)?,
 
@@ -243,6 +254,7 @@ impl Config {
             default_rate_limit_per_minute: 60,
             cache_ttl: Duration::from_secs(86_400),
             semantic_similarity_threshold: 0.95,
+            semantic_cache_allow_remote_embedding: false,
             durable_cache_ttl_days: 30,
             max_tokens_per_request: 16_384,
             free_tier_monthly_requests: 10_000,
