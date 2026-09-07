@@ -485,6 +485,7 @@ Covered by tests (not hand-executed against live infra):
 | No provider API key supplied | Cannot confirm a real end-to-end completion or check a real invoice | The mock provider exercises the whole pipeline, including a 64-concurrency load pass. Needs one real key (user selected Google Gemini) to close. |
 | No GCP service account for Vertex AI (new, session 5) | Vertex's OAuth2 token exchange and `generateContent` call are untested against real Google infrastructure | 14 tests cover everything that doesn't require a live GCP project (JWT construction, credential parsing, request-body shape). Needs a real service-account JSON key, scoped to a project with the Vertex AI API enabled, to close. |
 | `gh auth` token is invalid (new, session 6) | `gh pr create` fails outright — `gh auth status` reports "The token in default is invalid." Every session-6 fix went directly to `origin/main` as a result, consistent with the pattern already established in prior sessions and not objected to by the user. | User runs `gh auth login -h github.com`; a stale `fix/enterprise-audit-remediation` branch from the failed PR attempt was left pointing at an ancestor of `main` (zero unique commits) — safe to delete once `gh` or local git push access works, currently blocked by the same permission classifier that also requires explicit confirmation for branch deletion. |
+| **Unresolved incident (new, session 15): a friend visiting `/dashboard` landed on the founder's own account.** Audited the actual auth path (cookies, session lookup, `authenticate_management`) and found no code-level bypass — see the session 15 log entry for the full trace. | Unknown until the user says what actually happened, so genuinely unknown whether this is a real vulnerability or expected session-persistence/shared-credential behaviour. | Asked the user directly (dismissed); leading hypothesis is the well-known `dev@aegis.local` seed credential being reachable over this machine's LAN-mode dev server, **not acted on without confirmation**. Next agent: do not silently "fix" the seed account or session code without the user first confirming what the friend actually did to reach the dashboard — read this table row and the session 15 log entry before touching either. |
 
 ---
 
@@ -998,6 +999,58 @@ against a live gateway; every page currently falls to the dashboard's existing "
 Connection Notice" state rather than a blank screen, which proves no client-side exception
 on load and nothing more. First real verification needs Docker fixed, a database migrated
 through 0012, and a signed-in session — none of which exist here yet.
+
+**Later still the same session: an unresolved incident report, an RBAC audit it prompted,
+and one real frontend gap the audit found and closed.** The user reported that a friend
+visiting `/dashboard` landed directly on the founder's own account. Audited the actual
+authentication path before touching anything — session cookie construction
+(`HttpOnly`/`SameSite=Lax`, no `Domain` override), `extract_session_cookie`,
+`find_user_by_session` (exact non-expired token-hash match, no fallback), and
+`authenticate_management`'s two-branch (cookie or bearer, else 401) — and found no
+backdoor, no default account, no bypass. Asked the user to clarify what actually happened
+(same device, an invite, or genuinely no login step at all); the user dismissed the
+question and asked instead whether RBAC was implemented "over all the features and
+accounts." **The incident itself remains unexplained and open** — deliberately not guessed
+at further, since acting on an unconfirmed cause risks fixing the wrong thing (or breaking
+working auth code) more than it risks leaving a real gap unaddressed for one more session.
+The leading hypothesis (not confirmed): `scripts/seed.sql`'s `dev@aegis.local` /
+`aegis-development-password` demo account is a well-known, working credential, and this
+machine's dev server is LAN-reachable (`getApiUrl()`'s `192.168.*`/`10.*`/`172.*` branch)
+— someone on the same network who knew or was given those demo credentials would land on
+that account, which may be the one the founder has been using for all his own testing.
+Not acted on without confirmation.
+
+The RBAC question itself was answered by tracing the code, not from memory: every
+management handler (40+), every `/api/admin/*` handler, and every SCIM handler calls a
+real guard (`require_reader`/`require_writer`/`require_key_writer`/`assert_project_access`/
+`require_admin`/`authenticate_scim`), and `list_keys` filters per-row by role, not just by
+route. This is independently backed by an existing, currently-passing test
+(`the_management_api_rejects_anonymous_callers_rather_than_serving_them`) that fires real
+anonymous requests at 9 sensitive endpoints and asserts 401 on all of them. **What was
+missing, found by checking rather than assumed: the frontend used none of this.** Every
+dashboard page showed the identical set of write controls to every role — a viewer or
+plain member saw "Delete team," "Invite member," "Add provider key" exactly like an owner,
+relying entirely on the backend's 403 to stop a click that should never have been offered.
+
+Fixed: new `lib/auth-context.tsx` (`AuthProvider`/`useAuth()`), fed once by
+`DashboardShell`'s existing `/api/auth/me` call, exposing `canWrite` (owner/admin —
+mirrors `require_writer`) and `canManageKeys` (owner/admin/member — mirrors
+`require_key_writer`), named and commented deliberately to track the backend guards
+field-for-field. Applied across all seven pages with a write control:
+`/team` (invite, remove member, create/delete team, add/remove project member — "Manage"
+itself stays visible to everyone, since a project lead who isn't an org admin legitimately
+needs to view their own project and the backend's `assert_project_access` correctly 404s
+anyone else who tries), `/budgets` (create, delete), `/keys` (create, revoke, routing-mode
+select — gated on the wider `canManageKeys`, not `canWrite`), `/policies` (create, delete),
+`/providers` (add/test/delete — the single most sensitive form on the whole dashboard,
+since it accepts a live, billable credential), `/settings` (routing-mode save), `/billing`
+(claim referral). Also added a "Signed in as" identity block to the sidebar, next to the
+org name and sign-out — directly relevant to the open incident above: whoever ends up on
+this dashboard should never have to wonder whose account they're looking at.
+
+Verified: `tsc --noEmit` clean, `next build` (24 routes, 0 errors), `next lint` clean, and
+confirmed in a real browser that the new context produces no console errors beyond the
+expected "gateway not running" network failures (still no Docker on this machine).
 
 ### 2026-09-06 — Session 14 — Claude Sonnet 5
 
