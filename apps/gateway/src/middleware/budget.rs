@@ -87,6 +87,7 @@ impl BudgetDecision {
         AegisError::BudgetExceeded {
             spend_micro_cents: self.spend.as_i64(),
             limit_micro_cents: self.limit.unwrap_or(MicroCents::ZERO).as_i64(),
+            also_exceeded: Vec::new(),
         }
     }
 
@@ -114,6 +115,13 @@ struct Scope {
     limit: Option<i64>,
     /// Soft limits never refuse a request — they exist to fire threshold alerts.
     hard: bool,
+    /// A token ceiling on the same scope, reserved and checked in the same pass as the
+    /// money limit above. `None` when this scope has no token budget configured — the
+    /// common case today, for every organisation that has never set one — in which case
+    /// this scope's token counter is never touched at all: no extra Redis round trip, no
+    /// behaviour change from before token budgets existed.
+    token_key: Option<String>,
+    token_limit: Option<i64>,
 }
 
 /// Every budget applying to one organisation, resolved from the database once and cached.
@@ -136,6 +144,18 @@ pub struct BudgetLimits {
     pub key: Option<Limit>,
     /// Ceiling for the region serving this request.
     pub region: Option<Limit>,
+    /// Ceiling for the person the calling key is assigned to — "how much may this employee
+    /// spend across every key issued to them," distinct from `key`, which caps one key.
+    /// `None` when the key has no assignee: a shared project key has no person to cap.
+    pub user: Option<Limit>,
+    /// Token ceiling on the organisation, independent of the money ceiling above. A request
+    /// that is well under budget in dollars (a promotional rate, a very cheap model) can
+    /// still be unbounded in tokens without one.
+    pub org_tokens: Option<i64>,
+    /// Token ceiling on the calling key's team.
+    pub team_tokens: Option<i64>,
+    /// Token ceiling on the person the calling key is assigned to.
+    pub user_tokens: Option<i64>,
 }
 
 /// A ceiling and whether breaching it refuses the request.
@@ -157,23 +177,32 @@ impl Limit {
 impl BudgetLimits {
     /// Whether any ceiling at all applies. Lets the caller skip work entirely.
     pub fn is_empty(&self) -> bool {
-        self.org.is_none() && self.team.is_none() && self.key.is_none() && self.region.is_none()
+        self.org.is_none()
+            && self.team.is_none()
+            && self.key.is_none()
+            && self.region.is_none()
+            && self.user.is_none()
+            && self.org_tokens.is_none()
+            && self.team_tokens.is_none()
+            && self.user_tokens.is_none()
     }
 
-    /// Fold `budgets` rows into the four scopes this request could breach.
+    /// Fold `budgets` rows into the scopes this request could breach.
     ///
     /// Only monthly budgets are honoured, because the counters they are checked against are
     /// monthly — enforcing a `daily` row against a month-to-date counter would refuse
     /// traffic for the rest of the month the moment one day went heavy. The management API
     /// refuses to create one; this is the second line of defence for rows that predate it.
     ///
-    /// Rows scoped to a team, key, or region other than this request's are skipped rather
-    /// than applied — the most common way a budget system goes wrong is capping the wrong
-    /// caller.
+    /// Rows scoped to a team, key, user, or region other than this request's are skipped
+    /// rather than applied — the most common way a budget system goes wrong is capping the
+    /// wrong caller. `user_id` is `None` for an unassigned (shared/project) key, which
+    /// correctly matches no user-scoped row: a shared key has no person to cap.
     pub fn from_rows(
         rows: &[crate::db::repo::Budget],
         team_id: Option<Uuid>,
         api_key_id: Option<Uuid>,
+        user_id: Option<Uuid>,
         region: Option<&str>,
     ) -> BudgetLimits {
         let mut limits = BudgetLimits::default();
@@ -185,20 +214,39 @@ impl BudgetLimits {
                 limit_mc: row.limit_mc,
                 hard: row.hard_limit,
             };
-            match (row.team_id, row.api_key_id, row.region.as_deref()) {
-                (None, None, None) => limits.org = Some(tighter(limits.org, limit)),
-                (Some(t), _, _) if Some(t) == team_id => {
-                    limits.team = Some(tighter(limits.team, limit))
+            match (
+                row.team_id,
+                row.api_key_id,
+                row.user_id,
+                row.region.as_deref(),
+            ) {
+                (None, None, None, None) => {
+                    limits.org = Some(tighter(limits.org, limit));
+                    if let Some(t) = row.limit_tokens {
+                        limits.org_tokens = Some(limits.org_tokens.map_or(t, |x| x.min(t)));
+                    }
                 }
-                (_, Some(k), _) if Some(k) == api_key_id => {
+                (Some(t), _, _, _) if Some(t) == team_id => {
+                    limits.team = Some(tighter(limits.team, limit));
+                    if let Some(tok) = row.limit_tokens {
+                        limits.team_tokens = Some(limits.team_tokens.map_or(tok, |x| x.min(tok)));
+                    }
+                }
+                (_, Some(k), _, _) if Some(k) == api_key_id => {
                     limits.key = Some(tighter(limits.key, limit))
                 }
-                (_, _, Some(r))
+                (_, _, Some(u), _) if Some(u) == user_id => {
+                    limits.user = Some(tighter(limits.user, limit));
+                    if let Some(tok) = row.limit_tokens {
+                        limits.user_tokens = Some(limits.user_tokens.map_or(tok, |x| x.min(tok)));
+                    }
+                }
+                (_, _, _, Some(r))
                     if region.is_some_and(|serving| serving.eq_ignore_ascii_case(r)) =>
                 {
                     limits.region = Some(tighter(limits.region, limit))
                 }
-                // Scoped to a different team, key, or region than this caller's. Not ours.
+                // Scoped to a different team, key, user, or region than this caller's. Not ours.
                 _ => {}
             }
         }
@@ -226,11 +274,15 @@ pub async fn load_limits(
     region: Option<&str>,
 ) -> BudgetLimits {
     // Cached per key and region, not per org: two keys in the same org can sit in
-    // different teams and therefore resolve to different ceilings.
+    // different teams and therefore resolve to different ceilings. User is included too,
+    // even though it is a function of the key, because it is cheap to include and makes the
+    // cache key self-describing rather than relying on the key->user mapping never changing
+    // within the TTL.
     let cache_key = format!(
-        "aegis:budget_limits:{}:{}:{}",
+        "aegis:budget_limits:{}:{}:{}:{}",
         auth.org_id,
         auth.api_key_id.map(|id| id.to_string()).unwrap_or_default(),
+        auth.user_id.map(|id| id.to_string()).unwrap_or_default(),
         region.unwrap_or("-")
     );
 
@@ -251,7 +303,8 @@ pub async fn load_limits(
         return BudgetLimits::default();
     };
 
-    let limits = BudgetLimits::from_rows(&rows, auth.team_id, auth.api_key_id, region);
+    let limits =
+        BudgetLimits::from_rows(&rows, auth.team_id, auth.api_key_id, auth.user_id, region);
     if let Ok(encoded) = serde_json::to_string(&limits) {
         let _ = store.set_ex(&cache_key, &encoded, LIMITS_CACHE_TTL).await;
     }
@@ -292,6 +345,12 @@ fn tighter(existing: Option<Limit>, candidate: Limit) -> Limit {
 pub struct Reservation {
     keys: Vec<String>,
     amount_mc: i64,
+    /// Token counters held alongside the money ones, and the projection held against them.
+    /// Empty/zero on every request that touches no token-limited scope — which is every
+    /// request today, until a customer configures one — so this adds no behaviour and no
+    /// extra Redis round trips in the common case.
+    token_keys: Vec<String>,
+    reserved_tokens: i64,
     resolved: bool,
 }
 
@@ -299,6 +358,11 @@ impl Reservation {
     /// The projected amount currently held.
     pub fn amount_mc(&self) -> i64 {
         self.amount_mc
+    }
+
+    /// The projected token count currently held.
+    pub fn reserved_tokens(&self) -> i64 {
+        self.reserved_tokens
     }
 
     /// Hand the held projection over to [`crate::metering::usage::emit`], which applies
@@ -334,22 +398,29 @@ impl Reservation {
     /// Give the projection back untouched, for a request that never reached a provider.
     pub async fn release(mut self, store: &dyn KvStore) {
         self.resolved = true;
-        if self.amount_mc == 0 {
-            return;
+        if self.amount_mc != 0 {
+            for key in &self.keys {
+                let _ = store.incr_by(key, -self.amount_mc, Some(COUNTER_TTL)).await;
+            }
         }
-        for key in &self.keys {
-            let _ = store.incr_by(key, -self.amount_mc, Some(COUNTER_TTL)).await;
+        if self.reserved_tokens != 0 {
+            for key in &self.token_keys {
+                let _ = store
+                    .incr_by(key, -self.reserved_tokens, Some(COUNTER_TTL))
+                    .await;
+            }
         }
     }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        if !self.resolved && self.amount_mc != 0 {
+        if !self.resolved && (self.amount_mc != 0 || self.reserved_tokens != 0) {
             // Cannot do async work here, so this is a report rather than a repair. The
             // counter self-corrects when the reconciliation worker next runs.
             tracing::warn!(
                 amount_mc = self.amount_mc,
+                reserved_tokens = self.reserved_tokens,
                 scopes = self.keys.len(),
                 "budget reservation dropped without settle or release; the counter holds \
                  this amount until reconciliation rebuilds it from usage_records"
@@ -364,7 +435,39 @@ pub enum BudgetOutcome {
     /// The request may proceed; the projection is held until settled.
     Allowed(Reservation),
     /// The request is refused. Nothing was left held.
-    Denied(Box<BudgetDecision>),
+    ///
+    /// Every scope this request breached in the same atomic pass, innermost/most-specific
+    /// first — never empty. Before this carried more than one, a request that breached two
+    /// scopes at once (a person's token budget and the organisation's money budget, say)
+    /// only ever learned about whichever one the loop happened to reach first; raising that
+    /// one and retrying just surfaced the second breach as a brand new 402.
+    Denied(Vec<BudgetDecision>),
+}
+
+/// Render every scope a refused request breached into the 402 the client receives — the
+/// most specific scope (`scopes()` orders innermost first) as the primary figure, every
+/// other breach alongside it in `also_exceeded` rather than silently dropped.
+pub fn denial_to_error(breaches: &[BudgetDecision]) -> AegisError {
+    let Some((primary, rest)) = breaches.split_first() else {
+        // Defensive only: `check_and_reserve` never returns `Denied` with an empty list.
+        return AegisError::BudgetExceeded {
+            spend_micro_cents: 0,
+            limit_micro_cents: 0,
+            also_exceeded: Vec::new(),
+        };
+    };
+    AegisError::BudgetExceeded {
+        spend_micro_cents: primary.spend.as_i64(),
+        limit_micro_cents: primary.limit.unwrap_or(MicroCents::ZERO).as_i64(),
+        also_exceeded: rest
+            .iter()
+            .map(|b| crate::error::BudgetBreach {
+                scope: b.scope.to_string(),
+                spend_micro_cents: b.spend.as_i64(),
+                limit_micro_cents: b.limit.unwrap_or(MicroCents::ZERO).as_i64(),
+            })
+            .collect(),
+    }
 }
 
 /// Read-only budget check. Reports where an organisation stands without reserving.
@@ -384,6 +487,7 @@ pub async fn check(
         team: team_budget_mc.map(Limit::hard),
         key: None,
         region: region_budget.map(|r| Limit::hard(r.limit_mc)),
+        ..BudgetLimits::default()
     };
     let region_name = region_budget.map(|r| r.region);
 
@@ -424,13 +528,23 @@ pub async fn check_and_reserve(
     limits: &BudgetLimits,
     region: Option<&str>,
     projected_mc: i64,
+    projected_tokens: i64,
 ) -> Result<BudgetOutcome> {
     let projected_mc = projected_mc.max(0);
+    let projected_tokens = projected_tokens.max(0);
     let scopes = scopes(auth, limits, region);
 
     let mut held: Vec<String> = Vec::with_capacity(scopes.len());
-    let mut breach: Option<BudgetDecision> = None;
+    let mut held_tokens: Vec<String> = Vec::new();
+    let mut breaches: Vec<BudgetDecision> = Vec::new();
 
+    // Deliberately does not stop at the first breach: a request over budget on two scopes
+    // at once (a person's token ceiling *and* the organisation's money ceiling, say) must
+    // be told about both in this one response, not just whichever scope happened to be
+    // checked first — see `BudgetOutcome::Denied`. Every scope is still reserved into
+    // (never merely read) even after a breach is already known, because that is the only
+    // way to learn whether a *later* scope is also over without reintroducing the
+    // read-then-act race this whole module exists to close.
     for scope in &scopes {
         // Fail open on a store error: an unreachable counter must not reject a paying
         // customer. The scope is skipped rather than reserved, so nothing is left held.
@@ -442,42 +556,83 @@ pub async fn check_and_reserve(
         };
         held.push(scope.key.clone());
 
-        let Some(limit) = scope.limit else { continue };
-        if !scope.hard {
-            // Soft limits are for alerting, not refusal.
-            continue;
+        if let Some(limit) = scope.limit {
+            // Two ways to be over. `total > limit` catches the request that would cross
+            // the line — the case a hard limit exists to prevent. `committed >= limit`
+            // catches an organisation already at or past it, including when the projection
+            // is zero because the model has no price.
+            let committed = total - projected_mc;
+            if scope.hard && (total > limit || committed >= limit) {
+                breaches.push(BudgetDecision {
+                    allowed: false,
+                    spend: MicroCents(committed.max(0)),
+                    limit: Some(MicroCents(limit)),
+                    scope: scope.name,
+                });
+            }
         }
 
-        // Two ways to be over. `total > limit` catches the request that would cross the
-        // line — the case a hard limit exists to prevent. `committed >= limit` catches an
-        // organisation already at or past it, including when the projection is zero
-        // because the model has no price.
-        let committed = total - projected_mc;
-        if total > limit || committed >= limit {
-            breach = Some(BudgetDecision {
-                allowed: false,
-                spend: MicroCents(committed.max(0)),
-                limit: Some(MicroCents(limit)),
-                scope: scope.name,
-            });
-            break;
+        // Token ceiling on the same scope, reserved atomically alongside the money one.
+        // `None` — every scope, on every request, until a customer configures a token
+        // budget — means this branch never runs and never touches Redis.
+        if let Some(token_key) = &scope.token_key {
+            let Ok(token_total) = store
+                .incr_by(token_key, projected_tokens, Some(COUNTER_TTL))
+                .await
+            else {
+                continue;
+            };
+            held_tokens.push(token_key.clone());
+
+            if let Some(token_limit) = scope.token_limit {
+                let committed_tokens = token_total - projected_tokens;
+                if token_total > token_limit || committed_tokens >= token_limit {
+                    // Token limits are always hard — there is no soft/alert-only mode for
+                    // them yet, matching "when in doubt, be conservative."
+                    breaches.push(BudgetDecision {
+                        allowed: false,
+                        spend: MicroCents(committed_tokens.max(0)),
+                        limit: Some(MicroCents(token_limit)),
+                        scope: scope.name,
+                    });
+                }
+            }
         }
     }
 
-    if let Some(decision) = breach {
-        // Roll back everything, including the scope that tripped: a refused request must
-        // not consume budget it was never allowed to spend.
+    if !breaches.is_empty() {
+        // Roll back everything, including every scope that tripped: a refused request must
+        // not consume budget — money or tokens — it was never allowed to spend.
         if projected_mc != 0 {
             for key in &held {
                 let _ = store.incr_by(key, -projected_mc, Some(COUNTER_TTL)).await;
             }
         }
-        return Ok(BudgetOutcome::Denied(Box::new(decision)));
+        if projected_tokens != 0 {
+            for key in &held_tokens {
+                let _ = store
+                    .incr_by(key, -projected_tokens, Some(COUNTER_TTL))
+                    .await;
+            }
+        }
+        return Ok(BudgetOutcome::Denied(breaches));
     }
+
+    // `reserved_tokens` reflects what was actually held, not the raw projection: when no
+    // scope in play has a token budget configured, `held_tokens` is empty and this must be
+    // zero, or `emit`'s correction would compute `actual - projected` against a counter
+    // that was never touched.
+    let reserved_tokens = if held_tokens.is_empty() {
+        0
+    } else {
+        projected_tokens
+    };
 
     Ok(BudgetOutcome::Allowed(Reservation {
         keys: held,
         amount_mc: projected_mc,
+        token_keys: held_tokens,
+        reserved_tokens,
         resolved: false,
     }))
 }
@@ -514,7 +669,7 @@ pub async fn headroom_mc(
 /// that was actually hit, because that is the one the customer can act on.
 fn scopes(auth: &AuthContext, limits: &BudgetLimits, region: Option<&str>) -> Vec<Scope> {
     let at = Utc::now();
-    let mut scopes = Vec::with_capacity(4);
+    let mut scopes = Vec::with_capacity(6);
 
     if let Some(api_key_id) = auth.api_key_id {
         // The key can be capped in two places: on the `api_keys` row and by a `budgets`
@@ -529,6 +684,8 @@ fn scopes(auth: &AuthContext, limits: &BudgetLimits, region: Option<&str>) -> Ve
             key: usage::key_spend_key(api_key_id, at),
             limit: limit.map(|l| l.limit_mc),
             hard: limit.is_none_or(|l| l.hard),
+            token_key: None,
+            token_limit: None,
         });
     }
 
@@ -538,6 +695,26 @@ fn scopes(auth: &AuthContext, limits: &BudgetLimits, region: Option<&str>) -> Ve
             key: usage::team_spend_key(team_id, at),
             limit: limits.team.map(|l| l.limit_mc),
             hard: limits.team.is_none_or(|l| l.hard),
+            token_key: limits
+                .team_tokens
+                .map(|_| usage::team_tokens_key(team_id, at)),
+            token_limit: limits.team_tokens,
+        });
+    }
+
+    // The person this key is assigned to, if any — "how much may this employee spend,"
+    // summed across every key issued to them. A shared/project key has no assignee and
+    // contributes no scope here at all, same as a key with no team.
+    if let Some(user_id) = auth.user_id {
+        scopes.push(Scope {
+            name: "user",
+            key: usage::user_spend_key(user_id, at),
+            limit: limits.user.map(|l| l.limit_mc),
+            hard: limits.user.is_none_or(|l| l.hard),
+            token_key: limits
+                .user_tokens
+                .map(|_| usage::user_tokens_key(user_id, at)),
+            token_limit: limits.user_tokens,
         });
     }
 
@@ -550,6 +727,8 @@ fn scopes(auth: &AuthContext, limits: &BudgetLimits, region: Option<&str>) -> Ve
             key: usage::org_region_spend_key(auth.org_id, region, at),
             limit: limits.region.map(|l| l.limit_mc),
             hard: limits.region.is_none_or(|l| l.hard),
+            token_key: None,
+            token_limit: None,
         });
     }
 
@@ -558,6 +737,10 @@ fn scopes(auth: &AuthContext, limits: &BudgetLimits, region: Option<&str>) -> Ve
         key: usage::org_spend_key(auth.org_id, at),
         limit: limits.org.map(|l| l.limit_mc),
         hard: limits.org.is_none_or(|l| l.hard),
+        token_key: limits
+            .org_tokens
+            .map(|_| usage::org_tokens_key(auth.org_id, at)),
+        token_limit: limits.org_tokens,
     });
 
     scopes
@@ -604,15 +787,28 @@ pub fn project_cost(
     request: &NormalizedRequest,
     pricing: &crate::metering::pricing::PricingTable,
 ) -> MicroCents {
+    let (input_tokens, projected_output) = projected_token_counts(request);
+    pricing
+        .cost(&request.model, input_tokens, projected_output)
+        .unwrap_or(MicroCents::ZERO)
+}
+
+/// Estimated total tokens (input + output) this request will consume, for reserving a
+/// token budget the same way [`project_cost`] reserves a money one. Shares the exact
+/// projection [`project_cost`] uses, so a token limit and a money limit are judged against
+/// the same pre-flight estimate rather than two different guesses about the same request.
+pub fn project_tokens(request: &NormalizedRequest) -> i64 {
+    let (input_tokens, projected_output) = projected_token_counts(request);
+    (input_tokens + projected_output) as i64
+}
+
+fn projected_token_counts(request: &NormalizedRequest) -> (u64, u64) {
     let input_tokens = request.estimated_input_tokens();
     let projected_output = request
         .max_tokens
         .map(u64::from)
         .unwrap_or_else(|| (input_tokens / 3).max(256));
-
-    pricing
-        .cost(&request.model, input_tokens, projected_output)
-        .unwrap_or(MicroCents::ZERO)
+    (input_tokens, projected_output)
 }
 
 #[cfg(test)]
@@ -639,6 +835,11 @@ mod tests {
             savings_share_bp: 2_000,
             zero_retention: false,
             org_region: "eu-central".into(),
+            team_name: None,
+            user_email: None,
+            key_default_routing_mode: None,
+            team_default_routing_mode: None,
+            org_default_routing_mode: None,
         })
     }
 
@@ -1086,7 +1287,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
                 let outcome =
-                    check_and_reserve(store.as_ref(), &context, &limits, None, cost_per_request)
+                    check_and_reserve(store.as_ref(), &context, &limits, None, cost_per_request, 0)
                         .await
                         .unwrap();
                 match outcome {
@@ -1150,9 +1351,16 @@ mod tests {
             let barrier = std::sync::Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                match check_and_reserve(store.as_ref(), &context, &limits, None, cost_per_request)
-                    .await
-                    .unwrap()
+                match check_and_reserve(
+                    store.as_ref(),
+                    &context,
+                    &limits,
+                    None,
+                    cost_per_request,
+                    0,
+                )
+                .await
+                .unwrap()
                 {
                     BudgetOutcome::Allowed(reservation) => {
                         let _ = reservation.commit();
@@ -1196,7 +1404,7 @@ mod tests {
         spend(&store, &context, 1_000_000).await;
 
         for _ in 0..5 {
-            let outcome = check_and_reserve(&store, &context, &limits, None, 100_000)
+            let outcome = check_and_reserve(&store, &context, &limits, None, 100_000, 0)
                 .await
                 .unwrap();
             assert!(matches!(outcome, BudgetOutcome::Denied(_)));
@@ -1210,6 +1418,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_request_that_breaches_two_scopes_is_denied_with_both_named() {
+        // A projected cost that alone exceeds both a person's individual budget and the
+        // organisation's, in the same atomic pass. Before this, `Denied` carried exactly
+        // one scope — whichever the loop reached first — so the second breach only ever
+        // surfaced as a brand new 402 after the first was raised and the request retried.
+        let store = MemoryStore::new();
+        let context = AuthContext {
+            user_id: Some(Uuid::new_v4()),
+            ..auth("pro")
+        };
+        let limits = BudgetLimits {
+            org: Some(Limit::hard(100)),
+            user: Some(Limit::hard(50)),
+            ..BudgetLimits::default()
+        };
+
+        let outcome = check_and_reserve(&store, &context, &limits, None, 200, 0)
+            .await
+            .unwrap();
+
+        let BudgetOutcome::Denied(breaches) = outcome else {
+            panic!("expected both the user and organization scopes to be denied");
+        };
+        let scopes: Vec<&str> = breaches.iter().map(|b| b.scope).collect();
+        assert!(scopes.contains(&"user"), "{scopes:?}");
+        assert!(scopes.contains(&"organization"), "{scopes:?}");
+        assert_eq!(scopes.len(), 2, "exactly the two breached scopes, no more");
+
+        // The rollback still covers every scope that was reserved into, not just the one
+        // that tripped first.
+        assert_eq!(
+            usage::current_spend(&store, context.org_id).await.as_i64(),
+            0,
+            "a fully refused request must leave every counter untouched"
+        );
+
+        // And the error a client actually receives names both, not just one — the
+        // message-formatting side of this is covered directly in `error.rs`'s own tests.
+        let AegisError::BudgetExceeded { also_exceeded, .. } = denial_to_error(&breaches) else {
+            panic!("expected a BudgetExceeded error");
+        };
+        assert_eq!(also_exceeded.len(), 1, "one primary breach, one additional");
+        // `scopes()` orders user ahead of organization, so "user" is the primary figure
+        // and "organization" is what would otherwise have been silently dropped.
+        assert_eq!(also_exceeded[0].scope, "organization");
+    }
+
+    #[tokio::test]
     async fn committing_replaces_the_projection_with_the_real_cost() {
         // The projection is an estimate. If the true-up were additive rather than a
         // difference, every request would be billed twice against its own budget.
@@ -1218,7 +1474,7 @@ mod tests {
         let limits = BudgetLimits::default();
 
         let BudgetOutcome::Allowed(reservation) =
-            check_and_reserve(&store, &context, &limits, None, 500_000)
+            check_and_reserve(&store, &context, &limits, None, 500_000, 0)
                 .await
                 .unwrap()
         else {
@@ -1253,7 +1509,7 @@ mod tests {
         let limits = BudgetLimits::default();
 
         let BudgetOutcome::Allowed(reservation) =
-            check_and_reserve(&store, &context, &limits, None, 500_000)
+            check_and_reserve(&store, &context, &limits, None, 500_000, 0)
                 .await
                 .unwrap()
         else {
@@ -1278,7 +1534,7 @@ mod tests {
         let limits = BudgetLimits::default();
 
         let BudgetOutcome::Allowed(reservation) =
-            check_and_reserve(&store, &context, &limits, None, 300_000)
+            check_and_reserve(&store, &context, &limits, None, 300_000, 0)
                 .await
                 .unwrap()
         else {
@@ -1335,7 +1591,7 @@ mod tests {
         };
         spend(&store, &context, 900_000).await;
 
-        let outcome = check_and_reserve(&store, &context, &limits, None, 100_000)
+        let outcome = check_and_reserve(&store, &context, &limits, None, 100_000, 0)
             .await
             .unwrap();
         assert!(
@@ -1347,10 +1603,141 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_token_budget_refuses_a_request_that_would_exceed_it_even_though_money_is_fine() {
+        // The whole point of a separate token ceiling: a request can be cheap in dollars
+        // (a heavily discounted or very cheap model) and still be unbounded in tokens
+        // without one. No money limit is configured here at all.
+        let store = MemoryStore::new();
+        let context = auth("pro");
+        let limits = BudgetLimits {
+            org_tokens: Some(1_000),
+            ..BudgetLimits::default()
+        };
+
+        let outcome = check_and_reserve(&store, &context, &limits, None, 1, 1_500)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, BudgetOutcome::Denied(_)),
+            "a token-only ceiling must still refuse a request that would cross it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_token_reservation_rolls_back_the_money_reservation_too() {
+        // Money and tokens are reserved in the same pass specifically so a breach in
+        // either dimension rolls back both — a refused request must not leave a dangling
+        // money reservation just because it was the token ceiling that tripped.
+        let store = MemoryStore::new();
+        let context = auth("pro");
+        let limits = BudgetLimits {
+            org: Some(Limit::hard(1_000_000)),
+            org_tokens: Some(100),
+            ..BudgetLimits::default()
+        };
+
+        let outcome = check_and_reserve(&store, &context, &limits, None, 50_000, 500)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, BudgetOutcome::Denied(_)));
+        assert_eq!(
+            usage::current_spend(&store, context.org_id).await.as_i64(),
+            0,
+            "the money side of a token-refused request must not stay held"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_within_both_ceilings_reserves_both_atomically() {
+        let store = MemoryStore::new();
+        let context = auth("pro");
+        let limits = BudgetLimits {
+            org: Some(Limit::hard(1_000_000)),
+            org_tokens: Some(10_000),
+            ..BudgetLimits::default()
+        };
+
+        let BudgetOutcome::Allowed(reservation) =
+            check_and_reserve(&store, &context, &limits, None, 50_000, 2_000)
+                .await
+                .unwrap()
+        else {
+            panic!("within both ceilings, so this must be allowed");
+        };
+        assert_eq!(reservation.amount_mc(), 50_000);
+        assert_eq!(reservation.reserved_tokens(), 2_000);
+        reservation.release(&store).await;
+    }
+
+    #[tokio::test]
+    async fn a_request_with_no_token_limit_configured_never_touches_the_token_counter() {
+        // The additive-only guarantee: for every organisation that has never configured a
+        // token budget — which today is every organisation — this feature must be
+        // behaviourally invisible, not just "usually zero."
+        let store = MemoryStore::new();
+        let context = auth("pro");
+        let limits = BudgetLimits::default();
+
+        let BudgetOutcome::Allowed(reservation) =
+            check_and_reserve(&store, &context, &limits, None, 10_000, 5_000)
+                .await
+                .unwrap()
+        else {
+            panic!("no limits configured at all");
+        };
+        // A projection was passed in, but with no scope configuring a token_key, nothing
+        // was actually held against a token counter.
+        assert_eq!(reservation.reserved_tokens(), 0);
+        reservation.release(&store).await;
+    }
+
+    #[tokio::test]
+    async fn emit_corrects_the_token_counter_from_projected_to_actual() {
+        // The token-side counterpart of `emit_does_not_double_count_a_reserved_request`:
+        // the same reserve-then-true-up shape must hold for tokens, not just money.
+        let store = MemoryStore::new();
+        let context = auth("pro");
+        let limits = BudgetLimits {
+            org_tokens: Some(1_000_000),
+            ..BudgetLimits::default()
+        };
+
+        let BudgetOutcome::Allowed(reservation) =
+            check_and_reserve(&store, &context, &limits, None, 0, 500)
+                .await
+                .unwrap()
+        else {
+            panic!("within the ceiling");
+        };
+        let reserved_tokens = reservation.reserved_tokens();
+        let reserved_mc = reservation.commit();
+
+        let mut event = billed_event(&context, 0);
+        event.reserved_mc = reserved_mc;
+        event.reserved_tokens = reserved_tokens;
+        event.input_tokens = 600;
+        event.output_tokens = 50;
+        usage::emit(&store, &event).await.unwrap();
+
+        let token_total = store
+            .get(&usage::org_tokens_key(context.org_id, chrono::Utc::now()))
+            .await
+            .unwrap()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        assert_eq!(
+            token_total, 650,
+            "the counter must end at the real token total (600 + 50), not \
+             projection-plus-actual"
+        );
+    }
+
     #[test]
     fn budget_rows_resolve_onto_the_scope_they_name() {
         let team = Uuid::new_v4();
         let key = Uuid::new_v4();
+        let user = Uuid::new_v4();
         let other_team = Uuid::new_v4();
 
         let rows = vec![
@@ -1358,6 +1745,7 @@ mod tests {
             budget_row(Some(team), None, None, 5_000, true),
             budget_row(None, Some(key), None, 2_000, true),
             budget_row(None, None, Some("eu-central"), 7_000, true),
+            budget_row_for_user(user, 4_000, true),
             // Belongs to someone else. Applying it would cap the wrong caller, which is
             // the single most damaging way a budget system can be wrong.
             budget_row(Some(other_team), None, None, 1, true),
@@ -1365,11 +1753,34 @@ mod tests {
             budget_row(None, None, Some("us-east"), 1, true),
         ];
 
-        let limits = BudgetLimits::from_rows(&rows, Some(team), Some(key), Some("eu-central"));
+        let limits =
+            BudgetLimits::from_rows(&rows, Some(team), Some(key), Some(user), Some("eu-central"));
         assert_eq!(limits.org.unwrap().limit_mc, 10_000);
         assert_eq!(limits.team.unwrap().limit_mc, 5_000);
         assert_eq!(limits.key.unwrap().limit_mc, 2_000);
         assert_eq!(limits.region.unwrap().limit_mc, 7_000);
+        assert_eq!(limits.user.unwrap().limit_mc, 4_000);
+    }
+
+    #[test]
+    fn a_user_scoped_budget_does_not_apply_to_a_different_person() {
+        let user_a = Uuid::new_v4();
+        let user_b = Uuid::new_v4();
+        let rows = vec![budget_row_for_user(user_a, 4_000, true)];
+        let limits = BudgetLimits::from_rows(&rows, None, None, Some(user_b), None);
+        assert!(
+            limits.user.is_none(),
+            "a budget scoped to user_a must not cap user_b"
+        );
+    }
+
+    #[test]
+    fn a_shared_key_with_no_assignee_gets_no_user_scoped_budget() {
+        // `user_id: None` on the request side means "this key has no assignee" — it must
+        // not accidentally match a row that is *also* unscoped in some other dimension.
+        let rows = vec![budget_row_for_user(Uuid::new_v4(), 4_000, true)];
+        let limits = BudgetLimits::from_rows(&rows, None, None, None, None);
+        assert!(limits.user.is_none());
     }
 
     #[test]
@@ -1379,7 +1790,7 @@ mod tests {
         // enforcing it, because it looks like it works.
         let mut row = budget_row(None, None, None, 10_000, true);
         row.period = "daily".to_string();
-        let limits = BudgetLimits::from_rows(&[row], None, None, None);
+        let limits = BudgetLimits::from_rows(&[row], None, None, None, None);
         assert!(limits.is_empty());
     }
 
@@ -1389,8 +1800,27 @@ mod tests {
             budget_row(None, None, None, 10_000, true),
             budget_row(None, None, None, 3_000, true),
         ];
-        let limits = BudgetLimits::from_rows(&rows, None, None, None);
+        let limits = BudgetLimits::from_rows(&rows, None, None, None, None);
         assert_eq!(limits.org.unwrap().limit_mc, 3_000);
+    }
+
+    #[test]
+    fn a_token_limit_folds_onto_the_matching_scope_alongside_the_money_limit() {
+        let mut row = budget_row(None, None, None, 10_000, true);
+        row.limit_tokens = Some(500_000);
+        let limits = BudgetLimits::from_rows(&[row], None, None, None, None);
+        assert_eq!(limits.org.unwrap().limit_mc, 10_000);
+        assert_eq!(limits.org_tokens, Some(500_000));
+    }
+
+    #[test]
+    fn the_tighter_of_two_token_limits_on_one_scope_wins() {
+        let mut a = budget_row(None, None, None, 10_000, true);
+        a.limit_tokens = Some(500_000);
+        let mut b = budget_row(None, None, None, 10_000, true);
+        b.limit_tokens = Some(200_000);
+        let limits = BudgetLimits::from_rows(&[a, b], None, None, None, None);
+        assert_eq!(limits.org_tokens, Some(200_000));
     }
 
     #[test]
@@ -1399,7 +1829,7 @@ mod tests {
             budget_row(None, None, None, 5_000, false),
             budget_row(None, None, None, 5_000, true),
         ];
-        let limits = BudgetLimits::from_rows(&rows, None, None, None);
+        let limits = BudgetLimits::from_rows(&rows, None, None, None, None);
         assert!(limits.org.unwrap().hard, "the stricter mode must win a tie");
     }
 
@@ -1415,11 +1845,23 @@ mod tests {
             org_id: Uuid::new_v4(),
             team_id,
             api_key_id,
+            user_id: None,
             region: region.map(|r| r.to_string()),
             period: "monthly".to_string(),
             limit_mc,
+            limit_tokens: None,
             hard_limit,
             created_at: Utc::now(),
         }
+    }
+
+    fn budget_row_for_user(
+        user_id: Uuid,
+        limit_mc: i64,
+        hard_limit: bool,
+    ) -> crate::db::repo::Budget {
+        let mut row = budget_row(None, None, None, limit_mc, hard_limit);
+        row.user_id = Some(user_id);
+        row
     }
 }

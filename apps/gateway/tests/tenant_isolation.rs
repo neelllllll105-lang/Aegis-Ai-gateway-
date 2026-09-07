@@ -12,6 +12,7 @@
 mod common;
 
 use common::{cleanup, create_key, create_org, repo, setup, skip};
+use uuid::Uuid;
 
 #[tokio::test]
 async fn an_organisation_cannot_read_another_organisations_api_key() {
@@ -228,7 +229,7 @@ async fn teams_budgets_and_policies_are_all_org_scoped() {
     let victim = create_org(&pool, "victim-sweep").await;
     let attacker = create_org(&pool, "attacker-sweep").await;
 
-    let team = repo::create_team(&pool, victim.org_id, "engineering", Some(1_000_000))
+    let team = repo::create_team(&pool, victim.org_id, "engineering", Some(1_000_000), None)
         .await
         .expect("team creation");
     let budget = repo::create_budget(
@@ -237,9 +238,11 @@ async fn teams_budgets_and_policies_are_all_org_scoped() {
             org_id: victim.org_id,
             team_id: None,
             api_key_id: None,
+            user_id: None,
             region: None,
             period: "monthly",
             limit_mc: 500_000,
+            limit_tokens: None,
             hard_limit: true,
         },
     )
@@ -311,4 +314,272 @@ async fn teams_budgets_and_policies_are_all_org_scoped() {
 
     cleanup(&pool, &victim).await;
     cleanup(&pool, &attacker).await;
+}
+
+#[tokio::test]
+async fn a_project_lead_is_only_a_lead_of_the_team_they_were_added_to() {
+    // team_memberships existed since migration 0001 with no write path anywhere in the
+    // application — a team could be created and nobody could ever actually join it. This
+    // proves the write path (added for IG-1 §1) and, more importantly, that leading one
+    // team confers no authority over a different one, even within the same organisation.
+    let Some((_, pool)) = setup().await else {
+        return skip("a_project_lead_is_only_a_lead_of_the_team_they_were_added_to");
+    };
+
+    let org = create_org(&pool, "project-lead").await;
+    let lead = repo::create_user(&pool, "lead@test.invalid", Some("$argon2id$fake"), None)
+        .await
+        .expect("user creation");
+    repo::add_member(&pool, org.org_id, lead.id, "member", None)
+        .await
+        .expect("org membership");
+
+    let led_team = repo::create_team(&pool, org.org_id, "led-project", None, None)
+        .await
+        .expect("team creation");
+    let other_team = repo::create_team(&pool, org.org_id, "other-project", None, None)
+        .await
+        .expect("team creation");
+    repo::add_team_member(&pool, led_team.id, lead.id, "lead")
+        .await
+        .expect("team membership");
+
+    assert_eq!(
+        repo::role_in_team(&pool, led_team.id, lead.id)
+            .await
+            .expect("query"),
+        Some("lead".to_string())
+    );
+    assert_eq!(
+        repo::role_in_team(&pool, other_team.id, lead.id)
+            .await
+            .expect("query"),
+        None,
+        "leading one project must not resolve as leading a different one"
+    );
+
+    // Changing role is an upsert, not a duplicate row.
+    repo::add_team_member(&pool, led_team.id, lead.id, "member")
+        .await
+        .expect("role change");
+    assert_eq!(
+        repo::role_in_team(&pool, led_team.id, lead.id)
+            .await
+            .expect("query"),
+        Some("member".to_string())
+    );
+
+    assert!(repo::remove_team_member(&pool, led_team.id, lead.id)
+        .await
+        .expect("query"));
+    assert_eq!(
+        repo::role_in_team(&pool, led_team.id, lead.id)
+            .await
+            .expect("query"),
+        None
+    );
+
+    cleanup(&pool, &org).await;
+    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(lead.id)
+        .execute(&pool)
+        .await;
+}
+
+#[tokio::test]
+async fn team_membership_and_budgets_do_not_leak_across_teams_in_the_same_org() {
+    let Some((_, pool)) = setup().await else {
+        return skip("team_membership_and_budgets_do_not_leak_across_teams_in_the_same_org");
+    };
+
+    let org = create_org(&pool, "same-org-teams").await;
+    let team_a = repo::create_team(&pool, org.org_id, "team-a", None, None)
+        .await
+        .expect("team creation");
+    let team_b = repo::create_team(&pool, org.org_id, "team-b", None, None)
+        .await
+        .expect("team creation");
+
+    // team_belongs_to_org is the guard every project-scoped handler runs first. Both teams
+    // belong to this org; a random id must not.
+    assert!(repo::team_belongs_to_org(&pool, team_a.id, org.org_id)
+        .await
+        .expect("query"));
+    assert!(
+        !repo::team_belongs_to_org(&pool, Uuid::new_v4(), org.org_id)
+            .await
+            .expect("query")
+    );
+
+    repo::create_budget(
+        &pool,
+        repo::NewBudget {
+            org_id: org.org_id,
+            team_id: Some(team_a.id),
+            api_key_id: None,
+            user_id: None,
+            region: None,
+            period: "monthly",
+            limit_mc: 100_000,
+            limit_tokens: Some(50_000),
+            hard_limit: true,
+        },
+    )
+    .await
+    .expect("budget creation");
+
+    let budgets = repo::list_budgets(&pool, org.org_id).await.expect("query");
+    let team_a_budget = budgets
+        .iter()
+        .find(|b| b.team_id == Some(team_a.id))
+        .expect("team_a's budget must be listed");
+    assert_eq!(team_a_budget.limit_tokens, Some(50_000));
+    assert!(
+        !budgets.iter().any(|b| b.team_id == Some(team_b.id)),
+        "a budget scoped to team_a must not also apply to team_b"
+    );
+
+    cleanup(&pool, &org).await;
+}
+
+#[tokio::test]
+async fn a_user_scoped_budget_only_names_one_person() {
+    let Some((_, pool)) = setup().await else {
+        return skip("a_user_scoped_budget_only_names_one_person");
+    };
+
+    let org = create_org(&pool, "user-budget").await;
+    let other = repo::create_user(&pool, "other@test.invalid", Some("$argon2id$fake"), None)
+        .await
+        .expect("user creation");
+    repo::add_member(&pool, org.org_id, other.id, "member", None)
+        .await
+        .expect("org membership");
+
+    repo::create_budget(
+        &pool,
+        repo::NewBudget {
+            org_id: org.org_id,
+            team_id: None,
+            api_key_id: None,
+            user_id: Some(org.user_id),
+            region: None,
+            period: "monthly",
+            limit_mc: 25_000,
+            limit_tokens: None,
+            hard_limit: true,
+        },
+    )
+    .await
+    .expect("budget creation");
+
+    let budgets = repo::list_budgets(&pool, org.org_id).await.expect("query");
+    assert!(budgets.iter().any(|b| b.user_id == Some(org.user_id)));
+    assert!(
+        !budgets.iter().any(|b| b.user_id == Some(other.id)),
+        "a budget scoped to one person must not resolve for a different one"
+    );
+
+    cleanup(&pool, &org).await;
+    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(other.id)
+        .execute(&pool)
+        .await;
+}
+
+#[tokio::test]
+async fn per_person_usage_summaries_only_include_that_persons_own_keys() {
+    // The whole point of `assigned_to_user_id` and `usage_records.user_id`: "what did this
+    // employee spend" must be answerable, and must not include a colleague's spend.
+    let Some((_, pool)) = setup().await else {
+        return skip("per_person_usage_summaries_only_include_that_persons_own_keys");
+    };
+
+    let org = create_org(&pool, "per-person-usage").await;
+    let colleague = repo::create_user(
+        &pool,
+        "colleague@test.invalid",
+        Some("$argon2id$fake"),
+        None,
+    )
+    .await
+    .expect("user creation");
+    repo::add_member(&pool, org.org_id, colleague.id, "member", None)
+        .await
+        .expect("org membership");
+
+    let now = chrono::Utc::now();
+    let record_for = |user_id: Uuid, cost_mc: i64| aegis_gateway::metering::usage::UsageEvent {
+        request_id: Uuid::new_v4(),
+        org_id: org.org_id,
+        api_key_id: None,
+        team_id: None,
+        user_id: Some(user_id),
+        requested_model: "openai/gpt-4o".into(),
+        served_model: "openai/gpt-4o-mini".into(),
+        provider: "openai".into(),
+        input_tokens: 100,
+        output_tokens: 50,
+        cached_input_tokens: 0,
+        cache_write_tokens: 0,
+        tokens_estimated: false,
+        baseline_cost_mc: cost_mc * 2,
+        actual_cost_mc: cost_mc,
+        input_cost_mc: 0,
+        output_cost_mc: 0,
+        gross_savings_mc: cost_mc,
+        aegis_fee_mc: 0,
+        routing_savings_mc: cost_mc,
+        compression_savings_mc: 0,
+        cache_savings_mc: 0,
+        latency_ms: 100,
+        gateway_overhead_ms: 0.5,
+        cache_hit: false,
+        cache_type: None,
+        routing_reason: "complexity".into(),
+        complexity_score: None,
+        status_code: 200,
+        error_type: None,
+        tokens_saved_by_compression: 0,
+        techniques_fired: None,
+        cache_bust_hits: 0,
+        region: None,
+        reserved_mc: 0,
+        reserved_tokens: 0,
+        created_at: now,
+    };
+
+    repo::insert_usage_record(&pool, &record_for(org.user_id, 1_000))
+        .await
+        .expect("insert");
+    repo::insert_usage_record(&pool, &record_for(org.user_id, 2_000))
+        .await
+        .expect("insert");
+    repo::insert_usage_record(&pool, &record_for(colleague.id, 9_000))
+        .await
+        .expect("insert");
+
+    let from = now - chrono::Duration::hours(1);
+    let to = now + chrono::Duration::hours(1);
+
+    let owner_summary = repo::usage_summary_for_user(&pool, org.org_id, org.user_id, from, to)
+        .await
+        .expect("query");
+    assert_eq!(owner_summary.requests, 2);
+    assert_eq!(owner_summary.actual_cost_mc, 3_000);
+
+    let colleague_summary = repo::usage_summary_for_user(&pool, org.org_id, colleague.id, from, to)
+        .await
+        .expect("query");
+    assert_eq!(colleague_summary.requests, 1);
+    assert_eq!(
+        colleague_summary.actual_cost_mc, 9_000,
+        "CROSS-PERSON LEAK: one employee's usage summary included a colleague's spend"
+    );
+
+    cleanup(&pool, &org).await;
+    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(colleague.id)
+        .execute(&pool)
+        .await;
 }

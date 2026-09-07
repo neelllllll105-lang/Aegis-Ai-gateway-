@@ -169,6 +169,88 @@ export default function SavingsPage() {
             />
           </div>
 
+          {derived && summary && summary.gross_savings_mc > 0 && (
+            <Card className="mt-6 p-6">
+              <h3 className="text-sm font-medium text-[var(--color-ink)]">
+                Where the savings came from
+              </h3>
+              <p className="mt-1 text-xs text-[var(--color-muted-light)]">
+                Gross savings split by lever. Compression and caching are each priced
+                directly; routing absorbs whatever of the total those two don&rsquo;t
+                explain, so the three always add up to the gross figure above exactly.
+              </p>
+
+              <div className="mt-5 grid gap-4 sm:grid-cols-3">
+                <Stat
+                  label="From routing"
+                  value={formatUsdCompact(derived.savings_breakdown_mc.routing)}
+                  sublabel="serving a cheaper capable model"
+                />
+                <Stat
+                  label="From compression"
+                  value={formatUsdCompact(derived.savings_breakdown_mc.compression)}
+                  sublabel="tokens removed before the request was sent"
+                />
+                <Stat
+                  label="From caching"
+                  value={formatUsdCompact(derived.savings_breakdown_mc.cache)}
+                  sublabel="exact/semantic hits, plus provider prompt-cache discounts"
+                />
+              </div>
+
+              {(() => {
+                const total = summary.gross_savings_mc || 1;
+                const segments = [
+                  {
+                    label: "Routing",
+                    mc: derived.savings_breakdown_mc.routing,
+                    color: "var(--color-accent)",
+                  },
+                  {
+                    label: "Compression",
+                    mc: derived.savings_breakdown_mc.compression,
+                    color: "var(--color-ochre)",
+                  },
+                  {
+                    label: "Caching",
+                    mc: derived.savings_breakdown_mc.cache,
+                    color: "var(--color-positive)",
+                  },
+                ];
+                return (
+                  <div className="mt-5">
+                    <div className="flex h-2.5 w-full overflow-hidden rounded-full border border-[var(--color-ink)]">
+                      {segments.map((segment) => (
+                        <div
+                          key={segment.label}
+                          style={{
+                            width: `${Math.max(0, (segment.mc / total) * 100)}%`,
+                            backgroundColor: segment.color,
+                          }}
+                          title={`${segment.label}: ${formatUsd(segment.mc)}`}
+                        />
+                      ))}
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1">
+                      {segments.map((segment) => (
+                        <span
+                          key={segment.label}
+                          className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--color-muted)]"
+                        >
+                          <span
+                            className="h-2 w-2 rounded-full"
+                            style={{ backgroundColor: segment.color }}
+                          />
+                          {segment.label} — {formatPercent((segment.mc / total) * 100)}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+            </Card>
+          )}
+
           {byModel.length > 0 && (
             <Card className="mt-6 p-6">
               <h3 className="text-sm font-medium text-[var(--color-ink)]">

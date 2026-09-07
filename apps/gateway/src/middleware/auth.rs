@@ -64,6 +64,18 @@ pub struct AuthContext {
     /// Organisation role, for session auth.
     pub role: Option<String>,
     pub is_admin: bool,
+    /// This request's team name, for team-scoped policy rules. Was hardcoded `None` at
+    /// every call site that builds `RoutingInputs` — every `{"when": {"team": "..."}}`
+    /// policy rule ever written was consequently unreachable from a live request, matched
+    /// only in the test suite that exercises `Condition` directly.
+    pub team_name: Option<String>,
+    /// The calling key's assignee, by email, for person-scoped policy rules.
+    pub user_email: Option<String>,
+    /// The routing mode this request falls back to when the caller sends no
+    /// `X-Aegis-Routing-Hint` header — the tighter of key/team/org defaults, already
+    /// resolved. `None` means nothing at any level set one, and the ladder's own default
+    /// (`auto`) applies.
+    pub default_routing_mode: Option<String>,
 }
 
 impl AuthContext {
@@ -88,6 +100,17 @@ impl AuthContext {
             region: context.org_region.clone(),
             role: None,
             is_admin: false,
+            team_name: context.team_name.clone(),
+            user_email: context.user_email.clone(),
+            // Most specific wins: this key's own setting, then its team's, then the org's.
+            // A `None` at every level (the common case today) leaves this `None` too, and
+            // resolution falls to the ladder's own `auto` default exactly as it did before
+            // any of this existed.
+            default_routing_mode: context
+                .key_default_routing_mode
+                .clone()
+                .or_else(|| context.team_default_routing_mode.clone())
+                .or_else(|| context.org_default_routing_mode.clone()),
         }
     }
 
@@ -330,6 +353,13 @@ pub async fn authenticate_session(
         region: org.region.clone(),
         role,
         is_admin: user.is_admin,
+        // A dashboard session has no team and needs none — team-scoped policy rules exist
+        // for gateway inference traffic, which is always key-authenticated.
+        team_name: None,
+        user_email: Some(user.email.clone()),
+        // Not resolved for session auth: a signed-in person browsing the dashboard never
+        // sends inference traffic, so there is no routing decision for a default to steer.
+        default_routing_mode: None,
     })
 }
 
@@ -395,6 +425,11 @@ mod tests {
             savings_share_bp: 2_000,
             zero_retention: false,
             org_region: "eu-central".into(),
+            team_name: None,
+            user_email: None,
+            key_default_routing_mode: None,
+            team_default_routing_mode: None,
+            org_default_routing_mode: None,
         }
     }
 

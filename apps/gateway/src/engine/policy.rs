@@ -32,9 +32,18 @@ pub struct Condition {
     /// Match the requested model. Supports a single trailing `*` wildcard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_requested: Option<String>,
-    /// Match a team name.
+    /// Match a team (project) name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
+    /// Match the calling key's assignee, by email. Absent on a request from a shared key,
+    /// which cannot satisfy this condition — same reasoning as `team` above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Match the routing mode this request resolved to before policy ran — the header if
+    /// the caller sent one, otherwise whatever key/project/org default applied. Lets a rule
+    /// target "anything already asking for economy" without re-deriving that decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_mode: Option<String>,
     /// Match when the request needs tool calling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_tools: Option<bool>,
@@ -61,6 +70,15 @@ pub struct Action {
     /// Send the requested model through untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passthrough: Option<bool>,
+    /// Set this request's routing mode, as if the caller had sent it via
+    /// `X-Aegis-Routing-Hint`. Does not pick a tier itself — it hands the request to the
+    /// same mode ladder ([`crate::types::RoutingHint::target_tier`]) an ordinary header
+    /// would, so the complex-band guarantee and budget-pressure steering still apply
+    /// exactly as they do for any other request. Ignored when `model_tier`,
+    /// `max_model_tier`, `pin_model`, `passthrough`, or `deny` also matched — a rule that
+    /// names an explicit tier or model has already said something more specific.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_mode: Option<String>,
 }
 
 /// One `when -> then` rule.
@@ -85,6 +103,8 @@ pub struct PolicyContext {
     pub complexity: Option<Complexity>,
     pub model_requested: String,
     pub team: Option<String>,
+    pub user: Option<String>,
+    pub routing_mode: Option<String>,
     pub requires_tools: bool,
     pub estimated_input_tokens: u64,
 }
@@ -140,6 +160,18 @@ impl Condition {
                 _ => return false,
             }
         }
+        if let Some(expected) = &self.user {
+            match &context.user {
+                Some(actual) if actual.eq_ignore_ascii_case(expected) => {}
+                _ => return false,
+            }
+        }
+        if let Some(expected) = &self.routing_mode {
+            match &context.routing_mode {
+                Some(actual) if actual.eq_ignore_ascii_case(expected) => {}
+                _ => return false,
+            }
+        }
         if let Some(expected) = self.requires_tools {
             if context.requires_tools != expected {
                 return false;
@@ -174,6 +206,17 @@ impl Action {
     pub fn is_passthrough(&self) -> bool {
         self.passthrough.unwrap_or(false)
     }
+
+    /// The routing mode this action sets, if any.
+    ///
+    /// An unrecognised value falls back to [`crate::types::RoutingHint::Auto`], the same
+    /// way an unrecognised header does — a typo in a policy rule must not fail a paid
+    /// request any more than a typo in a client's header should.
+    pub fn routing_mode_hint(&self) -> Option<crate::types::RoutingHint> {
+        self.routing_mode
+            .as_deref()
+            .map(|m| crate::types::RoutingHint::parse(Some(m)))
+    }
 }
 
 /// Match a model name against a pattern with an optional single trailing `*`.
@@ -199,6 +242,8 @@ mod tests {
             complexity: Some(Complexity::Simple),
             model_requested: "gpt-4o".to_string(),
             team: Some("engineering".to_string()),
+            user: Some("dana@example.com".to_string()),
+            routing_mode: Some("auto".to_string()),
             requires_tools: false,
             estimated_input_tokens: 500,
         }
@@ -267,6 +312,59 @@ mod tests {
         let mut no_team = context();
         no_team.team = None;
         assert!(!condition.matches(&no_team));
+    }
+
+    #[test]
+    fn user_conditions_are_case_insensitive_and_absent_on_a_shared_key() {
+        let condition = Condition {
+            user: Some("DANA@EXAMPLE.COM".into()),
+            ..Default::default()
+        };
+        assert!(condition.matches(&context()));
+
+        let mut shared_key = context();
+        shared_key.user = None;
+        assert!(
+            !condition.matches(&shared_key),
+            "a shared key has no assignee to match against"
+        );
+    }
+
+    #[test]
+    fn routing_mode_conditions_match_the_resolved_mode() {
+        let condition = Condition {
+            routing_mode: Some("economy".into()),
+            ..Default::default()
+        };
+        assert!(!condition.matches(&context()), "context resolved to auto");
+
+        let mut economy = context();
+        economy.routing_mode = Some("economy".into());
+        assert!(condition.matches(&economy));
+    }
+
+    #[test]
+    fn routing_mode_actions_parse_to_a_hint_with_a_safe_fallback() {
+        let action = Action {
+            routing_mode: Some("Economy".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            action.routing_mode_hint(),
+            Some(crate::types::RoutingHint::Economy)
+        );
+
+        // A typo must not fail the request -- it degrades to auto, same as a bad header.
+        let typo = Action {
+            routing_mode: Some("economey".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            typo.routing_mode_hint(),
+            Some(crate::types::RoutingHint::Auto)
+        );
+
+        assert_eq!(Action::default().routing_mode_hint(), None);
     }
 
     #[test]

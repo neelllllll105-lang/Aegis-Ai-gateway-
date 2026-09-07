@@ -250,6 +250,7 @@ pub struct Metrics {
     circuit_state_changes_total: CounterVec,
     fallback_total: CounterVec,
     tokens_total: CounterVec,
+    cache_bust_total: CounterVec,
     overhead: Histogram,
     latency: Histogram,
     provider_latency: HistogramVec,
@@ -280,6 +281,7 @@ impl Metrics {
             circuit_state_changes_total: CounterVec::default(),
             fallback_total: CounterVec::default(),
             tokens_total: CounterVec::default(),
+            cache_bust_total: CounterVec::default(),
             overhead: Histogram::new(OVERHEAD_BUCKETS_MS),
             latency: Histogram::new(LATENCY_BUCKETS_MS),
             provider_latency: HistogramVec::default(),
@@ -346,6 +348,13 @@ impl Metrics {
         if micro_cents > 0 {
             self.savings_micro_cents_total.inc("", micro_cents as u64);
         }
+    }
+
+    /// Record a system prompt found to contain a cache-busting pattern (a fresh timestamp,
+    /// UUID, or nonce that invalidates the provider's prefix cache on every turn). `kind`
+    /// is the pattern that matched — see [`crate::engine::cache_bust`].
+    pub fn record_cache_bust(&self, kind: &str) {
+        self.cache_bust_total.inc(&format!("kind=\"{kind}\""), 1);
     }
 
     /// Record a circuit breaker transition.
@@ -532,6 +541,11 @@ impl Metrics {
         self.tokens_total.render(
             "aegis_tokens_total",
             "Tokens served by model and direction",
+            &mut out,
+        );
+        self.cache_bust_total.render(
+            "aegis_cache_bust_total",
+            "System prompts found to contain a provider-prefix-cache-busting pattern, by kind",
             &mut out,
         );
         self.provider_latency.render(

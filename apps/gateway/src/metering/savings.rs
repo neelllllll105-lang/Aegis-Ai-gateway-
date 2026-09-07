@@ -110,6 +110,78 @@ impl SavingsBreakdown {
     }
 }
 
+/// A decomposition of `gross_savings` into the three levers that produce it: substituting a
+/// cheaper model, sending fewer tokens, and serving from a cache instead of a provider.
+///
+/// Per the implementation guide's metering section (`IG-1` §2.4), the three parts must
+/// always reconstitute the whole — the same invariant this module already holds
+/// `aegis_fee + customer_net == gross_savings` to, and enforced the same way: by
+/// construction, not by hoping the independent pieces add up. Two of the three levers here
+/// are priced directly from data the pipeline already has — compression from tokens removed
+/// times the routed model's input rate, caching from the provider's own prompt-cache
+/// discount (or the whole baseline, on an Aegis cache hit). **Routing absorbs whatever of
+/// `gross_savings` those two do not explain.** It is usually the dominant lever in practice,
+/// and treating it as the remainder — rather than as its own independently-priced estimate —
+/// is what keeps the sum exact without a second, harder-to-verify lookup for "what the
+/// requested model would have cost on the tokens actually sent." This is a deliberate,
+/// documented simplification: routing_savings is a residual, not an independent
+/// measurement, exactly the kind of case IG-1 §2.4 has in mind by "if any component can't
+/// be computed exactly, store what is exact and mark the rest absent" — here, "absent" is
+/// spelled "whatever is left," in the open, rather than a silently approximated figure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct SavingsComponents {
+    /// What routing substitution explains, once caching and compression are subtracted out.
+    pub routing_savings: MicroCents,
+    /// Tokens removed by context compression, priced at the routed model's input rate.
+    pub compression_savings: MicroCents,
+    /// The provider's own prompt-cache discount, or the whole baseline on an Aegis hit.
+    pub cache_savings: MicroCents,
+}
+
+impl SavingsComponents {
+    /// An Aegis cache hit: no provider was called this turn, so the entire saving is
+    /// attributed to caching and nothing is left for routing or compression to explain.
+    pub fn cache_hit(gross_savings: MicroCents) -> SavingsComponents {
+        SavingsComponents {
+            routing_savings: MicroCents::ZERO,
+            compression_savings: MicroCents::ZERO,
+            cache_savings: gross_savings,
+        }
+    }
+
+    /// Decompose a request that reached a provider.
+    ///
+    /// `compression_savings_raw` and `cache_savings_raw` are each priced independently of
+    /// `gross_savings` and of each other, so between them they can overshoot it (compression
+    /// and a provider cache discount both still apply even on a routing decision that lost
+    /// money overall) or fall short. Both are floored at zero and capped so neither the
+    /// reported components nor their sum can exceed the real total; routing takes whatever
+    /// of the total is left, also floored at zero.
+    pub fn compute(
+        gross_savings: MicroCents,
+        compression_savings_raw: MicroCents,
+        cache_savings_raw: MicroCents,
+    ) -> SavingsComponents {
+        let compression_savings = compression_savings_raw.floor_at_zero().min(gross_savings);
+        let cache_savings = cache_savings_raw
+            .floor_at_zero()
+            .min(gross_savings - compression_savings);
+        let routing_savings = (gross_savings - compression_savings - cache_savings).floor_at_zero();
+        SavingsComponents {
+            routing_savings,
+            compression_savings,
+            cache_savings,
+        }
+    }
+
+    /// The three parts, summed. Always equals the `gross_savings` given to
+    /// [`SavingsComponents::compute`] or [`SavingsComponents::cache_hit`] — proven in tests,
+    /// not just assumed.
+    pub fn sum(&self) -> MicroCents {
+        self.routing_savings + self.compression_savings + self.cache_savings
+    }
+}
+
 /// Running totals across many requests, for dashboards and invoices.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SavingsTotals {
@@ -310,6 +382,84 @@ mod tests {
         let totals = SavingsTotals::default();
         assert_eq!(totals.cache_hit_rate(), 0.0);
         assert_eq!(totals.savings_percent(), 0.0);
+    }
+
+    #[test]
+    fn components_reconstitute_gross_savings_in_the_ordinary_case() {
+        // $0.01 gross saving, $0.002 of it from compression, $0.001 from a provider cache
+        // discount — the rest (routing) should be the $0.007 remainder.
+        let components =
+            SavingsComponents::compute(MicroCents(10_000), MicroCents(2_000), MicroCents(1_000));
+        assert_eq!(components.compression_savings, MicroCents(2_000));
+        assert_eq!(components.cache_savings, MicroCents(1_000));
+        assert_eq!(components.routing_savings, MicroCents(7_000));
+        assert_eq!(components.sum(), MicroCents(10_000));
+    }
+
+    #[test]
+    fn a_cache_hit_attributes_everything_to_caching() {
+        let components = SavingsComponents::cache_hit(MicroCents(50_000));
+        assert_eq!(components.cache_savings, MicroCents(50_000));
+        assert_eq!(components.routing_savings, MicroCents::ZERO);
+        assert_eq!(components.compression_savings, MicroCents::ZERO);
+        assert_eq!(components.sum(), MicroCents(50_000));
+    }
+
+    #[test]
+    fn components_that_would_overshoot_the_total_are_capped_not_allowed_to_sum_over() {
+        // Compression alone priced higher than the whole gross saving (a routing decision
+        // that otherwise lost a little money, say) must not make the reported components
+        // sum to more than what was actually saved.
+        let components =
+            SavingsComponents::compute(MicroCents(1_000), MicroCents(5_000), MicroCents(5_000));
+        assert_eq!(components.sum(), MicroCents(1_000));
+        assert_eq!(components.routing_savings, MicroCents::ZERO);
+        assert!(components.compression_savings <= MicroCents(1_000));
+        assert!(components.cache_savings <= MicroCents(1_000));
+    }
+
+    #[test]
+    fn zero_gross_savings_yields_zero_everywhere() {
+        let components =
+            SavingsComponents::compute(MicroCents::ZERO, MicroCents::ZERO, MicroCents::ZERO);
+        assert_eq!(components, SavingsComponents::default());
+    }
+
+    #[test]
+    fn negative_raw_components_never_produce_a_negative_reported_figure() {
+        // Should never happen from real pricing data, but a decomposition function that
+        // trusted its inputs to already be non-negative would be one pricing-table bug away
+        // from writing a negative micro-cent figure to an immutable billing record.
+        let components =
+            SavingsComponents::compute(MicroCents(10_000), MicroCents(-500), MicroCents(-500));
+        assert!(components.compression_savings >= MicroCents::ZERO);
+        assert!(components.cache_savings >= MicroCents::ZERO);
+        assert!(components.routing_savings >= MicroCents::ZERO);
+        assert_eq!(components.sum(), MicroCents(10_000));
+    }
+
+    #[test]
+    fn property_components_always_reconstitute_gross_savings_across_the_grid() {
+        for gross in (0..=100_000).step_by(6_007) {
+            for compression in (0..=100_000).step_by(4_001) {
+                for cache in (0..=100_000).step_by(3_251) {
+                    let components = SavingsComponents::compute(
+                        MicroCents(gross),
+                        MicroCents(compression),
+                        MicroCents(cache),
+                    );
+                    assert_eq!(
+                        components.sum(),
+                        MicroCents(gross),
+                        "components did not reconstitute gross={gross} \
+                         compression_raw={compression} cache_raw={cache}"
+                    );
+                    assert!(components.routing_savings >= MicroCents::ZERO);
+                    assert!(components.compression_savings >= MicroCents::ZERO);
+                    assert!(components.cache_savings >= MicroCents::ZERO);
+                }
+            }
+        }
     }
 
     #[test]

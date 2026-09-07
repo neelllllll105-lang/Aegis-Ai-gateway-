@@ -67,6 +67,11 @@ pub struct Organization {
     pub region: String,
     pub stripe_customer_id: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Organisation-wide default routing mode — the last rung before `auto` in the
+    /// key -> project -> org resolution chain.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub default_routing_mode: Option<String>,
 }
 
 impl Organization {
@@ -102,6 +107,11 @@ pub struct ApiKey {
     pub expires_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// Mode this key uses when the caller sends no `X-Aegis-Routing-Hint` header. `None`
+    /// falls through to the team's default, then the org's, then `auto`.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub default_routing_mode: Option<String>,
 }
 
 impl ApiKey {
@@ -149,6 +159,10 @@ pub struct Team {
     pub name: String,
     pub monthly_budget_mc: Option<i64>,
     pub created_at: DateTime<Utc>,
+    /// Mode this project's keys use by default, when the key itself sets none.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub default_routing_mode: Option<String>,
 }
 
 /// A stored routing policy.
@@ -169,12 +183,22 @@ pub struct Budget {
     pub org_id: Uuid,
     pub team_id: Option<Uuid>,
     pub api_key_id: Option<Uuid>,
+    /// The person this budget caps — "how much may this employee spend," summed across
+    /// every key issued to them. `#[sqlx(default)]` so this struct still binds against a
+    /// database that has not run migration 0011 yet.
+    #[sqlx(default)]
+    pub user_id: Option<Uuid>,
     /// Region this budget caps, lower-cased. `None` for a budget that is not
-    /// region-scoped. Exactly one of `team_id`, `api_key_id`, `region` may be set; a row
-    /// with none of them is the organisation-wide budget.
+    /// region-scoped. Exactly one of `team_id`, `api_key_id`, `user_id`, `region` may be
+    /// set; a row with none of them is the organisation-wide budget.
     pub region: Option<String>,
     pub period: String,
     pub limit_mc: i64,
+    /// An additional token ceiling on the same scope as this row, enforced independently
+    /// of `limit_mc`. `None` means this row caps money only, which is every row created
+    /// before migration 0011.
+    #[sqlx(default)]
+    pub limit_tokens: Option<i64>,
     pub hard_limit: bool,
     pub created_at: DateTime<Utc>,
 }
@@ -200,6 +224,15 @@ pub struct UsageSummary {
     pub actual_cost_mc: i64,
     pub gross_savings_mc: i64,
     pub aegis_fee_mc: i64,
+    /// `gross_savings_mc`, summed by which lever explains it. See
+    /// `crate::metering::savings::SavingsComponents`. `#[sqlx(default)]` so this struct
+    /// still binds against a database that has not run migration 0010 yet.
+    #[sqlx(default)]
+    pub routing_savings_mc: i64,
+    #[sqlx(default)]
+    pub compression_savings_mc: i64,
+    #[sqlx(default)]
+    pub cache_savings_mc: i64,
 }
 
 /// One row of the request metadata log. Deliberately carries no prompt or response
@@ -254,6 +287,31 @@ pub struct KeyContext {
     pub savings_share_bp: i32,
     pub zero_retention: bool,
     pub org_region: String,
+    /// The team's own name, for team-scoped policy rules (`Condition::team`).
+    ///
+    /// Resolved here, in the same query, rather than the router doing a second lookup by
+    /// `team_id`: a policy condition is matched by the name an admin typed into a text box,
+    /// not the UUID nobody would write by hand, and the hot path has no budget for an extra
+    /// round trip just to find out what a team is called.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub team_name: Option<String>,
+    /// The assigned user's email, for person-scoped policy rules (`Condition::user`).
+    /// `None` for a shared/unassigned key, same as `assigned_to_user_id`.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub user_email: Option<String>,
+    /// This key's own default routing mode, before falling through to the team's or the
+    /// org's. `None` means this key sets no preference at its own level.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub key_default_routing_mode: Option<String>,
+    #[sqlx(default)]
+    #[serde(default)]
+    pub team_default_routing_mode: Option<String>,
+    #[sqlx(default)]
+    #[serde(default)]
+    pub org_default_routing_mode: Option<String>,
 }
 
 impl KeyContext {
@@ -614,7 +672,39 @@ pub async fn role_in_org(pool: &PgPool, org_id: Uuid, user_id: Uuid) -> Result<O
     Ok(row.map(|(role,)| role))
 }
 
+/// A user's role within one team ("project"), if they are a member of it at all.
+///
+/// Distinct from [`role_in_org`]: an org-wide role governs the organisation; this governs
+/// exactly one team, and answers "may this person manage this team's keys and budget
+/// without full org admin" — `Some("lead")` — versus "member of the team, no more."
+pub async fn role_in_team(pool: &PgPool, team_id: Uuid, user_id: Uuid) -> Result<Option<String>> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT role FROM team_memberships WHERE team_id = $1 AND user_id = $2")
+            .bind(team_id)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(AegisError::Database)?;
+    Ok(row.map(|(role,)| role))
+}
+
+/// True when a team belongs to the given organisation.
+///
+/// The guard every project-scoped handler runs before trusting a `team_id` path
+/// parameter: without it, a valid session in org A could probe or act on org B's team by
+/// id, since a bare team lookup carries no tenant boundary of its own.
+pub async fn team_belongs_to_org(pool: &PgPool, team_id: Uuid, org_id: Uuid) -> Result<bool> {
+    let row: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM teams WHERE id = $1 AND org_id = $2")
+        .bind(team_id)
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(row.is_some())
+}
+
 /// Update organisation settings.
+#[allow(clippy::too_many_arguments)]
 pub async fn update_org_settings(
     pool: &PgPool,
     org_id: Uuid,
@@ -622,6 +712,7 @@ pub async fn update_org_settings(
     billing_email: Option<&str>,
     zero_retention: Option<bool>,
     content_capture: Option<bool>,
+    default_routing_mode: Option<&str>,
 ) -> Result<Organization> {
     sqlx::query_as::<_, Organization>(
         "UPDATE organizations SET
@@ -634,16 +725,19 @@ pub async fn update_org_settings(
                 WHEN COALESCE($4, zero_retention) THEN false
                 ELSE COALESCE($5, content_capture)
             END,
+            default_routing_mode = COALESCE($6, default_routing_mode),
             updated_at = NOW()
          WHERE id = $1
          RETURNING id, name, slug, plan, savings_share_bp, billing_email, zero_retention,
-                   content_capture, region, stripe_customer_id, created_at",
+                   content_capture, region, stripe_customer_id, created_at,
+                   default_routing_mode",
     )
     .bind(org_id)
     .bind(name)
     .bind(billing_email)
     .bind(zero_retention)
     .bind(content_capture)
+    .bind(default_routing_mode)
     .fetch_one(pool)
     .await
     .map_err(AegisError::Database)
@@ -798,13 +892,22 @@ pub async fn create_api_key(
 ///
 /// Only ever reached on a cache miss; the result is cached in Redis for 60 seconds.
 pub async fn resolve_key(pool: &PgPool, key_hash: &str) -> Result<Option<KeyContext>> {
+    // LEFT JOIN teams/users, not JOIN: a key can be org-wide (`team_id IS NULL`) or shared
+    // (`assigned_to_user_id IS NULL`), and both are legitimate, common cases that must not
+    // make the key itself unresolvable.
     sqlx::query_as::<_, KeyContext>(
         "SELECT k.id AS api_key_id, k.org_id, k.team_id, k.assigned_to_user_id,
                 k.rate_limit_per_minute,
                 k.monthly_budget_mc, k.allowed_models,
-                o.plan, o.savings_share_bp, o.zero_retention, o.region AS org_region
+                o.plan, o.savings_share_bp, o.zero_retention, o.region AS org_region,
+                t.name AS team_name, u.email AS user_email,
+                k.default_routing_mode AS key_default_routing_mode,
+                t.default_routing_mode AS team_default_routing_mode,
+                o.default_routing_mode AS org_default_routing_mode
          FROM api_keys k
          JOIN organizations o ON o.id = k.org_id
+         LEFT JOIN teams t ON t.id = k.team_id
+         LEFT JOIN users u ON u.id = k.assigned_to_user_id
          WHERE k.key_hash = $1
            AND k.revoked_at IS NULL
            AND (k.expires_at IS NULL OR k.expires_at > NOW())",
@@ -820,7 +923,7 @@ pub async fn list_api_keys(pool: &PgPool, org_id: Uuid) -> Result<Vec<ApiKey>> {
     sqlx::query_as::<_, ApiKey>(
         "SELECT id, org_id, team_id, assigned_to_user_id, name, key_prefix, key_hash,
                 rate_limit_per_minute, monthly_budget_mc, allowed_models, last_used_at,
-                expires_at, revoked_at, created_at
+                expires_at, revoked_at, created_at, default_routing_mode
          FROM api_keys WHERE org_id = $1 ORDER BY created_at DESC",
     )
     .bind(org_id)
@@ -847,7 +950,7 @@ pub async fn list_api_keys_for_member(
     sqlx::query_as::<_, ApiKey>(
         "SELECT id, org_id, team_id, assigned_to_user_id, name, key_prefix, key_hash,
                 rate_limit_per_minute, monthly_budget_mc, allowed_models, last_used_at,
-                expires_at, revoked_at, created_at
+                expires_at, revoked_at, created_at, default_routing_mode
          FROM api_keys
          WHERE org_id = $1
            AND (assigned_to_user_id = $2 OR created_by = $2)
@@ -878,6 +981,7 @@ pub async fn find_api_key(pool: &PgPool, org_id: Uuid, key_id: Uuid) -> Result<O
 }
 
 /// Update mutable key settings.
+#[allow(clippy::too_many_arguments)]
 pub async fn update_api_key(
     pool: &PgPool,
     org_id: Uuid,
@@ -886,17 +990,19 @@ pub async fn update_api_key(
     rate_limit_per_minute: Option<i32>,
     monthly_budget_mc: Option<i64>,
     allowed_models: Option<serde_json::Value>,
+    default_routing_mode: Option<&str>,
 ) -> Result<Option<ApiKey>> {
     sqlx::query_as::<_, ApiKey>(
         "UPDATE api_keys SET
             name = COALESCE($3, name),
             rate_limit_per_minute = COALESCE($4, rate_limit_per_minute),
             monthly_budget_mc = COALESCE($5, monthly_budget_mc),
-            allowed_models = COALESCE($6, allowed_models)
+            allowed_models = COALESCE($6, allowed_models),
+            default_routing_mode = COALESCE($7, default_routing_mode)
          WHERE id = $1 AND org_id = $2
          RETURNING id, org_id, team_id, name, key_prefix, key_hash, rate_limit_per_minute,
                    monthly_budget_mc, allowed_models, last_used_at, expires_at, revoked_at,
-                   created_at",
+                   created_at, default_routing_mode",
     )
     .bind(key_id)
     .bind(org_id)
@@ -904,6 +1010,7 @@ pub async fn update_api_key(
     .bind(rate_limit_per_minute)
     .bind(monthly_budget_mc)
     .bind(allowed_models)
+    .bind(default_routing_mode)
     .fetch_optional(pool)
     .await
     .map_err(AegisError::Database)
@@ -1096,14 +1203,17 @@ pub async fn create_team(
     org_id: Uuid,
     name: &str,
     monthly_budget_mc: Option<i64>,
+    default_routing_mode: Option<&str>,
 ) -> Result<Team> {
     sqlx::query_as::<_, Team>(
-        "INSERT INTO teams (org_id, name, monthly_budget_mc) VALUES ($1, $2, $3)
-         RETURNING id, org_id, name, monthly_budget_mc, created_at",
+        "INSERT INTO teams (org_id, name, monthly_budget_mc, default_routing_mode)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, org_id, name, monthly_budget_mc, created_at, default_routing_mode",
     )
     .bind(org_id)
     .bind(name)
     .bind(monthly_budget_mc)
+    .bind(default_routing_mode)
     .fetch_one(pool)
     .await
     .map_err(map_unique_violation("a team with that name already exists"))
@@ -1112,7 +1222,7 @@ pub async fn create_team(
 /// List teams.
 pub async fn list_teams(pool: &PgPool, org_id: Uuid) -> Result<Vec<Team>> {
     sqlx::query_as::<_, Team>(
-        "SELECT id, org_id, name, monthly_budget_mc, created_at
+        "SELECT id, org_id, name, monthly_budget_mc, created_at, default_routing_mode
          FROM teams WHERE org_id = $1 ORDER BY name",
     )
     .bind(org_id)
@@ -1130,6 +1240,66 @@ pub async fn delete_team(pool: &PgPool, org_id: Uuid, team_id: Uuid) -> Result<b
         .await
         .map_err(AegisError::Database)?;
     Ok(result.rows_affected() > 0)
+}
+
+/// A team membership row, joined with the member's identity — what a project's own
+/// members list actually needs to render.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct TeamMember {
+    pub user_id: Uuid,
+    pub email: String,
+    pub name: Option<String>,
+    pub role: String,
+}
+
+/// Add a person to a team, or change their role in it if they are already a member.
+///
+/// The `team_memberships` table existed since the first migration but had no write path
+/// anywhere in the application — a team could be created, and nobody could ever actually be
+/// added to it. This is that write path.
+pub async fn add_team_member(
+    pool: &PgPool,
+    team_id: Uuid,
+    user_id: Uuid,
+    role: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO team_memberships (team_id, user_id, role) VALUES ($1, $2, $3)
+         ON CONFLICT (team_id, user_id) DO UPDATE SET role = EXCLUDED.role",
+    )
+    .bind(team_id)
+    .bind(user_id)
+    .bind(role)
+    .execute(pool)
+    .await
+    .map_err(AegisError::Database)?;
+    Ok(())
+}
+
+/// Remove a person from a team.
+pub async fn remove_team_member(pool: &PgPool, team_id: Uuid, user_id: Uuid) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM team_memberships WHERE team_id = $1 AND user_id = $2")
+        .bind(team_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// List a team's members, for the project view.
+pub async fn list_team_members(pool: &PgPool, team_id: Uuid) -> Result<Vec<TeamMember>> {
+    sqlx::query_as::<_, TeamMember>(
+        "SELECT u.id AS user_id, u.email, u.name, tm.role
+         FROM team_memberships tm
+         JOIN users u ON u.id = tm.user_id
+         WHERE tm.team_id = $1
+         ORDER BY tm.role, u.email",
+    )
+    .bind(team_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AegisError::Database)
 }
 
 /// The active routing policy for an organisation.
@@ -1190,8 +1360,9 @@ pub async fn delete_policy(pool: &PgPool, org_id: Uuid, policy_id: Uuid) -> Resu
 /// List budgets.
 pub async fn list_budgets(pool: &PgPool, org_id: Uuid) -> Result<Vec<Budget>> {
     sqlx::query_as::<_, Budget>(concat!(
-        "SELECT id, org_id, team_id, api_key_id, region, period, limit_mc, hard_limit, ",
-        "created_at FROM budgets WHERE org_id = $1 ORDER BY created_at",
+        "SELECT id, org_id, team_id, api_key_id, user_id, region, period, limit_mc, ",
+        "limit_tokens, hard_limit, created_at FROM budgets WHERE org_id = $1 ",
+        "ORDER BY created_at",
     ))
     .bind(org_id)
     .fetch_all(pool)
@@ -1210,9 +1381,15 @@ pub struct NewBudget<'a> {
     pub org_id: Uuid,
     pub team_id: Option<Uuid>,
     pub api_key_id: Option<Uuid>,
+    /// The person this budget caps. Exactly one of `team_id`, `api_key_id`, `user_id`, and
+    /// region (set separately, below) may be set — see `budgets_have_one_scope`.
+    pub user_id: Option<Uuid>,
     pub region: Option<&'a str>,
     pub period: &'a str,
     pub limit_mc: i64,
+    /// An additional ceiling in tokens, enforced independently of `limit_mc`. `None` means
+    /// this budget caps money only.
+    pub limit_tokens: Option<i64>,
     pub hard_limit: bool,
 }
 
@@ -1224,17 +1401,20 @@ pub async fn create_budget(pool: &PgPool, budget: NewBudget<'_>) -> Result<Budge
     let region = budget.region.map(|r| r.trim().to_ascii_lowercase());
     sqlx::query_as::<_, Budget>(concat!(
         "INSERT INTO budgets ",
-        "(org_id, team_id, api_key_id, region, period, limit_mc, hard_limit) ",
-        "VALUES ($1, $2, $3, $4, $5, $6, $7) ",
-        "RETURNING id, org_id, team_id, api_key_id, region, period, limit_mc, ",
-        "hard_limit, created_at",
+        "(org_id, team_id, api_key_id, user_id, region, period, limit_mc, limit_tokens, ",
+        "hard_limit) ",
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ",
+        "RETURNING id, org_id, team_id, api_key_id, user_id, region, period, limit_mc, ",
+        "limit_tokens, hard_limit, created_at",
     ))
     .bind(budget.org_id)
     .bind(budget.team_id)
     .bind(budget.api_key_id)
+    .bind(budget.user_id)
     .bind(region)
     .bind(budget.period)
     .bind(budget.limit_mc)
+    .bind(budget.limit_tokens)
     .bind(budget.hard_limit)
     .fetch_one(pool)
     .await
@@ -1354,9 +1534,11 @@ pub async fn insert_usage_record(
              gross_savings_mc, aegis_fee_mc, latency_ms, gateway_overhead_us, cache_hit,
              cache_type, routing_reason, complexity_score_milli, tokens_saved_by_compression,
              status_code, error_type, created_at, cached_input_tokens, cache_write_tokens,
-             input_cost_mc, output_cost_mc, user_id)
+             input_cost_mc, output_cost_mc, user_id, routing_savings_mc,
+             compression_savings_mc, cache_savings_mc, cache_bust_hits, techniques_fired)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                 $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
+                 $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
+                 $31, $32, $33, $34)
          ON CONFLICT (request_id, created_at) DO NOTHING",
     )
     .bind(event.request_id)
@@ -1388,6 +1570,11 @@ pub async fn insert_usage_record(
     .bind(event.input_cost_mc)
     .bind(event.output_cost_mc)
     .bind(event.user_id)
+    .bind(event.routing_savings_mc)
+    .bind(event.compression_savings_mc)
+    .bind(event.cache_savings_mc)
+    .bind(event.cache_bust_hits as i32)
+    .bind(&event.techniques_fired)
     .execute(pool)
     .await
     .map_err(AegisError::Database)?;
@@ -1411,11 +1598,86 @@ pub async fn usage_summary(
             COALESCE(SUM(baseline_cost_mc), 0)::BIGINT AS baseline_cost_mc,
             COALESCE(SUM(actual_cost_mc), 0)::BIGINT AS actual_cost_mc,
             COALESCE(SUM(gross_savings_mc), 0)::BIGINT AS gross_savings_mc,
-            COALESCE(SUM(aegis_fee_mc), 0)::BIGINT AS aegis_fee_mc
+            COALESCE(SUM(aegis_fee_mc), 0)::BIGINT AS aegis_fee_mc,
+            COALESCE(SUM(routing_savings_mc), 0)::BIGINT AS routing_savings_mc,
+            COALESCE(SUM(compression_savings_mc), 0)::BIGINT AS compression_savings_mc,
+            COALESCE(SUM(cache_savings_mc), 0)::BIGINT AS cache_savings_mc
          FROM usage_records
          WHERE org_id = $1 AND created_at >= $2 AND created_at < $3",
     )
     .bind(org_id)
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Aggregated usage for one team ("project") within an organisation.
+///
+/// Org-scoped like every query in this file — `team_id` alone is never trusted as the
+/// tenant boundary, `org_id` is, so a team id from another organisation matches nothing
+/// rather than leaking that org's figures.
+pub async fn usage_summary_for_team(
+    pool: &PgPool,
+    org_id: Uuid,
+    team_id: Uuid,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<UsageSummary> {
+    sqlx::query_as::<_, UsageSummary>(
+        "SELECT
+            COUNT(*)::BIGINT AS requests,
+            COALESCE(SUM(CASE WHEN cache_hit THEN 1 ELSE 0 END), 0)::BIGINT AS cache_hits,
+            COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
+            COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
+            COALESCE(SUM(baseline_cost_mc), 0)::BIGINT AS baseline_cost_mc,
+            COALESCE(SUM(actual_cost_mc), 0)::BIGINT AS actual_cost_mc,
+            COALESCE(SUM(gross_savings_mc), 0)::BIGINT AS gross_savings_mc,
+            COALESCE(SUM(aegis_fee_mc), 0)::BIGINT AS aegis_fee_mc,
+            COALESCE(SUM(routing_savings_mc), 0)::BIGINT AS routing_savings_mc,
+            COALESCE(SUM(compression_savings_mc), 0)::BIGINT AS compression_savings_mc,
+            COALESCE(SUM(cache_savings_mc), 0)::BIGINT AS cache_savings_mc
+         FROM usage_records
+         WHERE org_id = $1 AND team_id = $2 AND created_at >= $3 AND created_at < $4",
+    )
+    .bind(org_id)
+    .bind(team_id)
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await
+    .map_err(AegisError::Database)
+}
+
+/// Aggregated usage for one person within an organisation — "what did this employee
+/// spend," across every key ever issued to them, org-scoped the same way as
+/// [`usage_summary_for_team`].
+pub async fn usage_summary_for_user(
+    pool: &PgPool,
+    org_id: Uuid,
+    user_id: Uuid,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<UsageSummary> {
+    sqlx::query_as::<_, UsageSummary>(
+        "SELECT
+            COUNT(*)::BIGINT AS requests,
+            COALESCE(SUM(CASE WHEN cache_hit THEN 1 ELSE 0 END), 0)::BIGINT AS cache_hits,
+            COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
+            COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
+            COALESCE(SUM(baseline_cost_mc), 0)::BIGINT AS baseline_cost_mc,
+            COALESCE(SUM(actual_cost_mc), 0)::BIGINT AS actual_cost_mc,
+            COALESCE(SUM(gross_savings_mc), 0)::BIGINT AS gross_savings_mc,
+            COALESCE(SUM(aegis_fee_mc), 0)::BIGINT AS aegis_fee_mc,
+            COALESCE(SUM(routing_savings_mc), 0)::BIGINT AS routing_savings_mc,
+            COALESCE(SUM(compression_savings_mc), 0)::BIGINT AS compression_savings_mc,
+            COALESCE(SUM(cache_savings_mc), 0)::BIGINT AS cache_savings_mc
+         FROM usage_records
+         WHERE org_id = $1 AND user_id = $2 AND created_at >= $3 AND created_at < $4",
+    )
+    .bind(org_id)
+    .bind(user_id)
     .bind(from)
     .bind(to)
     .fetch_one(pool)
@@ -2210,6 +2472,7 @@ mod tests {
             expires_at: None,
             revoked_at: None,
             created_at: Utc::now(),
+            default_routing_mode: None,
         };
         assert!(base.is_usable());
 
@@ -2249,6 +2512,7 @@ mod tests {
             expires_at: None,
             revoked_at: None,
             created_at: Utc::now(),
+            default_routing_mode: None,
         };
         assert_eq!(
             key.allowed_model_list(),
@@ -2325,6 +2589,7 @@ mod tests {
             region: "eu-central".into(),
             stripe_customer_id: None,
             created_at: Utc::now(),
+            default_routing_mode: None,
         };
         assert_eq!(org.savings_share_basis_points(), 0);
         assert!(org.caching_allowed());
@@ -2344,6 +2609,7 @@ mod tests {
             region: "eu-central".into(),
             stripe_customer_id: None,
             created_at: Utc::now(),
+            default_routing_mode: None,
         };
         assert!(!org.caching_allowed());
     }

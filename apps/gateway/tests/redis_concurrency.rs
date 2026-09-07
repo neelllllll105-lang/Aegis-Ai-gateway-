@@ -43,6 +43,11 @@ fn auth(plan: &str) -> AuthContext {
         savings_share_bp: 2_000,
         zero_retention: false,
         org_region: "eu-central".into(),
+        team_name: None,
+        user_email: None,
+        key_default_routing_mode: None,
+        team_default_routing_mode: None,
+        org_default_routing_mode: None,
     })
 }
 
@@ -135,6 +140,7 @@ async fn budget_reservation_is_atomic_against_real_redis() {
                 &limits,
                 None,
                 cost_per_request,
+                0,
             )
             .await
             .unwrap()
@@ -198,7 +204,7 @@ async fn a_refused_reservation_leaves_the_real_counter_untouched() {
         .expect("prime spend at the limit");
 
     for _ in 0..5 {
-        let outcome = budget::check_and_reserve(&store, &context, &limits, None, 100_000)
+        let outcome = budget::check_and_reserve(&store, &context, &limits, None, 100_000, 0)
             .await
             .unwrap();
         assert!(matches!(outcome, BudgetOutcome::Denied(_)));

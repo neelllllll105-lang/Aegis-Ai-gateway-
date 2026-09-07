@@ -558,6 +558,21 @@ impl RoutingHint {
         }
     }
 
+    /// Resolve the mode for one request.
+    ///
+    /// An explicit header always wins, recognised or not — same reasoning as [`Self::parse`]
+    /// itself: a typo should not fail a paid request, not fall through to a default the
+    /// caller never asked for. Only an *absent* (or blank) header consults `default_mode`,
+    /// which the caller has already coalesced from key -> project -> org (see
+    /// `AuthContext::default_routing_mode`). Nothing set anywhere lands on `Auto`, exactly
+    /// as it always has.
+    pub fn resolve(header: Option<&str>, default_mode: Option<&str>) -> RoutingHint {
+        match header.map(str::trim) {
+            Some(raw) if !raw.is_empty() => RoutingHint::parse(Some(raw)),
+            _ => RoutingHint::parse(default_mode),
+        }
+    }
+
     /// Wire value, for logging and for the routing explanation.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -641,6 +656,38 @@ mod tests {
         assert_eq!(RoutingHint::parse(Some("balanced")), RoutingHint::Balanced);
         assert_eq!(RoutingHint::parse(Some("nonsense")), RoutingHint::Auto);
         assert_eq!(RoutingHint::parse(None), RoutingHint::Auto);
+    }
+
+    #[test]
+    fn an_explicit_header_always_outranks_a_default_mode() {
+        assert_eq!(
+            RoutingHint::resolve(Some("quality"), Some("economy")),
+            RoutingHint::Quality
+        );
+        // Even a header the parser cannot recognise wins over a valid default -- a typo
+        // must degrade to auto, not silently substitute the organisation's preference.
+        assert_eq!(
+            RoutingHint::resolve(Some("nonsense"), Some("economy")),
+            RoutingHint::Auto
+        );
+    }
+
+    #[test]
+    fn an_absent_header_falls_through_to_the_default_mode() {
+        assert_eq!(
+            RoutingHint::resolve(None, Some("economy")),
+            RoutingHint::Economy
+        );
+        assert_eq!(
+            RoutingHint::resolve(Some("  "), Some("economy")),
+            RoutingHint::Economy,
+            "a blank header is the same as no header at all"
+        );
+    }
+
+    #[test]
+    fn nothing_set_anywhere_still_lands_on_auto() {
+        assert_eq!(RoutingHint::resolve(None, None), RoutingHint::Auto);
     }
 
     #[test]

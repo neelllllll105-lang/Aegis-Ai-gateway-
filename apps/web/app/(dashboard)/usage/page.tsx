@@ -11,9 +11,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { api, ApiError, type RequestLogRow } from "@/lib/api";
-import { Card, EmptyState, ErrorState, SectionHeader } from "@/components/ui";
-import { formatCount, formatUsd } from "@/lib/format";
+import { api, ApiError, type MyUsageResponse, type RequestLogRow } from "@/lib/api";
+import { Card, EmptyState, ErrorState, SectionHeader, Stat } from "@/components/ui";
+import { formatCount, formatPercent, formatUsd, formatUsdCompact } from "@/lib/format";
 
 /**
  * Tooltip value formatter.
@@ -38,6 +38,12 @@ export default function UsagePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Separate from the org-wide log above: what's attributed to the signed-in person
+  // specifically, across every key issued to them. Loaded independently and allowed to
+  // fail quietly — a service-account-only session has no "me" to report on, and that must
+  // not block the rest of the page.
+  const [myUsage, setMyUsage] = useState<MyUsageResponse | null>(null);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -54,6 +60,15 @@ export default function UsagePage() {
           caught instanceof ApiError ? caught.message : "Could not load usage data.",
         );
         setLoading(false);
+      });
+
+    api
+      .myUsage()
+      .then((response) => {
+        if (!cancelled) setMyUsage(response);
+      })
+      .catch(() => {
+        // No "me" to report on for this credential — the org-wide view above still holds.
       });
 
     return () => {
@@ -118,6 +133,35 @@ export default function UsagePage() {
         title="Usage"
         description="Daily spend against what the same traffic would have cost unoptimised. The gap is what Aegis removed."
       />
+
+      {myUsage && myUsage.summary.requests > 0 && (
+        <Card className="mb-6 p-6">
+          <h3 className="text-sm font-medium text-[var(--color-ink)]">
+            Your own usage
+          </h3>
+          <p className="mt-1 text-xs text-[var(--color-muted-light)]">
+            Attributed to keys issued to you specifically, last 30 days — a subset of the
+            organisation-wide totals below.
+          </p>
+          <div className="mt-4 grid gap-4 sm:grid-cols-3">
+            <Stat
+              label="You spent"
+              value={formatUsdCompact(myUsage.summary.actual_cost_mc)}
+              sublabel={`${formatCount(myUsage.summary.requests)} requests`}
+            />
+            <Stat
+              label="You saved"
+              value={formatUsdCompact(myUsage.summary.gross_savings_mc)}
+              sublabel={formatPercent(myUsage.derived.savings_percent)}
+              accent
+            />
+            <Stat
+              label="Cache hit rate"
+              value={formatPercent(myUsage.derived.cache_hit_rate)}
+            />
+          </div>
+        </Card>
+      )}
 
       {daily.length === 0 ? (
         <Card>

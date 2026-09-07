@@ -89,6 +89,8 @@ pub struct RoutingInputs<'a> {
     pub policy: Option<&'a RoutingPolicy>,
     /// Team name, for team-scoped policy rules.
     pub team: Option<String>,
+    /// The calling key's assignee, by email, for person-scoped policy rules.
+    pub user: Option<String>,
     /// Models this org may use at all. `None` means no restriction.
     pub allowed_models: Option<Vec<String>>,
     /// Hard tier ceiling from the org's plan (the free tier is capped at cheap models).
@@ -184,12 +186,22 @@ impl Router {
 
         let classification = self.classifier.classify(request);
 
+        // The mode this decision uses from here on. Starts as the caller's own hint
+        // (already resolved from the header, or the key/project/org default chain, before
+        // this function was ever called) and may be overridden by a policy's `routing_mode`
+        // action below — never by anything else, so [1]'s absolute passthrough escape hatch
+        // above stays checked against the caller's *actual* header, not a value policy
+        // could have changed.
+        let mut effective_hint = inputs.hint;
+
         // [2] Organisation policy.
         if let Some(policy) = inputs.policy {
             let context = PolicyContext {
                 complexity: Some(classification.complexity),
                 model_requested: request.model.clone(),
                 team: inputs.team.clone(),
+                user: inputs.user.clone(),
+                routing_mode: Some(inputs.hint.as_str().to_string()),
                 requires_tools: request.requires_tools(),
                 estimated_input_tokens: request.estimated_input_tokens(),
             };
@@ -239,8 +251,21 @@ impl Router {
                     ) {
                         return Ok(decision);
                     }
+                    return Ok(self.passthrough(requested, RoutingReason::Policy));
                 }
-                return Ok(self.passthrough(requested, RoutingReason::Policy));
+
+                if let Some(mode) = action.routing_mode_hint() {
+                    // A mode-only action does not pick a tier itself — it hands the rest of
+                    // this decision to the mode ladder below, exactly as an ordinary header
+                    // would, so the complex-band guarantee is enforced by the same control
+                    // flow either way rather than a second copy of it living here.
+                    effective_hint = mode;
+                } else {
+                    // Matched, but named no actionable field at all: the safest reading is
+                    // passthrough, unchanged from this function's behaviour before
+                    // `routing_mode` existed.
+                    return Ok(self.passthrough(requested, RoutingReason::Policy));
+                }
             }
         }
 
@@ -281,7 +306,7 @@ impl Router {
         // branch returns before any tier logic runs. Serving a worse answer to save money
         // is the one trade this product must never make silently, so it is expressed
         // twice on purpose.
-        let Some(target_tier) = inputs.hint.target_tier(classification.complexity) else {
+        let Some(target_tier) = effective_hint.target_tier(classification.complexity) else {
             return Ok(self.passthrough_capped(
                 requested,
                 pricing,
@@ -1333,6 +1358,78 @@ mod tests {
             .unwrap();
         assert_eq!(decision.served_model, "openai/gpt-4o");
         assert_eq!(decision.reason, RoutingReason::Policy);
+    }
+
+    #[test]
+    fn a_policy_can_set_the_routing_mode_for_a_matched_request() {
+        // A medium request the caller left on `auto` (balanced -> mid tier) gets pushed to
+        // economy (medium -> cheap tier) by a policy naming this team, without the policy
+        // author having to know or name a specific tier.
+        let policy = RoutingPolicy::from_json(
+            r#"[{"when": {"team": "interns"}, "then": {"routing_mode": "economy"}}]"#,
+        );
+        let inputs = RoutingInputs {
+            policy: Some(&policy),
+            team: Some("interns".to_string()),
+            hint: RoutingHint::Auto,
+            ..Default::default()
+        };
+        let decision = Router::new()
+            .route(&medium_request(), &pricing(), &healthy(), &inputs)
+            .unwrap();
+        let served_tier = pricing().get(&decision.served_model).unwrap().tier;
+        assert_eq!(
+            served_tier,
+            ModelTier::Cheap,
+            "the policy's routing_mode should have pushed this to economy's medium tier"
+        );
+    }
+
+    #[test]
+    fn a_policy_set_routing_mode_still_cannot_touch_a_complex_request() {
+        // Same policy, but a complex request: the mode ladder itself refuses to downgrade
+        // complex under any mode, and that guarantee must survive a policy setting the mode
+        // rather than only holding for a caller-sent header.
+        let policy = RoutingPolicy::from_json(
+            r#"[{"when": {"team": "interns"}, "then": {"routing_mode": "economy"}}]"#,
+        );
+        let inputs = RoutingInputs {
+            policy: Some(&policy),
+            team: Some("interns".to_string()),
+            hint: RoutingHint::Auto,
+            ..Default::default()
+        };
+        let decision = Router::new()
+            .route(&complex_request(), &pricing(), &healthy(), &inputs)
+            .unwrap();
+        assert_eq!(decision.served_model, "openai/gpt-4o");
+    }
+
+    #[test]
+    fn user_scoped_policies_match_the_keys_assignee() {
+        let policy = RoutingPolicy::from_json(
+            r#"[{"when": {"user": "intern@example.com"}, "then": {"passthrough": true}}]"#,
+        );
+        let inputs = RoutingInputs {
+            policy: Some(&policy),
+            user: Some("intern@example.com".to_string()),
+            ..Default::default()
+        };
+        let decision = Router::new()
+            .route(&simple_request(), &pricing(), &healthy(), &inputs)
+            .unwrap();
+        assert_eq!(decision.reason, RoutingReason::Policy);
+
+        // A different (or absent) assignee must not match someone else's rule.
+        let inputs_other = RoutingInputs {
+            policy: Some(&policy),
+            user: Some("someone-else@example.com".to_string()),
+            ..Default::default()
+        };
+        let decision_other = Router::new()
+            .route(&simple_request(), &pricing(), &healthy(), &inputs_other)
+            .unwrap();
+        assert_ne!(decision_other.reason, RoutingReason::Policy);
     }
 
     #[test]

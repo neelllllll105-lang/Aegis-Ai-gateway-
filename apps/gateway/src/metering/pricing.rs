@@ -176,6 +176,23 @@ impl ModelPricing {
         MicroCents::cost_for_tokens(output_rate, usage.output_tokens)
     }
 
+    /// How much cheaper this request was because some input was served from the
+    /// provider's own prompt cache, rather than priced at the full input rate.
+    ///
+    /// Distinct from [`ModelPricing::input_cost_of`], which is what cached tokens were
+    /// actually billed at — this is the delta between that and what the same tokens would
+    /// have cost with no cache at all. Used to attribute the caching share of a request's
+    /// savings in [`crate::metering::savings::SavingsComponents`].
+    pub fn cache_discount_of(&self, usage: &crate::types::TokenUsage) -> MicroCents {
+        let (input_rate, _) = self.rates_for(usage.total_input());
+        let full_rate_cost = MicroCents::cost_for_tokens(input_rate, usage.cached_input_tokens);
+        let actual_cost = MicroCents::cost_for_tokens(
+            CachePricing::scale(input_rate, self.cache.read_bp),
+            usage.cached_input_tokens,
+        );
+        (full_rate_cost - actual_cost).floor_at_zero()
+    }
+
     /// The input and output rates that apply to a prompt of this size.
     pub fn rates_for(&self, input_tokens: u64) -> (MicroCents, MicroCents) {
         match self.long_context {

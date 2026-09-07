@@ -6,6 +6,7 @@ import {
   ApiError,
   type AnomalyReport,
   type Budget,
+  type Member,
   type Team,
 } from "@/lib/api";
 import {
@@ -20,7 +21,7 @@ import {
   Td,
   Th,
 } from "@/components/ui";
-import { formatUsd } from "@/lib/format";
+import { formatTokens, formatUsd } from "@/lib/format";
 
 const PERIODS = ["daily", "weekly", "monthly"] as const;
 
@@ -36,14 +37,18 @@ const PERIODS = ["daily", "weekly", "monthly"] as const;
 export default function BudgetsPage() {
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
+  const [members, setMembers] = useState<Member[]>([]);
   const [anomaly, setAnomaly] = useState<AnomalyReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // "org", "team:<id>", or "person:<id>" — one control rather than a scope-type selector
+  // plus a dependent second dropdown, to keep the form the same shape it already was.
   const [scope, setScope] = useState<string>("org");
   const [period, setPeriod] = useState<string>("monthly");
   const [limitUsd, setLimitUsd] = useState("500");
+  const [limitTokens, setLimitTokens] = useState("");
   const [hardLimit, setHardLimit] = useState(true);
 
   async function load() {
@@ -51,12 +56,14 @@ export default function BudgetsPage() {
       // The anomaly report is advisory: if it fails, the budgets still matter and the
       // page should still render. So it is settled separately rather than rejecting the
       // whole load.
-      const [budgetResponse, teamResponse] = await Promise.all([
+      const [budgetResponse, teamResponse, memberResponse] = await Promise.all([
         api.listBudgets(),
         api.listTeams(),
+        api.listMembers(),
       ]);
       setBudgets(budgetResponse.budgets);
       setTeams(teamResponse.teams);
+      setMembers(memberResponse.members);
       setError(null);
 
       try {
@@ -85,18 +92,28 @@ export default function BudgetsPage() {
       setError("Enter a budget limit greater than zero.");
       return;
     }
+    const tokens = Number.parseInt(limitTokens, 10);
+    if (limitTokens.trim() && (!Number.isFinite(tokens) || tokens <= 0)) {
+      setError("The token limit must be a whole number greater than zero, or left blank.");
+      return;
+    }
+
+    const [kind, id] = scope === "org" ? ["org", null] : scope.split(":");
 
     setSaving(true);
     try {
       await api.createBudget({
-        team_id: scope === "org" ? null : scope,
+        team_id: kind === "team" ? id : null,
+        user_id: kind === "person" ? id : null,
         period,
         // Dollars to micro-cents. Rounded once, here, so the integer that reaches the
         // server is exact — the server never sees a float.
         limit_mc: Math.round(dollars * 1_000_000),
+        limit_tokens: limitTokens.trim() ? tokens : null,
         hard_limit: hardLimit,
       });
       setLimitUsd("500");
+      setLimitTokens("");
       await load();
     } catch (caught) {
       setError(
@@ -125,6 +142,11 @@ export default function BudgetsPage() {
 
   function scopeLabel(budget: Budget): string {
     if (budget.api_key_id) return "Single API key";
+    if (budget.user_id) {
+      const person = members.find((m) => m.user_id === budget.user_id);
+      return person ? `Person — ${person.name ?? person.email}` : "Person";
+    }
+    if (budget.region) return `Region — ${budget.region}`;
     if (!budget.team_id) return "Whole organisation";
     return teams.find((team) => team.id === budget.team_id)?.name ?? "Team";
   }
@@ -208,7 +230,7 @@ export default function BudgetsPage() {
 
       <Card className="mb-8 p-5">
         <form onSubmit={handleCreate} className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-3">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div>
               <label
                 htmlFor="scope"
@@ -223,11 +245,20 @@ export default function BudgetsPage() {
                 className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
               >
                 <option value="org">Whole organisation</option>
-                {teams.map((team) => (
-                  <option key={team.id} value={team.id}>
-                    {team.name}
-                  </option>
-                ))}
+                <optgroup label="Team">
+                  {teams.map((team) => (
+                    <option key={team.id} value={`team:${team.id}`}>
+                      {team.name}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Person">
+                  {members.map((member) => (
+                    <option key={member.user_id} value={`person:${member.user_id}`}>
+                      {member.name ?? member.email}
+                    </option>
+                  ))}
+                </optgroup>
               </select>
             </div>
 
@@ -269,7 +300,31 @@ export default function BudgetsPage() {
                 className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)]"
               />
             </div>
+
+            <div>
+              <label
+                htmlFor="limit-tokens"
+                className="block text-sm font-medium text-[var(--color-muted)]"
+              >
+                Token ceiling <span className="font-normal text-[var(--color-muted-light)]">(optional)</span>
+              </label>
+              <input
+                id="limit-tokens"
+                type="number"
+                min="1"
+                step="1"
+                placeholder="Uncapped"
+                value={limitTokens}
+                onChange={(event) => setLimitTokens(event.target.value)}
+                className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 font-mono text-sm text-[var(--color-ink)]"
+              />
+            </div>
           </div>
+          <p className="-mt-1 text-[11px] font-medium text-[var(--color-muted-light)]">
+            A token ceiling is enforced independently of the dollar limit, on the same
+            scope — a promotional rate or a very cheap model can be well under budget in
+            dollars and still unbounded in tokens without one.
+          </p>
 
           <label className="flex items-start gap-2.5">
             <input
@@ -309,7 +364,8 @@ export default function BudgetsPage() {
             <tr>
               <Th>Applies to</Th>
               <Th>Period</Th>
-              <Th align="right">Limit</Th>
+              <Th align="right">Money limit</Th>
+              <Th align="right">Token limit</Th>
               <Th>Enforcement</Th>
               <Th align="right">
                   <span className="sr-only">Actions</span>
@@ -325,6 +381,9 @@ export default function BudgetsPage() {
                 </Td>
                 <Td align="right" mono>
                   {formatUsd(budget.limit_mc)}
+                </Td>
+                <Td align="right" mono muted={budget.limit_tokens === null}>
+                  {budget.limit_tokens === null ? "uncapped" : formatTokens(budget.limit_tokens)}
                 </Td>
                 <Td>
                   <Badge tone={budget.hard_limit ? "danger" : "neutral"} size="sm">

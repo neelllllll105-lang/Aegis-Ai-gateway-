@@ -133,6 +133,16 @@ export async function apiRequest<T>(
 // Response shapes
 // ---------------------------------------------------------------------------
 
+/** The five modes the routing ladder recognises, and their display order. */
+export const ROUTING_MODES = [
+  "auto",
+  "quality",
+  "balanced",
+  "economy",
+  "passthrough",
+] as const;
+export type RoutingMode = (typeof ROUTING_MODES)[number];
+
 export interface Organization {
   id: string;
   name: string;
@@ -144,6 +154,8 @@ export interface Organization {
   content_capture: boolean;
   region: string;
   created_at: string;
+  /** Org-wide default routing mode — the last rung before "auto". `null` if unset. */
+  default_routing_mode: RoutingMode | null;
 }
 
 export interface User {
@@ -174,6 +186,11 @@ export interface ApiKey {
   expires_at: string | null;
   revoked_at: string | null;
   created_at: string;
+  /**
+   * Mode this key uses when the caller sends no `X-Aegis-Routing-Hint` header. `null`
+   * falls through to the team's default, then the org's, then `auto`.
+   */
+  default_routing_mode: RoutingMode | null;
 }
 
 export interface CreatedKey {
@@ -192,6 +209,15 @@ export interface UsageSummary {
   actual_cost_mc: number;
   gross_savings_mc: number;
   aegis_fee_mc: number;
+  /**
+   * `gross_savings_mc`, decomposed by which lever explains it. Compression and caching are
+   * each priced directly; routing absorbs whatever of the total those two don't explain,
+   * so the three always sum to `gross_savings_mc` exactly — a residual, not three
+   * independently-measured figures. Zero on every record predating this decomposition.
+   */
+  routing_savings_mc: number;
+  compression_savings_mc: number;
+  cache_savings_mc: number;
 }
 
 export interface UsageSummaryResponse {
@@ -201,7 +227,18 @@ export interface UsageSummaryResponse {
     savings_percent: number;
     cache_hit_rate: number;
     customer_net_mc: number;
+    savings_breakdown_mc: { routing: number; compression: number; cache: number };
   };
+}
+
+/** `GET /api/org/teams/{id}/usage` — one project's spend, for its lead or an org admin. */
+export interface ProjectUsageResponse extends UsageSummaryResponse {
+  team_id: string;
+}
+
+/** `GET /api/me/usage` — the caller's own attributed spend, across every key issued to them. */
+export interface MyUsageResponse extends UsageSummaryResponse {
+  user_id: string;
 }
 
 export interface RequestLogRow {
@@ -284,6 +321,8 @@ export interface Team {
   name: string;
   monthly_budget_mc: number | null;
   created_at: string;
+  /** This project's default routing mode, for keys that set none of their own. */
+  default_routing_mode: RoutingMode | null;
 }
 
 export interface Member {
@@ -292,6 +331,16 @@ export interface Member {
   name: string | null;
   role: string;
   joined_at: string;
+}
+
+/** A person's standing within one project — distinct from `Member.role`, which is org-wide. */
+export interface TeamMember {
+  user_id: string;
+  email: string;
+  name: string | null;
+  /** `"lead"` may manage this project's keys, budget, and routing default. `"member"` has
+   *  read access to the project's own usage only. */
+  role: "lead" | "member";
 }
 
 /**
@@ -321,8 +370,13 @@ export interface Budget {
   org_id: string;
   team_id: string | null;
   api_key_id: string | null;
+  /** The person this budget caps — spend summed across every key issued to them. */
+  user_id: string | null;
+  region: string | null;
   period: string;
   limit_mc: number;
+  /** An independent ceiling in tokens on this row's own scope. `null` caps money only. */
+  limit_tokens: number | null;
   hard_limit: boolean;
   created_at: string;
 }
@@ -407,6 +461,14 @@ export const api = {
 
   org: () => apiRequest<OrgResponse>("/api/org"),
 
+  updateOrg: (input: {
+    name?: string;
+    billing_email?: string;
+    zero_retention?: boolean;
+    content_capture?: boolean;
+    default_routing_mode?: RoutingMode;
+  }) => apiRequest<Organization>("/api/org", { method: "PATCH", body: input }),
+
   listKeys: () => apiRequest<{ keys: ApiKey[] }>("/api/keys"),
 
   createKey: (input: {
@@ -421,6 +483,17 @@ export const api = {
      */
     assigned_to_user_id?: string;
   }) => apiRequest<CreatedKey>("/api/keys", { method: "POST", body: input }),
+
+  updateKey: (
+    id: string,
+    input: {
+      name?: string;
+      rate_limit_per_minute?: number;
+      monthly_budget_mc?: number;
+      allowed_models?: string[];
+      default_routing_mode?: RoutingMode;
+    },
+  ) => apiRequest<ApiKey>(`/api/keys/${id}`, { method: "PATCH", body: input }),
 
   revokeKey: (id: string) =>
     apiRequest<{ revoked: boolean }>(`/api/keys/${id}`, { method: "DELETE" }),
@@ -475,14 +548,56 @@ export const api = {
 
   listTeams: () => apiRequest<{ teams: Team[] }>("/api/org/teams"),
 
-  createTeam: (name: string, monthly_budget_mc?: number | null) =>
+  createTeam: (
+    name: string,
+    monthly_budget_mc?: number | null,
+    default_routing_mode?: RoutingMode,
+  ) =>
     apiRequest<{ team: Team }>("/api/org/teams", {
       method: "POST",
-      body: { name, monthly_budget_mc: monthly_budget_mc ?? null },
+      body: { name, monthly_budget_mc: monthly_budget_mc ?? null, default_routing_mode },
     }),
 
   deleteTeam: (id: string) =>
     apiRequest<void>(`/api/org/teams/${id}`, { method: "DELETE" }),
+
+  listTeamMembers: (teamId: string) =>
+    apiRequest<{ members: TeamMember[] }>(`/api/org/teams/${teamId}/members`),
+
+  /** Add a person to a project, or change their role in it if already a member. Org owner/admin only. */
+  addTeamMember: (teamId: string, userId: string, role: "lead" | "member") =>
+    apiRequest<{ member: TeamMember }>(`/api/org/teams/${teamId}/members`, {
+      method: "POST",
+      body: { user_id: userId, role },
+    }),
+
+  removeTeamMember: (teamId: string, userId: string) =>
+    apiRequest<void>(`/api/org/teams/${teamId}/members/${userId}`, {
+      method: "DELETE",
+    }),
+
+  /** One project's spend — its lead's or an org admin's view. 404s for anyone else, not 403. */
+  projectUsage: (teamId: string, start?: string, end?: string) => {
+    const params = new URLSearchParams();
+    if (start) params.set("start", start);
+    if (end) params.set("end", end);
+    const query = params.toString();
+    return apiRequest<ProjectUsageResponse>(
+      `/api/org/teams/${teamId}/usage${query ? `?${query}` : ""}`,
+    );
+  },
+
+  /**
+   * The caller's own attributed spend. Throws a 400 `ApiError` when the credential isn't
+   * assigned to a person (an org-wide service key) — there is no "me" to report on.
+   */
+  myUsage: (start?: string, end?: string) => {
+    const params = new URLSearchParams();
+    if (start) params.set("start", start);
+    if (end) params.set("end", end);
+    const query = params.toString();
+    return apiRequest<MyUsageResponse>(`/api/me/usage${query ? `?${query}` : ""}`);
+  },
 
   listMembers: () => apiRequest<{ members: Member[] }>("/api/org/members"),
 
@@ -519,8 +634,12 @@ export const api = {
   createBudget: (input: {
     team_id?: string | null;
     api_key_id?: string | null;
+    user_id?: string | null;
+    region?: string | null;
     period: string;
     limit_mc: number;
+    /** Independent ceiling in tokens on the same scope. Omit to cap money only. */
+    limit_tokens?: number | null;
     hard_limit: boolean;
   }) => apiRequest<{ budget: Budget }>("/api/budgets", { method: "POST", body: input }),
 
