@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, type ReactNode } from "react";
-import type { Organization, User } from "@/lib/api";
+import type { Organization, PlanFeature, User } from "@/lib/api";
 
 /**
  * The signed-in caller's identity and standing — fetched once by `DashboardShell` (which
@@ -33,6 +33,14 @@ export interface AuthState {
    * enforced server-side regardless of what this page shows.
    */
   canManageKeys: boolean;
+  /**
+   * Every dashboard feature this organisation's plan includes, exactly as
+   * `GET /api/billing/plan` reported it — never computed from `organization.plan` here, so
+   * the mapping lives in one place (`billing::features` on the gateway) and the frontend
+   * cannot drift from what the backend actually enforces. Hiding a nav item or page this
+   * doesn't include is UX; the write itself is still refused server-side either way.
+   */
+  planFeatures: Partial<Record<PlanFeature, boolean>>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -71,4 +79,12 @@ export function canWriteForRole(role: string | null): boolean {
 /** `owner`, `admin`, or `member` — everyone except `viewer`. */
 export function canManageKeysForRole(role: string | null): boolean {
   return role === "owner" || role === "admin" || role === "member";
+}
+
+/**
+ * Whether the current session's plan includes `feature`. Convenience wrapper over
+ * `useAuth().planFeatures` for the common case of gating one page or nav item.
+ */
+export function useHasFeature(feature: PlanFeature): boolean {
+  return useAuth().planFeatures[feature] === true;
 }

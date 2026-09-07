@@ -23,6 +23,7 @@ import {
   TableShell,
   Td,
   Th,
+  UpgradeRequired,
 } from "@/components/ui";
 import { formatRelative, formatUsd } from "@/lib/format";
 import { useAuth } from "@/lib/auth-context";
@@ -67,7 +68,8 @@ const ROLES = [
  * and one that names them after squads does not.
  */
 export default function TeamPage() {
-  const { canWrite } = useAuth();
+  const { canWrite, planFeatures } = useAuth();
+  const hasTeamManagement = planFeatures.team_management === true;
   const [members, setMembers] = useState<Member[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
@@ -97,6 +99,13 @@ export default function TeamPage() {
   const [newMemberRole, setNewMemberRole] = useState<"lead" | "member">("member");
   const [addingMember, setAddingMember] = useState(false);
 
+  // Renaming the currently-managed project. Analytics need no reload of their own —
+  // usage_summary_for_team is keyed by team_id, never by name — so a successful rename
+  // just needs the team list and the open panel's own copy refreshed.
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [renaming, setRenaming] = useState(false);
+
   async function load() {
     try {
       const [memberResponse, teamResponse] = await Promise.all([
@@ -118,8 +127,12 @@ export default function TeamPage() {
   }
 
   useEffect(() => {
+    if (!hasTeamManagement) {
+      setLoading(false);
+      return;
+    }
     void load();
-  }, []);
+  }, [hasTeamManagement]);
 
   async function handleInvite(event: React.FormEvent) {
     event.preventDefault();
@@ -207,6 +220,7 @@ export default function TeamPage() {
     setPanelError(null);
     setPanelLoading(true);
     setNewMemberId("");
+    setEditingName(false);
     try {
       const [membersRes, usageRes] = await Promise.all([
         api.listTeamMembers(team.id),
@@ -262,6 +276,29 @@ export default function TeamPage() {
     }
   }
 
+  async function handleRenameTeam(event: React.FormEvent) {
+    event.preventDefault();
+    if (!managingTeam || !nameDraft.trim() || nameDraft.trim() === managingTeam.name) {
+      setEditingName(false);
+      return;
+    }
+
+    setRenaming(true);
+    setPanelError(null);
+    try {
+      const updated = await api.updateTeam(managingTeam.id, nameDraft.trim());
+      setManagingTeam(updated);
+      setEditingName(false);
+      await load();
+    } catch (caught) {
+      setPanelError(
+        caught instanceof ApiError ? caught.message : "Could not rename this project.",
+      );
+    } finally {
+      setRenaming(false);
+    }
+  }
+
   async function handleDeleteTeam(team: Team) {
     const confirmed = window.confirm(
       `Delete the team "${team.name}"? Keys assigned to it keep working but lose their cost-center attribution.`,
@@ -276,6 +313,19 @@ export default function TeamPage() {
         caught instanceof ApiError ? caught.message : "Could not delete the team.",
       );
     }
+  }
+
+  if (!hasTeamManagement) {
+    return (
+      <>
+        <SectionHeader
+          eyebrow="Organisation"
+          title="People and teams"
+          description="Organize the organisation into projects, invite a second person, and see each project's spend on its own."
+        />
+        <UpgradeRequired feature="People & teams" requiredPlan="Team" />
+      </>
+    );
   }
 
   return (
@@ -552,12 +602,51 @@ export default function TeamPage() {
       {managingTeam && (
         <Card className="mt-6 p-5">
           <div className="mb-4 flex items-start justify-between gap-4">
-            <div>
-              <h3 className="text-sm font-bold text-[var(--color-ink)]">
-                {managingTeam.name}
-              </h3>
+            <div className="min-w-0 flex-1">
+              {editingName ? (
+                <form onSubmit={handleRenameTeam} className="flex items-end gap-2">
+                  <div className="max-w-xs flex-1">
+                    <Field
+                      label="Project name"
+                      id="rename-team"
+                      value={nameDraft}
+                      onChange={setNameDraft}
+                      required
+                    />
+                  </div>
+                  <Button type="submit" disabled={renaming || !nameDraft.trim()}>
+                    {renaming ? "Saving…" : "Save"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    type="button"
+                    onClick={() => setEditingName(false)}
+                  >
+                    Cancel
+                  </Button>
+                </form>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-[var(--color-ink)]">
+                    {managingTeam.name}
+                  </h3>
+                  {canWrite && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNameDraft(managingTeam.name);
+                        setEditingName(true);
+                      }}
+                      className="text-[10px] font-bold text-[var(--color-accent)] hover:underline"
+                    >
+                      Rename
+                    </button>
+                  )}
+                </div>
+              )}
               <p className="mt-0.5 text-xs font-medium text-[var(--color-muted-light)]">
-                Roster and this month&rsquo;s spend for this project.
+                Roster and this month&rsquo;s spend for this project. Renaming it does not
+                change its usage history — figures follow the new name.
               </p>
             </div>
             <Button variant="ghost" onClick={() => setManagingTeam(null)}>

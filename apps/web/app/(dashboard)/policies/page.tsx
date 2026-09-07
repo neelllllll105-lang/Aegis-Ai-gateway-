@@ -10,6 +10,7 @@ import {
   ErrorState,
   Field,
   SectionHeader,
+  UpgradeRequired,
 } from "@/components/ui";
 import { formatRelative } from "@/lib/format";
 import { useAuth } from "@/lib/auth-context";
@@ -77,7 +78,8 @@ const PRESETS = [
 ] as const;
 
 export default function PoliciesPage() {
-  const { canWrite } = useAuth();
+  const { canWrite, planFeatures } = useAuth();
+  const hasPolicies = planFeatures.policies === true;
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -105,8 +107,12 @@ export default function PoliciesPage() {
   }
 
   useEffect(() => {
+    if (!hasPolicies) {
+      setLoading(false);
+      return;
+    }
     void load();
-  }, []);
+  }, [hasPolicies]);
 
   function selectPreset(id: string) {
     setPreset(id);
@@ -176,6 +182,19 @@ export default function PoliciesPage() {
   }
 
   const selected = PRESETS.find((entry) => entry.id === preset);
+
+  if (!hasPolicies) {
+    return (
+      <>
+        <SectionHeader
+          eyebrow="Governance"
+          title="Routing policies"
+          description="Rules that override the cost router, automatically, for the whole organization."
+        />
+        <UpgradeRequired feature="Routing policies" requiredPlan="Team" />
+      </>
+    );
+  }
 
   return (
     <>

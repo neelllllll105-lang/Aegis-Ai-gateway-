@@ -20,6 +20,7 @@ import {
   TableShell,
   Td,
   Th,
+  UpgradeRequired,
 } from "@/components/ui";
 import { formatTokens, formatUsd } from "@/lib/format";
 import { useAuth } from "@/lib/auth-context";
@@ -36,7 +37,8 @@ const PERIODS = ["daily", "weekly", "monthly"] as const;
  * invoice arrives.
  */
 export default function BudgetsPage() {
-  const { canWrite } = useAuth();
+  const { canWrite, planFeatures } = useAuth();
+  const hasBudgets = planFeatures.budgets === true;
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
@@ -83,8 +85,12 @@ export default function BudgetsPage() {
   }
 
   useEffect(() => {
+    if (!hasBudgets) {
+      setLoading(false);
+      return;
+    }
     void load();
-  }, []);
+  }, [hasBudgets]);
 
   async function handleCreate(event: React.FormEvent) {
     event.preventDefault();
@@ -151,6 +157,19 @@ export default function BudgetsPage() {
     if (budget.region) return `Region — ${budget.region}`;
     if (!budget.team_id) return "Whole organisation";
     return teams.find((team) => team.id === budget.team_id)?.name ?? "Team";
+  }
+
+  if (!hasBudgets) {
+    return (
+      <>
+        <SectionHeader
+          eyebrow="Governance"
+          title="Budgets and spend alerts"
+          description="Cap spend per project, per person, or org-wide — hard or soft."
+        />
+        <UpgradeRequired feature="Budgets" requiredPlan="Team" />
+      </>
+    );
   }
 
   return (

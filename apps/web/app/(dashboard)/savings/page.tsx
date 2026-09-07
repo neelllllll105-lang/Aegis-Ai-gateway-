@@ -18,6 +18,7 @@ import {
   ErrorState,
   SectionHeader,
   Stat,
+  UpgradeRequired,
 } from "@/components/ui";
 import {
   bareModelName,
@@ -25,6 +26,7 @@ import {
   formatUsd,
   formatUsdCompact,
 } from "@/lib/format";
+import { useAuth } from "@/lib/auth-context";
 
 /**
  * Tooltip value formatter.
@@ -49,12 +51,18 @@ function formatChartUsd(value: unknown): string {
  * shows.
  */
 export default function SavingsPage() {
+  const { planFeatures } = useAuth();
+  const hasSavings = planFeatures.savings === true;
   const [usage, setUsage] = useState<UsageSummaryResponse | null>(null);
   const [rows, setRows] = useState<RequestLogRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!hasSavings) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
 
     Promise.all([api.usageSummary(), api.requests(500)])
@@ -75,7 +83,7 @@ export default function SavingsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [hasSavings]);
 
   /** Savings grouped by the model that actually served each request. */
   const byModel = useMemo(() => {
@@ -114,6 +122,17 @@ export default function SavingsPage() {
   }
   if (error) {
     return <ErrorState message={error} />;
+  }
+  if (!hasSavings) {
+    return (
+      <>
+        <SectionHeader
+          title="Savings"
+          description="A live breakdown of what Aegis is saving you, by lever."
+        />
+        <UpgradeRequired feature="Savings & ROI" requiredPlan="Pro" />
+      </>
+    );
   }
 
   const summary = usage?.summary;

@@ -12,6 +12,7 @@ import {
 import { Badge, Button, Card, ErrorState, SectionHeader } from "@/components/ui";
 import { formatCount, formatUsd } from "@/lib/format";
 import { useAuth } from "@/lib/auth-context";
+import { OnboardingTour } from "@/components/onboarding-tour";
 
 const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
   auto: "Auto",
@@ -29,11 +30,12 @@ const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
  * rather than a switch someone can flip while scrolling past.
  */
 export default function SettingsPage() {
-  const { canWrite } = useAuth();
+  const { canWrite, role } = useAuth();
   const [org, setOrg] = useState<OrgResponse | null>(null);
   const [plan, setPlan] = useState<BillingPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [replayingTour, setReplayingTour] = useState(false);
 
   const [routingMode, setRoutingMode] = useState<RoutingMode | "">("");
   const [savingMode, setSavingMode] = useState(false);
@@ -171,6 +173,25 @@ export default function SettingsPage() {
           </div>
         </Card>
 
+        {(role === "owner" || role === "admin") &&
+          (plan?.plan === "team" || plan?.plan === "enterprise") && (
+            <Card className="p-6">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-sm font-medium text-[var(--color-ink)]">
+                    Walkthrough
+                  </h3>
+                  <p className="mt-1 text-xs text-[var(--color-muted-light)]">
+                    The tour shown automatically the first time an owner or admin signs in.
+                  </p>
+                </div>
+                <Button variant="secondary" onClick={() => setReplayingTour(true)}>
+                  Replay walkthrough
+                </Button>
+              </div>
+            </Card>
+          )}
+
         <Card className="p-6">
           <h3 className="text-sm font-medium text-[var(--color-ink)]">Routing</h3>
           <p className="mt-1 text-xs text-[var(--color-muted-light)]">
@@ -257,6 +278,10 @@ export default function SettingsPage() {
           </p>
         </Card>
       </div>
+
+      {replayingTour && (
+        <OnboardingTour onFinish={() => setReplayingTour(false)} />
+      )}
     </>
   );
 }
