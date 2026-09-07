@@ -1,9 +1,24 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, ApiError, type BillingPlan, type OrgResponse } from "@/lib/api";
-import { Badge, Card, ErrorState, SectionHeader } from "@/components/ui";
+import {
+  api,
+  ApiError,
+  ROUTING_MODES,
+  type BillingPlan,
+  type OrgResponse,
+  type RoutingMode,
+} from "@/lib/api";
+import { Badge, Button, Card, ErrorState, SectionHeader } from "@/components/ui";
 import { formatCount, formatUsd } from "@/lib/format";
+
+const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
+  auto: "Auto",
+  quality: "Quality",
+  balanced: "Balanced",
+  economy: "Economy",
+  passthrough: "Passthrough",
+};
 
 /**
  * Organisation settings and plan.
@@ -18,6 +33,10 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [routingMode, setRoutingMode] = useState<RoutingMode | "">("");
+  const [savingMode, setSavingMode] = useState(false);
+  const [modeNotice, setModeNotice] = useState<string | null>(null);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -26,6 +45,7 @@ export default function SettingsPage() {
         if (cancelled) return;
         setOrg(orgResponse);
         setPlan(planResponse);
+        setRoutingMode(orgResponse.organization.default_routing_mode ?? "");
         setLoading(false);
       })
       .catch((caught: unknown) => {
@@ -40,6 +60,25 @@ export default function SettingsPage() {
       cancelled = true;
     };
   }, []);
+
+  async function handleSaveRoutingMode() {
+    if (!routingMode) return;
+    setSavingMode(true);
+    setModeNotice(null);
+    try {
+      const updated = await api.updateOrg({ default_routing_mode: routingMode });
+      setOrg((current) =>
+        current ? { ...current, organization: updated } : current,
+      );
+      setModeNotice("Saved.");
+    } catch (caught) {
+      setError(
+        caught instanceof ApiError ? caught.message : "Could not save the routing default.",
+      );
+    } finally {
+      setSavingMode(false);
+    }
+  }
 
   if (loading) {
     return <p className="text-sm text-[var(--color-muted-on-desk)]">Loading…</p>;
@@ -127,6 +166,55 @@ export default function SettingsPage() {
                 {formatUsd(org?.usage.month_to_date_savings_mc ?? 0)}
               </span>
             </div>
+          </div>
+        </Card>
+
+        <Card className="p-6">
+          <h3 className="text-sm font-medium text-[var(--color-ink)]">Routing</h3>
+          <p className="mt-1 text-xs text-[var(--color-muted-light)]">
+            The mode a request uses when the caller sends no{" "}
+            <code className="text-[var(--color-muted)]">X-Aegis-Routing-Hint</code> header
+            and its key or project sets no default of its own — the last rung before the
+            ladder&rsquo;s own <code className="text-[var(--color-muted)]">auto</code>.
+          </p>
+
+          <div className="mt-4 flex flex-wrap items-end gap-3">
+            <div>
+              <label
+                htmlFor="org-routing-mode"
+                className="block text-sm font-medium text-[var(--color-muted)]"
+              >
+                Organisation default
+              </label>
+              <select
+                id="org-routing-mode"
+                value={routingMode}
+                onChange={(event) => {
+                  setRoutingMode(event.target.value as RoutingMode);
+                  setModeNotice(null);
+                }}
+                className="mt-1.5 w-56 rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
+              >
+                {ROUTING_MODES.map((mode) => (
+                  <option key={mode} value={mode}>
+                    {ROUTING_MODE_LABEL[mode]}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <Button
+              onClick={handleSaveRoutingMode}
+              disabled={
+                savingMode || routingMode === (organization?.default_routing_mode ?? "auto")
+              }
+            >
+              {savingMode ? "Saving…" : "Save"}
+            </Button>
+            {modeNotice && (
+              <span className="text-xs font-bold text-[var(--color-positive)]">
+                {modeNotice}
+              </span>
+            )}
           </div>
         </Card>
 

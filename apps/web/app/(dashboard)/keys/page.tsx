@@ -1,7 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, ApiError, type ApiKey, type CreatedKey } from "@/lib/api";
+import {
+  api,
+  ApiError,
+  ROUTING_MODES,
+  type ApiKey,
+  type CreatedKey,
+  type RoutingMode,
+} from "@/lib/api";
 import {
   Badge,
   Button,
@@ -15,6 +22,14 @@ import {
   Th,
 } from "@/components/ui";
 import { formatRelative, formatUsd } from "@/lib/format";
+
+const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
+  auto: "Auto",
+  quality: "Quality",
+  balanced: "Balanced",
+  economy: "Economy",
+  passthrough: "Passthrough",
+};
 
 /**
  * API key management.
@@ -32,6 +47,7 @@ export default function KeysPage() {
   const [newKeyName, setNewKeyName] = useState("");
   const [created, setCreated] = useState<CreatedKey | null>(null);
   const [copied, setCopied] = useState(false);
+  const [savingModeFor, setSavingModeFor] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -80,6 +96,20 @@ export default function KeysPage() {
       await load();
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : "Could not revoke the key.");
+    }
+  }
+
+  async function handleModeChange(key: ApiKey, mode: RoutingMode) {
+    setSavingModeFor(key.id);
+    try {
+      const updated = await api.updateKey(key.id, { default_routing_mode: mode });
+      setKeys((current) => current.map((k) => (k.id === key.id ? updated : k)));
+    } catch (caught) {
+      setError(
+        caught instanceof ApiError ? caught.message : "Could not update the routing default.",
+      );
+    } finally {
+      setSavingModeFor(null);
     }
   }
 
@@ -168,6 +198,7 @@ export default function KeysPage() {
                 <Th>Key</Th>
                 <Th>Rate limit</Th>
                 <Th>Budget</Th>
+                <Th>Routing mode</Th>
                 <Th>Last used</Th>
                 <Th align="right">&nbsp;</Th>
               </tr>
@@ -193,6 +224,25 @@ export default function KeysPage() {
                       {key.monthly_budget_mc === null
                         ? "—"
                         : formatUsd(key.monthly_budget_mc)}
+                    </Td>
+                    <Td>
+                      <select
+                        value={key.default_routing_mode ?? ""}
+                        disabled={revoked || savingModeFor === key.id}
+                        onChange={(event) =>
+                          handleModeChange(key, event.target.value as RoutingMode)
+                        }
+                        className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface2)] px-2 py-1 text-xs text-[var(--color-ink)] disabled:opacity-50"
+                      >
+                        <option value="" disabled>
+                          Inherit
+                        </option>
+                        {ROUTING_MODES.map((mode) => (
+                          <option key={mode} value={mode}>
+                            {ROUTING_MODE_LABEL[mode]}
+                          </option>
+                        ))}
+                      </select>
                     </Td>
                     <Td muted>{formatRelative(key.last_used_at)}</Td>
                     <Td align="right">

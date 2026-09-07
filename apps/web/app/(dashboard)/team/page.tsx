@@ -1,7 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, ApiError, type Member, type Team } from "@/lib/api";
+import {
+  api,
+  ApiError,
+  ROUTING_MODES,
+  type Member,
+  type ProjectUsageResponse,
+  type RoutingMode,
+  type Team,
+  type TeamMember,
+} from "@/lib/api";
 import {
   Badge,
   Button,
@@ -10,11 +19,20 @@ import {
   ErrorState,
   Field,
   SectionHeader,
+  Stat,
   TableShell,
   Td,
   Th,
 } from "@/components/ui";
 import { formatRelative, formatUsd } from "@/lib/format";
+
+const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
+  auto: "Auto",
+  quality: "Quality",
+  balanced: "Balanced",
+  economy: "Economy",
+  passthrough: "Passthrough",
+};
 
 const ROLES = [
   {
@@ -62,7 +80,20 @@ export default function TeamPage() {
 
   const [teamName, setTeamName] = useState("");
   const [teamBudget, setTeamBudget] = useState("");
+  const [teamMode, setTeamMode] = useState<RoutingMode | "">("");
   const [creatingTeam, setCreatingTeam] = useState(false);
+
+  // The project (team) currently expanded below the table — its roster and usage load
+  // lazily, on selection, rather than N+1 fetching every team up front for a page that
+  // usually shows one org's handful of projects.
+  const [managingTeam, setManagingTeam] = useState<Team | null>(null);
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [teamUsage, setTeamUsage] = useState<ProjectUsageResponse | null>(null);
+  const [panelLoading, setPanelLoading] = useState(false);
+  const [panelError, setPanelError] = useState<string | null>(null);
+  const [newMemberId, setNewMemberId] = useState("");
+  const [newMemberRole, setNewMemberRole] = useState<"lead" | "member">("member");
+  const [addingMember, setAddingMember] = useState(false);
 
   async function load() {
     try {
@@ -151,9 +182,10 @@ export default function TeamPage() {
 
     setCreatingTeam(true);
     try {
-      await api.createTeam(teamName.trim(), budget);
+      await api.createTeam(teamName.trim(), budget, teamMode || undefined);
       setTeamName("");
       setTeamBudget("");
+      setTeamMode("");
       await load();
     } catch (caught) {
       setError(
@@ -161,6 +193,70 @@ export default function TeamPage() {
       );
     } finally {
       setCreatingTeam(false);
+    }
+  }
+
+  async function handleManage(team: Team) {
+    if (managingTeam?.id === team.id) {
+      setManagingTeam(null);
+      return;
+    }
+    setManagingTeam(team);
+    setPanelError(null);
+    setPanelLoading(true);
+    setNewMemberId("");
+    try {
+      const [membersRes, usageRes] = await Promise.all([
+        api.listTeamMembers(team.id),
+        api.projectUsage(team.id),
+      ]);
+      setTeamMembers(membersRes.members);
+      setTeamUsage(usageRes);
+    } catch (caught) {
+      setPanelError(
+        caught instanceof ApiError
+          ? caught.message
+          : "Could not load this project's roster and usage.",
+      );
+    } finally {
+      setPanelLoading(false);
+    }
+  }
+
+  async function handleAddTeamMember(event: React.FormEvent) {
+    event.preventDefault();
+    if (!managingTeam || !newMemberId) return;
+
+    setAddingMember(true);
+    setPanelError(null);
+    try {
+      await api.addTeamMember(managingTeam.id, newMemberId, newMemberRole);
+      const membersRes = await api.listTeamMembers(managingTeam.id);
+      setTeamMembers(membersRes.members);
+      setNewMemberId("");
+    } catch (caught) {
+      setPanelError(
+        caught instanceof ApiError ? caught.message : "Could not add that person.",
+      );
+    } finally {
+      setAddingMember(false);
+    }
+  }
+
+  async function handleRemoveTeamMember(member: TeamMember) {
+    if (!managingTeam) return;
+    const confirmed = window.confirm(
+      `Remove ${member.email} from "${managingTeam.name}"? They keep their organisation access — this only removes them from the project.`,
+    );
+    if (!confirmed) return;
+
+    try {
+      await api.removeTeamMember(managingTeam.id, member.user_id);
+      setTeamMembers((current) => current.filter((m) => m.user_id !== member.user_id));
+    } catch (caught) {
+      setPanelError(
+        caught instanceof ApiError ? caught.message : "Could not remove that person.",
+      );
     }
   }
 
@@ -334,7 +430,7 @@ export default function TeamPage() {
         <h3 className="mb-4 text-sm font-bold text-[var(--color-ink)]">Create a team</h3>
         <form
           onSubmit={handleCreateTeam}
-          className="grid gap-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end"
+          className="grid gap-4 sm:grid-cols-[1fr_1fr_1fr_auto] sm:items-end"
         >
           <Field
             label="Team name"
@@ -352,10 +448,36 @@ export default function TeamPage() {
             onChange={setTeamBudget}
             placeholder="Optional"
           />
+          <div>
+            <label
+              htmlFor="team-mode"
+              className="block text-sm font-medium text-[var(--color-muted)]"
+            >
+              Default routing mode
+            </label>
+            <select
+              id="team-mode"
+              value={teamMode}
+              onChange={(event) => setTeamMode(event.target.value as RoutingMode | "")}
+              className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
+            >
+              <option value="">Inherit from organisation</option>
+              {ROUTING_MODES.map((mode) => (
+                <option key={mode} value={mode}>
+                  {ROUTING_MODE_LABEL[mode]}
+                </option>
+              ))}
+            </select>
+          </div>
           <Button type="submit" disabled={creatingTeam || !teamName.trim()}>
             {creatingTeam ? "Creating…" : "Create team"}
           </Button>
         </form>
+        <p className="mt-3 text-xs font-medium leading-relaxed text-[var(--color-muted-light)]">
+          The mode a key on this project falls back to when it sets no default of its own,
+          and the caller sends no <code className="font-mono">X-Aegis-Routing-Hint</code>{" "}
+          header.
+        </p>
       </Card>
 
       {!loading &&
@@ -369,6 +491,7 @@ export default function TeamPage() {
             <thead>
               <tr>
                 <Th>Team</Th>
+                <Th>Default mode</Th>
                 <Th align="right">Monthly budget</Th>
                 <Th>Created</Th>
                 <Th align="right">
@@ -380,6 +503,11 @@ export default function TeamPage() {
               {teams.map((team) => (
                 <tr key={team.id}>
                   <Td>{team.name}</Td>
+                  <Td muted={!team.default_routing_mode}>
+                    {team.default_routing_mode
+                      ? ROUTING_MODE_LABEL[team.default_routing_mode]
+                      : "inherited"}
+                  </Td>
                   <Td align="right" mono muted={team.monthly_budget_mc === null}>
                     {team.monthly_budget_mc === null
                       ? "uncapped"
@@ -387,15 +515,171 @@ export default function TeamPage() {
                   </Td>
                   <Td muted>{formatRelative(team.created_at)}</Td>
                   <Td align="right">
-                    <Button variant="danger" onClick={() => handleDeleteTeam(team)}>
-                      Delete
-                    </Button>
+                    <div className="flex justify-end gap-2">
+                      <Button variant="secondary" onClick={() => handleManage(team)}>
+                        {managingTeam?.id === team.id ? "Close" : "Manage"}
+                      </Button>
+                      <Button variant="danger" onClick={() => handleDeleteTeam(team)}>
+                        Delete
+                      </Button>
+                    </div>
                   </Td>
                 </tr>
               ))}
             </tbody>
           </TableShell>
         ))}
+
+      {managingTeam && (
+        <Card className="mt-6 p-5">
+          <div className="mb-4 flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-bold text-[var(--color-ink)]">
+                {managingTeam.name}
+              </h3>
+              <p className="mt-0.5 text-xs font-medium text-[var(--color-muted-light)]">
+                Roster and this month&rsquo;s spend for this project.
+              </p>
+            </div>
+            <Button variant="ghost" onClick={() => setManagingTeam(null)}>
+              Close
+            </Button>
+          </div>
+
+          {panelError && (
+            <div className="mb-4">
+              <ErrorState message={panelError} />
+            </div>
+          )}
+
+          {panelLoading ? (
+            <p className="py-6 text-center text-xs font-bold text-[var(--color-muted-light)]">
+              Loading…
+            </p>
+          ) : (
+            <>
+              {teamUsage && (
+                <div className="mb-6 grid gap-3 sm:grid-cols-3">
+                  <Stat
+                    label="This project spent"
+                    value={formatUsd(teamUsage.summary.actual_cost_mc)}
+                    sublabel={`${teamUsage.summary.requests.toLocaleString()} requests, last 30 days`}
+                  />
+                  <Stat
+                    label="Saved"
+                    value={formatUsd(teamUsage.summary.gross_savings_mc)}
+                    sublabel={`${teamUsage.derived.savings_percent.toFixed(1)}% of what the requested models would have cost`}
+                    accent
+                  />
+                  <Stat
+                    label="Cache hit rate"
+                    value={`${teamUsage.derived.cache_hit_rate.toFixed(1)}%`}
+                  />
+                </div>
+              )}
+
+              <h4 className="mb-2 text-xs font-bold uppercase tracking-wide text-[var(--color-muted)]">
+                Members
+              </h4>
+              {teamMembers.length === 0 ? (
+                <p className="mb-4 text-xs font-medium text-[var(--color-muted-light)]">
+                  Nobody has been added to this project yet.
+                </p>
+              ) : (
+                <ul className="mb-4 divide-y divide-[var(--color-line)] rounded-xl border border-[var(--color-line)]">
+                  {teamMembers.map((member) => (
+                    <li
+                      key={member.user_id}
+                      className="flex items-center justify-between gap-3 px-4 py-2.5"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-xs font-bold text-[var(--color-ink)]">
+                          {member.name ?? member.email}
+                        </div>
+                        {member.name && (
+                          <div className="truncate text-[11px] text-[var(--color-muted-light)]">
+                            {member.email}
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Badge tone={member.role === "lead" ? "accent" : "neutral"} size="sm">
+                          {member.role}
+                        </Badge>
+                        <Button
+                          variant="danger"
+                          onClick={() => handleRemoveTeamMember(member)}
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <form
+                onSubmit={handleAddTeamMember}
+                className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end"
+              >
+                <div>
+                  <label
+                    htmlFor="new-member"
+                    className="block text-sm font-medium text-[var(--color-muted)]"
+                  >
+                    Add a person
+                  </label>
+                  <select
+                    id="new-member"
+                    value={newMemberId}
+                    onChange={(event) => setNewMemberId(event.target.value)}
+                    className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
+                  >
+                    <option value="">Choose an organisation member…</option>
+                    {members
+                      .filter(
+                        (candidate) =>
+                          !teamMembers.some((m) => m.user_id === candidate.user_id),
+                      )
+                      .map((candidate) => (
+                        <option key={candidate.user_id} value={candidate.user_id}>
+                          {candidate.name ?? candidate.email}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <div>
+                  <label
+                    htmlFor="new-member-role"
+                    className="block text-sm font-medium text-[var(--color-muted)]"
+                  >
+                    Role
+                  </label>
+                  <select
+                    id="new-member-role"
+                    value={newMemberRole}
+                    onChange={(event) =>
+                      setNewMemberRole(event.target.value as "lead" | "member")
+                    }
+                    className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
+                  >
+                    <option value="member">Member</option>
+                    <option value="lead">Lead</option>
+                  </select>
+                </div>
+                <Button type="submit" disabled={addingMember || !newMemberId}>
+                  {addingMember ? "Adding…" : "Add to project"}
+                </Button>
+              </form>
+              <p className="mt-2 text-xs font-medium leading-relaxed text-[var(--color-muted-light)]">
+                A lead may manage this project&rsquo;s keys, budget, and routing default
+                without full organisation admin. A member has read access to the
+                project&rsquo;s own usage only.
+              </p>
+            </>
+          )}
+        </Card>
+      )}
     </>
   );
 }
