@@ -4,8 +4,8 @@
 > This file is the handoff protocol. It tells you where the project is, what genuinely
 > works, what does not, what was decided and why, and exactly what to do next.
 >
-> **Last updated:** 2026-09-06
-> **Updated by:** Claude Opus 5 (Claude Code)
+> **Last updated:** 2026-09-07
+> **Updated by:** Claude Sonnet 5 (Claude Code)
 > **Update this file before ending any session.** See `CLAUDE.md`.
 
 ---
@@ -101,6 +101,16 @@ Detail with per-criterion evidence: `docs/PHASES.md`. Machine-readable: `.aegis/
 ---
 
 ## Current Focus
+
+**Session 15 (2026-09-07) closed the four items session 14 itself flagged as "no good
+excuse"** — full detail in the Session Log entry dated 2026-09-07, kept here in one line:
+policy rules can now match on `user` and set `routing_mode` (and, while wiring `team`
+condition-matching through for real, found and fixed a fully-live independent bug — an
+org's policy was silently never even loaded for `/v1/messages` traffic); a 402 now names
+every budget scope a request breached, not just the first one found; a default routing
+mode is resolvable key → project → org, with a real write path on all three levels; and
+the per-technique compression breakdown is now persisted onto `usage_records`, not just
+returned live. 885 lib tests passing (was 871), full suite green.
 
 **Session 14 (2026-09-06) closed out a third-party implementation guide's audit** — full
 detail in the Session Log entry dated 2026-09-06, kept here in one line so this section
@@ -875,6 +885,85 @@ Each of these cost real time during the build.
 ## Session Log
 
 Newest first.
+
+### 2026-09-07 — Session 15 — Claude Sonnet 5
+
+The user asked directly whether session 14 had implemented *everything* the IG-1 guide
+described, and specifically to close the gaps that session 14's own report had classified
+as "just didn't get to them, no good excuse" (as opposed to the gaps deliberately deferred
+for real risk — cascade, regret detection, a real tokenizer, all still untouched and still
+correctly deferred). Four items, all closed, migration 0012:
+
+**Policy engine gains `user` and `routing_mode`, and a real live bug was found wiring
+`team` through properly.** `Condition`/`Action` in `engine/policy.rs` gained `user`
+(matches the calling key's assignee by email, case-insensitive, same shape as the existing
+`team` match) and `routing_mode` (sets the mode ladder rung for the rest of the decision —
+implemented as an override to a local `effective_hint` that then flows through the exact
+same `target_tier()` call every other mode does, rather than a second copy of the
+complex-band guarantee living inside the policy branch). Wiring `team`/`user` into
+`RoutingInputs` at the three real call sites surfaced two pre-existing bugs, not one:
+
+1. All three production call sites (`openai_compat.rs` ×2, `anthropic_compat.rs`)
+   hardcoded `team: None` in `RoutingInputs` — every `{"when": {"team": "..."}}` policy
+   rule ever written was unreachable from a live request, matched only in `Condition`'s own
+   unit tests. Fixed by resolving the team's actual name in `resolve_key`'s query (one more
+   `LEFT JOIN teams`, no extra round trip) and threading it through `KeyContext` ->
+   `AuthContext::team_name` -> `RoutingInputs::team`.
+2. **`anthropic_compat.rs` passed `policy: None` outright** — every organisation policy
+   (deny/pin/tier-ceiling/the new routing_mode) was silently unenforceable for any caller
+   using Anthropic's native wire format (`/v1/messages`), while the identical policy fully
+   applied to the same org's traffic on `/v1/chat/completions`. `load_policy` made
+   `pub(crate)` and called from both handlers now.
+
+**A default routing mode, resolvable key -> project -> org, with a real write path.**
+`RoutingHint::resolve(header, default_mode)` — an explicit header always wins (recognised
+or not, matching the existing "a typo must not fail a paid request" philosophy for
+headers); an absent header falls through to `AuthContext::default_routing_mode`, coalesced
+once in `AuthContext::from_key` from three new nullable columns
+(`api_keys`/`teams`/`organizations.default_routing_mode`, migration 0012). Written via
+`PATCH /api/keys/:id`, `POST /api/org/teams`, and `PATCH /api/org` — each validates and
+*normalises* the value (`validate_routing_mode` lowercases before it reaches the database),
+because `RoutingHint::parse` reading it back is case-insensitive by design but the
+database's own `CHECK` constraint is not; without normalising on write, an admin typing
+`"Balanced"` would hit an opaque constraint-violation 500 instead of the same forgiving
+behaviour a customer's header gets. `cheap` (the legacy header synonym for `economy`) is
+deliberately *not* accepted here — a stored default is a considered admin choice, not an
+ephemeral request header, and doesn't need the same backward-compatibility exception.
+
+**A 402 now names every budget scope a request breached, not just the first one found.**
+`check_and_reserve`'s reservation loop no longer breaks on the first breach — it continues
+reserving into (never merely reading) every remaining scope, so a request over on both a
+person's token budget and the organisation's money budget learns about both in one
+response instead of the second only surfacing as a brand-new 402 after the first is raised
+and the request retried. `BudgetOutcome::Denied` now carries `Vec<BudgetDecision>`;
+`AegisError::BudgetExceeded` gained `also_exceeded: Vec<BudgetBreach>` (additive — every
+existing single-scope call site just passes an empty vec, `client_message()`'s existing
+format for the common one-scope case is unchanged, it only appends when there's more).
+
+**The compression breakdown is now persisted onto `usage_records`, not just returned
+live.** `techniques_fired` (JSONB, `None` on a no-op) — the per-technique counts
+(duplicate messages removed, whitespace collapsed, JSON blocks minified, and so on) were
+only ever visible in the response headers and the `/api/compression/preview` demo
+endpoint; "how much did whitespace-collapse save us last month" had no query that could
+answer it. Threaded through `PipelineOutcome` -> `UsageEvent` -> `insert_usage_record` on
+both the streaming and non-streaming paths, both providers.
+
+**Also fixed in passing, found independently while verifying rather than assumed from the
+guide:** DeepSeek's cache-token bug was already fixed in session 14 (confirmed still green,
+not re-touched).
+
+885 lib tests passing (was 871; net new this session: ~20, none removed), full `cargo test`
+(lib + all 10 integration binaries, including the Redis/Postgres-gated ones, which compile
+and pass/skip per the environment exactly as every prior session's did — Docker is still
+unavailable on this machine, nothing about that changed) all green, `cargo fmt --check`
+clean, `clippy --all-targets -D warnings` clean (both with and without `--all-features`).
+`apps/web` not touched this session — the dashboard still has no UI for anything built in
+sessions 14 or 15 (project-lead management, per-project/per-person usage views, token
+budgets, the savings decomposition, or any of today's routing-mode/policy additions); the
+API surface is real and tested, the pages are not, and that remains a deliberate,
+previously-flagged scope cut, not new to this session.
+
+
 
 ### 2026-09-06 — Session 14 — Claude Sonnet 5
 
