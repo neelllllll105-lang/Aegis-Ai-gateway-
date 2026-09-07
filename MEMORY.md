@@ -1052,6 +1052,48 @@ Verified: `tsc --noEmit` clean, `next build` (24 routes, 0 errors), `next lint` 
 confirmed in a real browser that the new context produces no console errors beyond the
 expected "gateway not running" network failures (still no Docker on this machine).
 
+**Later still: the user pasted back "The Aegis Audit"'s own six-item launch checklist.**
+Triaged honestly rather than attempting all six — two (`Get a provider API key`, `Find a
+design partner`) are not things an agent can do at all; two (`Fix Docker`, `Run the load
+test`) need the user's machine/infrastructure access this environment doesn't have. Worked
+the two genuinely actionable ones:
+
+**Wired Stripe to an actual route, both directions (checklist item 2).** `POST
+/api/billing/checkout` creates a Stripe customer for the org on first use (persisted on
+`organizations.stripe_customer_id`, reused after), builds a Checkout session from the
+existing `checkout_session_body()`, and returns its hosted URL. `POST /api/billing/webhook`
+is the first endpoint in this codebase authenticated by neither a session nor an API key —
+`Stripe-Signature` verification against the *raw* body (`axum::body::Bytes`, never
+`Json<T>`) is the whole authenticator, exactly as the existing `billing::stripe` module's
+own doc comment already argued it should be. New `STRIPE_PRICE_PRO`/`STRIPE_PRICE_TEAM`
+config (`enterprise` deliberately excluded — sales-assisted, not self-checkout), two new
+repo functions, and two new HTTP-calling functions in `billing::stripe` whose
+request-building and response-parsing are tested, same as before; the live `.send()` call
+itself is not, for the same reason no provider adapter's live call is — no Stripe account
+has ever been available here. 887 lib tests passing (was 885), fmt/clippy clean.
+
+**Stopped claiming semantic caching is live in customer-facing copy (checklist item 4).**
+The FAQ page and homepage stated it as an unqualified fact ("with our zero-latency semantic
+cache, duplicate or semantically identical questions return instantly from cache at $0.00
+cost") despite it never having fired in any environment this project has run in (see the
+finding in "The Aegis Audit" artifact, session 15 earlier). Reworded three FAQ answers and
+the homepage caption to describe what's actually live — exact-match caching, lossless
+compression, deterministic downscaling — and said plainly that semantic matching is built
+and tested but still rolling out. The homepage's interactive routing simulator had one
+worked example under a "Semantic Cache" step that was itself internally contradictory
+(`semantic_similarity_98.4%` next to `qualityPreserved: "Exact Match"`) on top of
+describing the same non-firing feature; rewritten as an honest exact-cache example instead
+of deleted, since exact-match caching is completely real, and the step's fixed label
+relabeled to match. Also dropped an "RFC-9110 audited proof of savings" line from the
+FAQ's first answer — RFC 9110 is the IETF HTTP semantics spec and has no connection to
+savings auditing; the citation was a specific-sounding claim that didn't mean anything.
+`tsc`/`build`/`lint` all clean.
+
+**Left alone, and told the user why:** a real provider API key and a design partner are not
+things an agent can obtain; Docker on this machine and a deployed instance for the load
+test both need infrastructure access this environment does not have. None of the four
+attempted here needed the user first — the other two genuinely do.
+
 ### 2026-09-06 — Session 14 — Claude Sonnet 5
 
 The user forwarded a third-party implementation guide ("IG-1") covering multi-tenancy,
