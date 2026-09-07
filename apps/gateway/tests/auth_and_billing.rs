@@ -1362,6 +1362,12 @@ async fn invite_and_accept_lifecycle_works() {
     use axum::Json;
 
     let fixture = create_org(&pool, "invite_accept").await;
+    // Member invitation is a Team-plan feature (MASTER_BUILD.md frames Free/Pro as
+    // individual-developer plans) — this test is about the invite/accept lifecycle itself,
+    // not the plan gate, so upgrade the fixture rather than let an unrelated 403 mask it.
+    repo::update_org_plan(&pool, fixture.org_id, "team", 1_500)
+        .await
+        .expect("plan upgrade");
     let owner_headers = owner_session_headers(&pool, &fixture).await;
 
     // 1. Invite a new colleague

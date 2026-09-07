@@ -1134,6 +1134,12 @@ pub async fn invite_member(
 ) -> Response {
     match async {
         let context = require_writer(&state, &headers).await?;
+        require_plan_feature(
+            &state,
+            context.org_id,
+            crate::billing::features::Feature::TeamManagement,
+        )
+        .await?;
         let pool = state.db()?;
 
         if !matches!(

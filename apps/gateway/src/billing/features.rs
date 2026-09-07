@@ -66,7 +66,12 @@ pub enum Feature {
     Budgets,
     /// The organisation routing-policy engine.
     Policies,
-    /// Creating/renaming/deleting projects (teams) and managing their rosters.
+    /// Multi-seat organisation features: inviting a second person at all, and
+    /// creating/renaming/deleting projects (teams) and managing their rosters. Free and Pro
+    /// are framed in `MASTER_BUILD.md` Part 2 as individual-developer plans ("Individual
+    /// developers... Free tier -> $29/mo Pro" vs. "Startups/small teams needing shared
+    /// governance ($299/mo Team)"), so this is the one feature that gates a second *person*
+    /// being able to join at all, not just a capability an existing member gets.
     TeamManagement,
     /// SSO/SCIM/audit-log/data-residency surfaces — Enterprise only, no dedicated dashboard
     /// page today, so this currently gates a section inside Settings rather than a route.
