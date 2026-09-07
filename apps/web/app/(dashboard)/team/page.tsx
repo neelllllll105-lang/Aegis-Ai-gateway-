@@ -25,6 +25,7 @@ import {
   Th,
 } from "@/components/ui";
 import { formatRelative, formatUsd } from "@/lib/format";
+import { useAuth } from "@/lib/auth-context";
 
 const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
   auto: "Auto",
@@ -66,6 +67,7 @@ const ROLES = [
  * and one that names them after squads does not.
  */
 export default function TeamPage() {
+  const { canWrite } = useAuth();
   const [members, setMembers] = useState<Member[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
@@ -322,52 +324,65 @@ export default function TeamPage() {
         </div>
       )}
 
-      <Card className="mb-8 p-5">
-        <h3 className="mb-4 text-sm font-bold text-[var(--color-ink)]">Invite a member</h3>
-        <form
-          onSubmit={handleInvite}
-          className="grid gap-4 sm:grid-cols-[1fr_auto_auto] sm:items-end"
-        >
-          <Field
-            label="Email address"
-            id="invite-email"
-            type="email"
-            value={inviteEmail}
-            onChange={setInviteEmail}
-            required
-            placeholder="colleague@company.com"
-          />
+      {canWrite ? (
+        <Card className="mb-8 p-5">
+          <h3 className="mb-4 text-sm font-bold text-[var(--color-ink)]">Invite a member</h3>
+          <form
+            onSubmit={handleInvite}
+            className="grid gap-4 sm:grid-cols-[1fr_auto_auto] sm:items-end"
+          >
+            <Field
+              label="Email address"
+              id="invite-email"
+              type="email"
+              value={inviteEmail}
+              onChange={setInviteEmail}
+              required
+              placeholder="colleague@company.com"
+            />
 
-          <div>
-            <label
-              htmlFor="invite-role"
-              className="block text-sm font-medium text-[var(--color-muted)]"
-            >
-              Role
-            </label>
-            <select
-              id="invite-role"
-              value={inviteRole}
-              onChange={(event) => setInviteRole(event.target.value)}
-              className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
-            >
-              {ROLES.map((role) => (
-                <option key={role.id} value={role.id}>
-                  {role.label}
-                </option>
-              ))}
-            </select>
-          </div>
+            <div>
+              <label
+                htmlFor="invite-role"
+                className="block text-sm font-medium text-[var(--color-muted)]"
+              >
+                Role
+              </label>
+              <select
+                id="invite-role"
+                value={inviteRole}
+                onChange={(event) => setInviteRole(event.target.value)}
+                className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
+              >
+                {ROLES.map((role) => (
+                  <option key={role.id} value={role.id}>
+                    {role.label}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-          <Button type="submit" disabled={inviting || !inviteEmail.trim()}>
-            {inviting ? "Sending…" : "Send invite"}
-          </Button>
-        </form>
+            <Button type="submit" disabled={inviting || !inviteEmail.trim()}>
+              {inviting ? "Sending…" : "Send invite"}
+            </Button>
+          </form>
 
-        <p className="mt-3 text-xs font-medium leading-relaxed text-[var(--color-muted-light)]">
-          {ROLES.find((role) => role.id === inviteRole)?.description}
-        </p>
-      </Card>
+          <p className="mt-3 text-xs font-medium leading-relaxed text-[var(--color-muted-light)]">
+            {ROLES.find((role) => role.id === inviteRole)?.description}
+          </p>
+        </Card>
+      ) : (
+        <Card className="mb-8 p-5">
+          <p className="text-xs font-medium text-[var(--color-muted-light)]">
+            Only an owner or admin can invite members, create projects, or change anyone
+            else&rsquo;s access. Ask one of them, or see your own usage on the{" "}
+            <a href="/usage" className="font-bold text-[var(--color-accent)]">
+              Usage
+            </a>{" "}
+            page.
+          </p>
+        </Card>
+      )}
 
       <div className="mb-10">
         <h3 className="mb-3 text-sm font-bold text-[var(--color-ink)]">Members</h3>
@@ -413,7 +428,7 @@ export default function TeamPage() {
                   </Td>
                   <Td muted>{formatRelative(member.joined_at)}</Td>
                   <Td align="right">
-                    {member.role !== "owner" && (
+                    {member.role !== "owner" && canWrite && (
                       <Button variant="danger" onClick={() => handleRemove(member)}>
                         Remove
                       </Button>
@@ -426,6 +441,7 @@ export default function TeamPage() {
         )}
       </div>
 
+      {canWrite && (
       <Card className="mb-6 p-5">
         <h3 className="mb-4 text-sm font-bold text-[var(--color-ink)]">Create a team</h3>
         <form
@@ -479,6 +495,7 @@ export default function TeamPage() {
           header.
         </p>
       </Card>
+      )}
 
       {!loading &&
         (teams.length === 0 ? (
@@ -519,9 +536,11 @@ export default function TeamPage() {
                       <Button variant="secondary" onClick={() => handleManage(team)}>
                         {managingTeam?.id === team.id ? "Close" : "Manage"}
                       </Button>
-                      <Button variant="danger" onClick={() => handleDeleteTeam(team)}>
-                        Delete
-                      </Button>
+                      {canWrite && (
+                        <Button variant="danger" onClick={() => handleDeleteTeam(team)}>
+                          Delete
+                        </Button>
+                      )}
                     </div>
                   </Td>
                 </tr>
@@ -606,18 +625,21 @@ export default function TeamPage() {
                         <Badge tone={member.role === "lead" ? "accent" : "neutral"} size="sm">
                           {member.role}
                         </Badge>
-                        <Button
-                          variant="danger"
-                          onClick={() => handleRemoveTeamMember(member)}
-                        >
-                          Remove
-                        </Button>
+                        {canWrite && (
+                          <Button
+                            variant="danger"
+                            onClick={() => handleRemoveTeamMember(member)}
+                          >
+                            Remove
+                          </Button>
+                        )}
                       </div>
                     </li>
                   ))}
                 </ul>
               )}
 
+              {canWrite && (
               <form
                 onSubmit={handleAddTeamMember}
                 className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end"
@@ -671,6 +693,7 @@ export default function TeamPage() {
                   {addingMember ? "Adding…" : "Add to project"}
                 </Button>
               </form>
+              )}
               <p className="mt-2 text-xs font-medium leading-relaxed text-[var(--color-muted-light)]">
                 A lead may manage this project&rsquo;s keys, budget, and routing default
                 without full organisation admin. A member has read access to the

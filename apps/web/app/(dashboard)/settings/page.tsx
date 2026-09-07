@@ -11,6 +11,7 @@ import {
 } from "@/lib/api";
 import { Badge, Button, Card, ErrorState, SectionHeader } from "@/components/ui";
 import { formatCount, formatUsd } from "@/lib/format";
+import { useAuth } from "@/lib/auth-context";
 
 const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
   auto: "Auto",
@@ -28,6 +29,7 @@ const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
  * rather than a switch someone can flip while scrolling past.
  */
 export default function SettingsPage() {
+  const { canWrite } = useAuth();
   const [org, setOrg] = useState<OrgResponse | null>(null);
   const [plan, setPlan] = useState<BillingPlan | null>(null);
   const [loading, setLoading] = useState(true);
@@ -189,11 +191,12 @@ export default function SettingsPage() {
               <select
                 id="org-routing-mode"
                 value={routingMode}
+                disabled={!canWrite}
                 onChange={(event) => {
                   setRoutingMode(event.target.value as RoutingMode);
                   setModeNotice(null);
                 }}
-                className="mt-1.5 w-56 rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
+                className="mt-1.5 w-56 rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)] disabled:opacity-50"
               >
                 {ROUTING_MODES.map((mode) => (
                   <option key={mode} value={mode}>
@@ -202,14 +205,16 @@ export default function SettingsPage() {
                 ))}
               </select>
             </div>
-            <Button
-              onClick={handleSaveRoutingMode}
-              disabled={
-                savingMode || routingMode === (organization?.default_routing_mode ?? "auto")
-              }
-            >
-              {savingMode ? "Saving…" : "Save"}
-            </Button>
+            {canWrite && (
+              <Button
+                onClick={handleSaveRoutingMode}
+                disabled={
+                  savingMode || routingMode === (organization?.default_routing_mode ?? "auto")
+                }
+              >
+                {savingMode ? "Saving…" : "Save"}
+              </Button>
+            )}
             {modeNotice && (
               <span className="text-xs font-bold text-[var(--color-positive)]">
                 {modeNotice}

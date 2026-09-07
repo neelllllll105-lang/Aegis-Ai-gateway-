@@ -22,6 +22,7 @@ import {
   Th,
 } from "@/components/ui";
 import { formatTokens, formatUsd } from "@/lib/format";
+import { useAuth } from "@/lib/auth-context";
 
 const PERIODS = ["daily", "weekly", "monthly"] as const;
 
@@ -35,6 +36,7 @@ const PERIODS = ["daily", "weekly", "monthly"] as const;
  * invoice arrives.
  */
 export default function BudgetsPage() {
+  const { canWrite } = useAuth();
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
@@ -228,6 +230,7 @@ export default function BudgetsPage() {
         </Card>
       )}
 
+      {canWrite && (
       <Card className="mb-8 p-5">
         <form onSubmit={handleCreate} className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -348,6 +351,7 @@ export default function BudgetsPage() {
           </div>
         </form>
       </Card>
+      )}
 
       {loading ? (
         <Card className="p-10 text-center text-xs font-bold text-[var(--color-muted-light)]">
@@ -391,9 +395,11 @@ export default function BudgetsPage() {
                   </Badge>
                 </Td>
                 <Td align="right">
-                  <Button variant="danger" onClick={() => handleDelete(budget)}>
-                    Remove
-                  </Button>
+                  {canWrite && (
+                    <Button variant="danger" onClick={() => handleDelete(budget)}>
+                      Remove
+                    </Button>
+                  )}
                 </Td>
               </tr>
             ))}

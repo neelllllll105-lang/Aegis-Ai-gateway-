@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { api, ApiError, type Organization } from "@/lib/api";
+import { api, ApiError, type Organization, type User } from "@/lib/api";
 import { AegisLogo } from "@/components/ui";
+import { AuthProvider, canManageKeysForRole, canWriteForRole } from "@/lib/auth-context";
 
 /**
  * Grouped so the sidebar reads as three jobs rather than one flat list of ten links:
@@ -51,6 +52,9 @@ export default function DashboardShell({
   const router = useRouter();
   const pathname = usePathname();
   const [org, setOrg] = useState<Organization | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [role, setRole] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [message, setMessage] = useState<string | null>(null);
 
@@ -62,6 +66,9 @@ export default function DashboardShell({
       .then((response) => {
         if (cancelled) return;
         setOrg(response.organization);
+        setUser(response.user);
+        setRole(response.role);
+        setIsAdmin(response.is_admin);
         setState("ready");
       })
       .catch((caught: unknown) => {
@@ -134,6 +141,16 @@ export default function DashboardShell({
   }
 
   return (
+    <AuthProvider
+      value={{
+        user,
+        organization: org,
+        role,
+        isAdmin,
+        canWrite: canWriteForRole(role),
+        canManageKeys: canManageKeysForRole(role),
+      }}
+    >
     <div className="flex min-h-screen bg-[var(--color-bg)] text-[var(--color-paper-on-desk)]">
       {/* Sidebar — a raised desk panel; the active page is a paper tab set into it */}
       <aside className="hidden w-60 shrink-0 border-r border-[var(--color-desk-line)] bg-[var(--color-desk-raised)] md:block">
@@ -188,6 +205,24 @@ export default function DashboardShell({
                 <div className="text-[10px] capitalize text-[var(--color-accent)] font-bold">
                   {org.plan} tier
                 </div>
+                {/* Whoever ends up on this dashboard should never have to wonder whose
+                    account they're looking at — the identity and role are always visible,
+                    right next to the one control that leaves it. */}
+                {user && (
+                  <div className="mt-2 border-t border-[var(--color-desk-line)] pt-2">
+                    <div className="truncate text-[10px] text-[var(--color-muted-light)]">
+                      Signed in as
+                    </div>
+                    <div className="truncate text-[11px] font-bold text-[var(--color-ink)]">
+                      {user.name ?? user.email}
+                    </div>
+                    {role && (
+                      <div className="text-[10px] capitalize text-[var(--color-muted-light)]">
+                        {role}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             <button
@@ -229,5 +264,6 @@ export default function DashboardShell({
         </main>
       </div>
     </div>
+    </AuthProvider>
   );
 }
