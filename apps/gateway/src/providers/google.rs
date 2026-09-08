@@ -82,19 +82,50 @@ pub fn build_body(request: &NormalizedRequest, _model: &str) -> serde_json::Valu
     }
 
     if !request.tools.is_empty() {
+        let mut declarations: Vec<serde_json::Value> = request
+            .tools
+            .iter()
+            .map(|t| t.get("function").cloned().unwrap_or_else(|| t.clone()))
+            .collect();
+
+        for decl in &mut declarations {
+            if let Some(params) = decl.get_mut("parameters") {
+                sanitize_gemini_schema(params);
+            }
+        }
+
         map.insert(
             "tools".into(),
             serde_json::json!([{
-                "functionDeclarations": request
-                    .tools
-                    .iter()
-                    .map(|t| t.get("function").cloned().unwrap_or_else(|| t.clone()))
-                    .collect::<Vec<_>>()
+                "functionDeclarations": declarations
             }]),
         );
     }
 
     body
+}
+
+/// Remove JSON Schema keywords that Google's GenerativeLanguage API strictly rejects.
+fn sanitize_gemini_schema(val: &mut serde_json::Value) {
+    match val {
+        serde_json::Value::Object(map) => {
+            map.remove("additionalProperties");
+            map.remove("$schema");
+            map.remove("exclusiveMinimum");
+            map.remove("exclusiveMaximum");
+            map.remove("patternProperties");
+
+            for child in map.values_mut() {
+                sanitize_gemini_schema(child);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                sanitize_gemini_schema(item);
+            }
+        }
+        _ => {}
+    }
 }
 /// Read Google's `usageMetadata` into normalised token counts.
 ///
@@ -580,12 +611,29 @@ mod tests {
         let mut req = request();
         req.tools = vec![serde_json::json!({
             "type": "function",
-            "function": {"name": "lookup", "parameters": {"type": "object"}}
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "exclusiveMinimum": 1
+                        }
+                    }
+                }
+            }
         })];
         let body = build_body(&req, "gemini-2.5-flash");
         assert_eq!(
             body["tools"][0]["functionDeclarations"][0]["name"],
             "lookup"
         );
+        let params = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+        assert!(params.get("$schema").is_none());
+        assert!(params.get("additionalProperties").is_none());
+        assert!(params["properties"]["query"].get("exclusiveMinimum").is_none());
     }
 }

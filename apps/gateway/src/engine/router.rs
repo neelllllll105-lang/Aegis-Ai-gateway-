@@ -406,8 +406,10 @@ impl Router {
             .is_none_or(|ceiling| requested.tier <= ceiling);
         let allowed_by_list = is_allowed(&requested.model_id, inputs);
         let provider_up = health.is_available(&requested.provider);
+        let provider_configured =
+            is_provider_configured(&requested.provider, &requested.model_id, inputs);
 
-        if allowed_by_plan && allowed_by_list && provider_up {
+        if allowed_by_plan && allowed_by_list && provider_up && provider_configured {
             return RoutingDecision {
                 served_model: requested.model_id.clone(),
                 provider: requested.provider.clone(),
@@ -415,7 +417,7 @@ impl Router {
                 complexity_score: score,
                 candidates_considered: 0,
                 explanation: vec![
-                    "no cheaper model could serve this request without a quality                      downgrade; served on the model you asked for"
+                    "no cheaper model could serve this request without a quality downgrade; served on the model you asked for"
                         .to_string(),
                 ],
             };
@@ -455,6 +457,7 @@ impl Router {
                     provider_up,
                     allowed_by_plan,
                     allowed_by_list,
+                    provider_configured,
                 )],
             },
             // Nothing at all is available. Passing through gives the provider a chance to
@@ -466,7 +469,7 @@ impl Router {
                 complexity_score: score,
                 candidates_considered: 0,
                 explanation: vec![
-                    "no permitted model is currently available; sent to the requested                      model so the provider's own error reaches you rather than one we                      invented"
+                    "no permitted model is currently available; sent to the requested model so the provider's own error reaches you rather than one we invented"
                         .to_string(),
                 ],
             },
@@ -691,6 +694,7 @@ fn substitution_explanation(
     provider_up: bool,
     allowed_by_plan: bool,
     allowed_by_list: bool,
+    provider_configured: bool,
 ) -> String {
     if !provider_up {
         return format!(
@@ -698,6 +702,13 @@ fn substitution_explanation(
              closest available model, {}. This substitution was not a cost optimisation \
              and may cost more than the model you asked for — compare x-aegis-cost against \
              x-aegis-baseline-cost.",
+            requested.model_id, requested.provider, served.model_id
+        );
+    }
+    if !provider_configured {
+        return format!(
+            "{} provider ({}) has no credentials configured for your organisation, so this \
+             request was served by the best configured model, {}.",
             requested.model_id, requested.provider, served.model_id
         );
     }
@@ -1823,6 +1834,31 @@ mod tests {
             tier_of(&table, &with_cheap_header.served_model)
                 <= tier_of(&table, &ignored_before.served_model),
             "the cheap header must now produce a cheaper-or-equal tier, not be ignored"
+        );
+    }
+
+    #[test]
+    fn unconfigured_requested_provider_substitutes_configured_provider_on_complex_request() {
+        let table = pricing();
+        let mut configured = std::collections::HashSet::new();
+        configured.insert("google".to_string());
+
+        let decision = Router::new()
+            .route(
+                &complex_request(),
+                &table,
+                &healthy(),
+                &RoutingInputs {
+                    hint: RoutingHint::Auto,
+                    configured_providers: Some(configured),
+                    ..RoutingInputs::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            decision.provider, "google",
+            "should route to configured google provider rather than unconfigured openai"
         );
     }
 }
