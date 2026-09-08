@@ -102,6 +102,43 @@ Detail with per-criterion evidence: `docs/PHASES.md`. Machine-readable: `.aegis/
 
 ## Current Focus
 
+**Session 15 (2026-09-07), newest: the user asked for the dashboard to actually look
+different per plan (Free/Pro/Team/Enterprise), a quick onboarding walkthrough for Team/
+Enterprise admins, project renaming with analytics that follow the new name, and request
+logs filterable by project.** Entered plan mode, researched the codebase (confirmed: zero
+plan-based gating existed anywhere, backend or frontend; `teams` had create+delete but no
+rename; `list_requests` was org-wide only), got the user's sign-off on a concrete page-to-
+plan mapping and on adding server-side enforcement (not just hiding pages), then built all
+four. Backend: new `billing::features` module (`PlanTier`/`Feature`, single source of truth
+for `GET /api/billing/plan` and 5 write guards — `create_provider`/`create_budget`/
+`create_policy`/`create_team`/`invite_member`), new `AegisError::PlanRestricted`,
+`PATCH /api/org/teams/{id}` (rename, proven not to touch `usage_records`), `list_requests`
+gains an optional `team_id` filter, migration 0013 (`users.onboarding_completed_at`) +
+`POST /api/me/onboarding-complete`. 909 lib tests (was 897), full suite green, fmt/clippy
+clean. Frontend: `auth-context.tsx` gains `planFeatures`, `shell.tsx`'s nav filters against
+it, a new `UpgradeRequired` component gates the 5 pages directly, a new hand-built
+`onboarding-tour.tsx` (no tour library exists in this app) auto-triggers for Team/Enterprise
+owner/admin and replays from Settings, `team/page.tsx` gets this app's first inline-rename
+UI, `requests/page.tsx` gets a project filter. **Verified live in a real browser** against a
+throwaway local mock of the management API (no Docker here, so this substitutes for the
+real gateway) — nav genuinely changes between a Free and a Team mock session, the tour
+renders and correctly shows 6 of 7 steps on Team plan, `/providers` under Free shows the
+upgrade card with working navigation, and renaming a project in the browser left its spend/
+savings/cache-hit-rate figures untouched while the new name propagated to the Requests
+page's filter. Full detail in the Session Log entry dated 2026-09-07 (this is a third
+addition to that same day's entry — see the two paragraphs above this one for what came
+immediately before).
+
+**Session 15 (2026-09-07), earlier: the user pasted competitive research on LiteLLM/
+LangChain/Redis Iris/Red Hat and asked for an honest comparison plus gap-closing.** Domain-
+aware routing turned out to already exist (now tested, 6 new tests); semantic caching's
+`is_local()`-only gate — the reason it had never fired outside a unit test — is now
+opt-in-reachable via `semantic_lookup_worth_it()` and `AEGIS_SEMANTIC_CACHE_ALLOW_REMOTE_
+EMBEDDING`. 897 lib tests passing, fmt/clippy clean, commit `9d4c691`. **The comparison
+write-up itself — the actual thing asked for — is still owed to the user; see Next Steps.**
+Full detail in the Session Log entry dated 2026-09-07 (appended to the existing session 15
+entry, same day).
+
 **Session 15 (2026-09-07), backend half: closed the four items session 14 itself flagged
 as "no good excuse"** — full detail in the Session Log entry dated 2026-09-07, kept here
 in one line: policy rules can now match on `user` and set `routing_mode` (and, while wiring
@@ -220,6 +257,28 @@ before building it.
 ---
 
 ## What Actually Works — Verified
+
+**As of session 15's final commit (2026-09-07):** `cargo test --lib` → **909 passing, 0
+failing, 0 ignored**. Full `cargo test` (lib + every integration binary) → **974 passing**.
+`clippy --all-targets -D warnings` clean. `cargo fmt --check` clean. Dashboard: `tsc
+--noEmit`, `eslint . && check-design-tokens.mjs` clean, `next build` produces 24 static
+routes with no errors. (The two paragraphs below are session 6/7's own numbers, left as
+historical record rather than silently overwritten — see the Session Log for what changed
+between then and now.)
+
+**New this session, verified live in a real browser** (a throwaway local mock of the
+management API stood in for the real gateway — Docker is still unavailable here): plan-
+gated navigation genuinely adds/removes sidebar items switching a mock session between
+Free and Team plans; a direct visit to a gated page under Free plan renders the
+`UpgradeRequired` card with a working "View plans" link to `/billing`; the onboarding tour
+renders, its Back/Next/Skip mechanics work, and it correctly shows 6 of its 7 steps for a
+Team-plan account (skipping the Enterprise-only step); renaming a project in `/team`'s
+Manage panel updates the table and panel header immediately while `THIS PROJECT SPENT`/
+`SAVED`/cache-hit-rate stay byte-identical, and the new name shows up in `/requests`'
+project filter afterward. Backend-side, this is additionally proven by real integration
+tests against a database (`tests/auth_and_billing.rs`): a Free-plan org is blocked with
+`plan_restricted` (403) *before* the SSRF guard on `create_provider` even runs, and the
+identical `create_team` request that gets refused on Free succeeds once upgraded to Team.
 
 `cargo test --lib` → **774 passing, 0 failing, 0 ignored** (the session-5 budget-race
 `#[ignore]`d proof no longer exists as a documented-bypass — it was replaced by a passing
@@ -485,6 +544,7 @@ Covered by tests (not hand-executed against live infra):
 | No provider API key supplied | Cannot confirm a real end-to-end completion or check a real invoice | The mock provider exercises the whole pipeline, including a 64-concurrency load pass. Needs one real key (user selected Google Gemini) to close. |
 | No GCP service account for Vertex AI (new, session 5) | Vertex's OAuth2 token exchange and `generateContent` call are untested against real Google infrastructure | 14 tests cover everything that doesn't require a live GCP project (JWT construction, credential parsing, request-body shape). Needs a real service-account JSON key, scoped to a project with the Vertex AI API enabled, to close. |
 | `gh auth` token is invalid (new, session 6) | `gh pr create` fails outright — `gh auth status` reports "The token in default is invalid." Every session-6 fix went directly to `origin/main` as a result, consistent with the pattern already established in prior sessions and not objected to by the user. | User runs `gh auth login -h github.com`; a stale `fix/enterprise-audit-remediation` branch from the failed PR attempt was left pointing at an ancestor of `main` (zero unique commits) — safe to delete once `gh` or local git push access works, currently blocked by the same permission classifier that also requires explicit confirmation for branch deletion. |
+| **Unresolved incident (new, session 15): a friend visiting `/dashboard` landed on the founder's own account.** Audited the actual auth path (cookies, session lookup, `authenticate_management`) and found no code-level bypass — see the session 15 log entry for the full trace. | Unknown until the user says what actually happened, so genuinely unknown whether this is a real vulnerability or expected session-persistence/shared-credential behaviour. | Asked the user directly (dismissed); leading hypothesis is the well-known `dev@aegis.local` seed credential being reachable over this machine's LAN-mode dev server, **not acted on without confirmation**. Next agent: do not silently "fix" the seed account or session code without the user first confirming what the friend actually did to reach the dashboard — read this table row and the session 15 log entry before touching either. |
 
 ---
 
@@ -550,7 +610,7 @@ tests. Full detail in the Session Log below and the audit artifact.
 
    | Feature | Status |
    |---|---|
-   | **Semantic cache** | **Fixed session 7.** Wired into `execute_with_headroom` behind a new `cache::embed::Embedder` trait, gated to Pro/Enterprise plans, embedding generated once per request and reused for both lookup and (on a miss) storage. A semantic hit also writes the current wording into the hot exact-match tier, so its own repeat skips the embedding call next time. Went further than the original task: a new third cache tier (`cache::durable`, Postgres, per-tenant-encrypted, 30-day sliding TTL) now promotes any fingerprint the hot tier has proven repeats, so it survives past the hot tier's 24h window too. Full design: `docs/adr/0008-tiered-durable-cache.md`. |
+   | **Semantic cache** | **Fixed session 7, then found session 15 to have never actually fired in any environment this project has run in, then made reachable session 15.** Wired into `execute_with_headroom` behind a new `cache::embed::Embedder` trait, gated to Pro/Enterprise plans, embedding generated once per request and reused for both lookup and (on a miss) storage. A semantic hit also writes the current wording into the hot exact-match tier, so its own repeat skips the embedding call next time. Went further than the original task: a new third cache tier (`cache::durable`, Postgres, per-tenant-encrypted, 30-day sliding TTL) now promotes any fingerprint the hot tier has proven repeats, so it survives past the hot tier's 24h window too. Full design: `docs/adr/0008-tiered-durable-cache.md`. **The catch, found during the checklist triage (session 15):** the lookup was gated on `state.embedder.is_local()`, and the only embedder this codebase can construct that satisfies `is_local()` needs a provisioned ONNX model — never done in any environment this project has run in — so the feature was real, tested, and permanently unreachable outside a unit test. `semantic_lookup_worth_it()` (same session, later) replaces that gate: a local embedder still always qualifies; a remote one now qualifies too, but only when the operator opts in (`AEGIS_SEMANTIC_CACHE_ALLOW_REMOTE_EMBEDDING=true`, `false`/unset preserves today's exact behaviour) and the request is past `Simple` complexity, where a guaranteed 100-300ms embedding round trip is actually worth risking. Still not exercised against a real embedding endpoint — no such endpoint has ever been reachable from this environment. |
    | **Outcome-trained bandit** | **Fixed session 6.** The router now reads the bandit back via `RoutingInputs::bandit`, folded into `select_at_tier`'s candidate scoring alongside graded provider health and price. Previously write-only. |
    | **Budget threshold alerts** | **Fixed session 6.** `workers/budget_alerts::run` sweeps every org on an interval and delivers exactly one alert per threshold crossing per period (a "last alerted" watermark), spawned from `main.rs`. |
    | **TOTP two-factor auth** | **Fixed session 6.** Repo layer, enroll/confirm/disable endpoints, a new per-user HKDF key namespace, and a real login-time check all added — proven end to end by `totp_protects_login_end_to_end`. |
@@ -639,6 +699,26 @@ tests. Full detail in the Session Log below and the audit artifact.
 ---
 
 ## Next Steps (in order)
+
+**Added by session 15's newest work (plan-gated dashboard), ahead of everything below:**
+1. **Visually verify against the real gateway, not just the local mock**, once Docker
+   works — the mock's JSON shapes were hand-typed to match `lib/api.ts`'s TypeScript
+   interfaces, which is good evidence but not the same claim as a real `GET
+   /api/billing/plan` response.
+2. **Decide whether Free/Pro should keep a single-seat cap enforced somewhere concrete**,
+   or whether `team_management` gating `invite_member` is sufficient — right now a Free/Pro
+   org's *owner* is simply the only person who can ever be a member, with no explicit
+   "upgrade to add teammates" prompt anywhere except the now-hidden `/team` page itself.
+   Worth a dedicated empty-state or CTA on `/settings` if this comes up in practice.
+3. **The `"api"` plan** (`billing::stripe::is_valid_plan` sells it, but it has no place in
+   `MASTER_BUILD.md`'s 4-tier table) currently falls to `PlanTier::Free` in
+   `billing::features::PlanTier::parse` — confirm that's actually the intended behaviour
+   for whatever this plan is for, rather than an oversight.
+
+(Resolved since it was last listed here: the honest Aegis-vs-competitor comparison the user
+asked for after pasting competitive research on LiteLLM/LangChain/Redis Iris/Red Hat — this
+was written and presented in the same session, immediately before the plan-gated-dashboard
+request came in.)
 
 **Added by session 14, ahead of the existing list below because it is now the newest code
 nothing has verified against real infrastructure:** once Docker works (item 2 below),
@@ -888,6 +968,27 @@ Each of these cost real time during the build.
   optional-feature-bearing crate remains workspace-visible — the correct fix is a scoped,
   evidence-cited ignore in **`.cargo/audit.toml`** (a root-level `audit.toml` does *not*
   work; the location is load-bearing, confirmed by testing both).
+- **`cargo test`/`cargo check` on this machine can intermittently fail with `failed to
+  remove file ...\aegis-gateway.exe: Access is denied` (session 15).** Root cause not fully
+  pinned down (Windows Defender or another handle briefly holding the binary), but the fix
+  is always the same: `tasklist //FI "IMAGENAME eq aegis-gateway.exe"` finds a lingering
+  process holding the file, `taskkill //F //IM aegis-gateway.exe` clears it, retry the
+  build. Happened repeatedly across a single session's build cycle — don't assume one kill
+  fixes it for the rest of the session.
+- **On this machine, `python`/`python3` on PATH resolve to the Windows Store's App
+  Execution Alias stub first, which hangs waiting for an install prompt rather than
+  erroring** (session 15) — `which python` and any script invoked as `python ...` from the
+  Bash tool blocks until its own timeout rather than failing fast. `where python` lists
+  every candidate; the real interpreter was at
+  `C:\Users\Acer\AppData\Local\Programs\Python\Python312\python.exe` — call that full path
+  directly rather than the bare command.
+- **A throwaway local mock server used to verify frontend behaviour without a real gateway
+  needs `ThreadingHTTPServer`, not plain `http.server.HTTPServer`** (session 15) — a
+  browser opens several concurrent connections (a CORS preflight plus the real request, in
+  parallel across `Promise.all`), and the single-threaded default serialises/drops them,
+  which reads exactly like a hung API call on the frontend side and wastes time debugging
+  the wrong layer. `class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+  daemon_threads = True` fixed it immediately.
 
 ---
 
@@ -998,6 +1099,159 @@ against a live gateway; every page currently falls to the dashboard's existing "
 Connection Notice" state rather than a blank screen, which proves no client-side exception
 on load and nothing more. First real verification needs Docker fixed, a database migrated
 through 0012, and a signed-in session — none of which exist here yet.
+
+**Later still the same session: an unresolved incident report, an RBAC audit it prompted,
+and one real frontend gap the audit found and closed.** The user reported that a friend
+visiting `/dashboard` landed directly on the founder's own account. Audited the actual
+authentication path before touching anything — session cookie construction
+(`HttpOnly`/`SameSite=Lax`, no `Domain` override), `extract_session_cookie`,
+`find_user_by_session` (exact non-expired token-hash match, no fallback), and
+`authenticate_management`'s two-branch (cookie or bearer, else 401) — and found no
+backdoor, no default account, no bypass. Asked the user to clarify what actually happened
+(same device, an invite, or genuinely no login step at all); the user dismissed the
+question and asked instead whether RBAC was implemented "over all the features and
+accounts." **The incident itself remains unexplained and open** — deliberately not guessed
+at further, since acting on an unconfirmed cause risks fixing the wrong thing (or breaking
+working auth code) more than it risks leaving a real gap unaddressed for one more session.
+The leading hypothesis (not confirmed): `scripts/seed.sql`'s `dev@aegis.local` /
+`aegis-development-password` demo account is a well-known, working credential, and this
+machine's dev server is LAN-reachable (`getApiUrl()`'s `192.168.*`/`10.*`/`172.*` branch)
+— someone on the same network who knew or was given those demo credentials would land on
+that account, which may be the one the founder has been using for all his own testing.
+Not acted on without confirmation.
+
+The RBAC question itself was answered by tracing the code, not from memory: every
+management handler (40+), every `/api/admin/*` handler, and every SCIM handler calls a
+real guard (`require_reader`/`require_writer`/`require_key_writer`/`assert_project_access`/
+`require_admin`/`authenticate_scim`), and `list_keys` filters per-row by role, not just by
+route. This is independently backed by an existing, currently-passing test
+(`the_management_api_rejects_anonymous_callers_rather_than_serving_them`) that fires real
+anonymous requests at 9 sensitive endpoints and asserts 401 on all of them. **What was
+missing, found by checking rather than assumed: the frontend used none of this.** Every
+dashboard page showed the identical set of write controls to every role — a viewer or
+plain member saw "Delete team," "Invite member," "Add provider key" exactly like an owner,
+relying entirely on the backend's 403 to stop a click that should never have been offered.
+
+Fixed: new `lib/auth-context.tsx` (`AuthProvider`/`useAuth()`), fed once by
+`DashboardShell`'s existing `/api/auth/me` call, exposing `canWrite` (owner/admin —
+mirrors `require_writer`) and `canManageKeys` (owner/admin/member — mirrors
+`require_key_writer`), named and commented deliberately to track the backend guards
+field-for-field. Applied across all seven pages with a write control:
+`/team` (invite, remove member, create/delete team, add/remove project member — "Manage"
+itself stays visible to everyone, since a project lead who isn't an org admin legitimately
+needs to view their own project and the backend's `assert_project_access` correctly 404s
+anyone else who tries), `/budgets` (create, delete), `/keys` (create, revoke, routing-mode
+select — gated on the wider `canManageKeys`, not `canWrite`), `/policies` (create, delete),
+`/providers` (add/test/delete — the single most sensitive form on the whole dashboard,
+since it accepts a live, billable credential), `/settings` (routing-mode save), `/billing`
+(claim referral). Also added a "Signed in as" identity block to the sidebar, next to the
+org name and sign-out — directly relevant to the open incident above: whoever ends up on
+this dashboard should never have to wonder whose account they're looking at.
+
+Verified: `tsc --noEmit` clean, `next build` (24 routes, 0 errors), `next lint` clean, and
+confirmed in a real browser that the new context produces no console errors beyond the
+expected "gateway not running" network failures (still no Docker on this machine).
+
+**Later still: the user pasted back "The Aegis Audit"'s own six-item launch checklist.**
+Triaged honestly rather than attempting all six — two (`Get a provider API key`, `Find a
+design partner`) are not things an agent can do at all; two (`Fix Docker`, `Run the load
+test`) need the user's machine/infrastructure access this environment doesn't have. Worked
+the two genuinely actionable ones:
+
+**Wired Stripe to an actual route, both directions (checklist item 2).** `POST
+/api/billing/checkout` creates a Stripe customer for the org on first use (persisted on
+`organizations.stripe_customer_id`, reused after), builds a Checkout session from the
+existing `checkout_session_body()`, and returns its hosted URL. `POST /api/billing/webhook`
+is the first endpoint in this codebase authenticated by neither a session nor an API key —
+`Stripe-Signature` verification against the *raw* body (`axum::body::Bytes`, never
+`Json<T>`) is the whole authenticator, exactly as the existing `billing::stripe` module's
+own doc comment already argued it should be. New `STRIPE_PRICE_PRO`/`STRIPE_PRICE_TEAM`
+config (`enterprise` deliberately excluded — sales-assisted, not self-checkout), two new
+repo functions, and two new HTTP-calling functions in `billing::stripe` whose
+request-building and response-parsing are tested, same as before; the live `.send()` call
+itself is not, for the same reason no provider adapter's live call is — no Stripe account
+has ever been available here. 887 lib tests passing (was 885), fmt/clippy clean.
+
+**Stopped claiming semantic caching is live in customer-facing copy (checklist item 4).**
+The FAQ page and homepage stated it as an unqualified fact ("with our zero-latency semantic
+cache, duplicate or semantically identical questions return instantly from cache at $0.00
+cost") despite it never having fired in any environment this project has run in (see the
+finding in "The Aegis Audit" artifact, session 15 earlier). Reworded three FAQ answers and
+the homepage caption to describe what's actually live — exact-match caching, lossless
+compression, deterministic downscaling — and said plainly that semantic matching is built
+and tested but still rolling out. The homepage's interactive routing simulator had one
+worked example under a "Semantic Cache" step that was itself internally contradictory
+(`semantic_similarity_98.4%` next to `qualityPreserved: "Exact Match"`) on top of
+describing the same non-firing feature; rewritten as an honest exact-cache example instead
+of deleted, since exact-match caching is completely real, and the step's fixed label
+relabeled to match. Also dropped an "RFC-9110 audited proof of savings" line from the
+FAQ's first answer — RFC 9110 is the IETF HTTP semantics spec and has no connection to
+savings auditing; the citation was a specific-sounding claim that didn't mean anything.
+`tsc`/`build`/`lint` all clean.
+
+**Left alone, and told the user why:** a real provider API key and a design partner are not
+things an agent can obtain; Docker on this machine and a deployed instance for the load
+test both need infrastructure access this environment does not have. None of the four
+attempted here needed the user first — the other two genuinely do.
+
+**Later still: the user pasted a competitive-research document** comparing Aegis against
+LiteLLM (embedding-based/complexity routers, Redis/Qdrant semantic caching, payload
+truncation), LangChain (lossy Summarization Middleware at ~80% context, LangGraph semantic
+routing), Redis Iris/LangCache (RedisVL semantic router, LangCache claiming 73% cost
+reduction, a selective-history Context Retriever), and Red Hat's LLM Semantic Router
+(domain routing to a specialized model pool, semantic caching, PII-redaction prompt
+guards) — and asked for an honest comparison, then to close gaps and get a genuine upper
+hand, "whatever you do."
+
+Investigated the routing side first and corrected an initial wrong assumption: task-
+domain-aware routing (routing a request to a provider strong on its detected domain — code,
+reasoning, language) looked like a plausible gap against LiteLLM/Red Hat, but grepping
+`TaskDomain`/`detect_domain`/`preferred_providers`/`select_at_tier` found it was already
+fully built — a 25%-price-band soft re-rank, wired end to end — just with **zero test
+coverage**, so nobody could tell it actually worked versus merely compiling. Added 5
+classifier tests (`Code`/`Reasoning`/`Language`/`General` detection, plus the deliberate
+code-wins-over-reasoning-vocabulary tie-break) and 1 router test proving a detected domain
+actually reaches the customer-facing explanation string. Writing that router test surfaced
+a real, separate, previously-undocumented behaviour: a `Complex`-classified request never
+reaches `select_at_tier` at all (`target_tier` returns `None` for Complex unconditionally,
+by design — the quality guarantee), so the domain-preference explanation line can only ever
+be observed on a Medium or Simple request. Not a bug — the quality guarantee is intentional
+and correct — but a real gap between what the test author (this agent, mid-session) assumed
+and what the code actually does; documented on the new `reasoning_domain_medium_request()`
+test helper in `router.rs` rather than left implicit.
+
+Then closed the semantic-cache reachability gap flagged but not yet fixed by the checklist
+triage above: `semantic_lookup_worth_it()` in `openai_compat.rs` replaces the `is_local()`-
+only gate with a local-always/remote-opt-in-past-Simple-complexity rule (new config,
+`AEGIS_SEMANTIC_CACHE_ALLOW_REMOTE_EMBEDDING`, `false` by default so an unconfigured
+deployment's behaviour is unchanged). Full detail in the "Known Limitations" table's
+Semantic cache row. 4 new unit tests on the function directly. 897 lib tests passing (was
+887), fmt/clippy clean. Commit `9d4c691`.
+
+**Then: the honest side-by-side comparison was written and presented** — Aegis vs.
+LiteLLM/LangChain/Redis Iris/Red Hat across smart routing, semantic caching, and context
+compression, grounded in what the code above actually proved (domain-aware routing real and
+now tested; semantic caching real, tested, and now reachable given operator opt-in;
+domain-adaptive similarity threshold flagged as a genuine differentiator no competitor's
+docs describe) and honest about the two real gaps found — no RAG-style selective context
+retrieval like Redis Iris's Context Retriever, no lossy summarization option like
+LangChain's Summarization Middleware (both deliberately not built without an eval harness +
+ADR, per the IG-1 guide's own "do not do" list).
+
+**Later the same session: the user asked for the dashboard to look different per plan, a
+walkthrough for Team/Enterprise admins, project renaming, and per-project request logs.**
+Used plan mode: explored first (confirmed zero plan-gating existed anywhere, backend or
+frontend), got the user's sign-off on a concrete page-to-plan mapping and on adding
+server-side enforcement rather than UI-only, then built and shipped all of it. Full detail
+in "Current Focus" above and commits `f1a3d31`/`e63954e`/`7f49663` — kept brief here since
+Current Focus already carries the complete account and this entry is already long. The one
+thing worth restating here: this is the first genuinely thorough **live-browser**
+verification this project has managed without Docker — a throwaway local mock of the
+management API (Python, killed and discarded at session end, never committed) stood in for
+the real gateway well enough to click through the actual rename flow, watch the nav change
+shape between plans, and step through the onboarding tour, rather than stopping at "the
+shell renders its error state without crashing" the way every prior Docker-less session's
+frontend verification had to.
 
 ### 2026-09-06 — Session 14 — Claude Sonnet 5
 

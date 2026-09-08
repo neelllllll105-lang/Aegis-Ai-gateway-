@@ -44,6 +44,13 @@ pub struct User {
     pub totp_enabled: bool,
     pub disabled_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// When this person finished (or skipped) the dashboard onboarding tour. `None` means
+    /// never — the frontend uses this, not local storage, to decide whether to show it, so
+    /// it follows the person across devices. `#[sqlx(default)]` so the many `User`-returning
+    /// queries that predate this column, or simply don't need it, keep compiling unchanged;
+    /// only `find_user_by_id` (backing `GET /api/auth/me`) selects it today.
+    #[sqlx(default)]
+    pub onboarding_completed_at: Option<DateTime<Utc>>,
 }
 
 impl User {
@@ -264,6 +271,10 @@ pub struct RequestLogRow {
     pub tokens_saved_by_compression: i32,
     pub status_code: i32,
     pub created_at: DateTime<Utc>,
+    /// The project this request was attributed to, if the key that made it belongs to one.
+    /// `#[sqlx(default)]` so a database that predates this column still binds.
+    #[sqlx(default)]
+    pub team_id: Option<Uuid>,
 }
 
 /// Everything the hot path needs about a key, resolved in one query.
@@ -372,13 +383,25 @@ pub async fn find_user_by_email(pool: &PgPool, email: &str) -> Result<Option<Use
 pub async fn find_user_by_id(pool: &PgPool, user_id: Uuid) -> Result<Option<User>> {
     sqlx::query_as::<_, User>(
         "SELECT id, email, email_verified_at, password_hash, name, avatar_url,
-                is_admin, totp_enabled, disabled_at, created_at
+                is_admin, totp_enabled, disabled_at, created_at, onboarding_completed_at
          FROM users WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(user_id)
     .fetch_optional(pool)
     .await
     .map_err(AegisError::Database)
+}
+
+/// Record that this person has finished (or explicitly skipped) the onboarding tour, so it
+/// does not show again automatically. Replaying it from Settings is a purely client-side
+/// re-open of the same component — it does not call this a second time.
+pub async fn mark_onboarding_complete(pool: &PgPool, user_id: Uuid) -> Result<()> {
+    sqlx::query("UPDATE users SET onboarding_completed_at = NOW() WHERE id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map_err(AegisError::Database)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -760,6 +783,46 @@ pub async fn update_org_plan(
     .execute(pool)
     .await
     .map(|_| ())
+    .map_err(AegisError::Database)
+}
+
+/// Record the Stripe customer created for this organisation, the first time it checks out.
+/// A no-op on every later checkout for the same org — `checkout_or_create_stripe_customer`
+/// checks first, so this only ever runs once per organisation.
+pub async fn set_stripe_customer_id(
+    pool: &PgPool,
+    org_id: Uuid,
+    stripe_customer_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE organizations SET stripe_customer_id = $2, updated_at = NOW() WHERE id = $1",
+    )
+    .bind(org_id)
+    .bind(stripe_customer_id)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(AegisError::Database)
+}
+
+/// Find the organisation a Stripe customer id belongs to.
+///
+/// The webhook handler prefers `WebhookEvent::org_reference()` (the `client_reference_id`/
+/// `metadata.aegis_org_id` set at checkout) — this is the fallback for the rarer event that
+/// carries a customer id but not the metadata, so a webhook is never silently dropped just
+/// because one of the two paths back to an organisation happened to be absent.
+pub async fn find_org_by_stripe_customer_id(
+    pool: &PgPool,
+    stripe_customer_id: &str,
+) -> Result<Option<Organization>> {
+    sqlx::query_as::<_, Organization>(
+        "SELECT id, name, slug, plan, savings_share_bp, billing_email, zero_retention,
+                content_capture, region, stripe_customer_id, created_at, default_routing_mode
+         FROM organizations WHERE stripe_customer_id = $1",
+    )
+    .bind(stripe_customer_id)
+    .fetch_optional(pool)
+    .await
     .map_err(AegisError::Database)
 }
 
@@ -1231,6 +1294,32 @@ pub async fn list_teams(pool: &PgPool, org_id: Uuid) -> Result<Vec<Team>> {
     .map_err(AegisError::Database)
 }
 
+/// Rename a project (team). Org-scoped in the `WHERE` clause itself, not checked
+/// afterward: a team belonging to a different organisation matches nothing and this
+/// returns `Ok(None)`, indistinguishable from "no such team" — the same 404-not-403
+/// treatment every other project-scoped lookup in this module gives a caller with no
+/// standing to even learn the resource exists.
+pub async fn update_team(
+    pool: &PgPool,
+    org_id: Uuid,
+    team_id: Uuid,
+    name: &str,
+) -> Result<Option<Team>> {
+    sqlx::query_as::<_, Team>(
+        "UPDATE teams SET name = $3
+         WHERE id = $1 AND org_id = $2
+         RETURNING id, org_id, name, monthly_budget_mc, created_at, default_routing_mode",
+    )
+    .bind(team_id)
+    .bind(org_id)
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_unique_violation(
+        "a project with that name already exists",
+    ))
+}
+
 /// Delete a team.
 pub async fn delete_team(pool: &PgPool, org_id: Uuid, team_id: Uuid) -> Result<bool> {
     let result = sqlx::query("DELETE FROM teams WHERE id = $1 AND org_id = $2")
@@ -1686,6 +1775,12 @@ pub async fn usage_summary_for_user(
 }
 
 /// Paginated request metadata log. Never returns prompt or response content.
+///
+/// `team_id`, when given, narrows the log to one project — `None` returns the whole org,
+/// same as before this filter existed. The `$6::uuid IS NULL OR team_id = $6` shape (rather
+/// than building two different query strings) keeps this one prepared statement instead of
+/// two, at the cost of Postgres not being able to use a partial index on the filtered case;
+/// worth it here since this table's `org_id`/`created_at` index already bounds the scan.
 pub async fn list_requests(
     pool: &PgPool,
     org_id: Uuid,
@@ -1693,6 +1788,7 @@ pub async fn list_requests(
     to: DateTime<Utc>,
     limit: i64,
     offset: i64,
+    team_id: Option<Uuid>,
 ) -> Result<Vec<RequestLogRow>> {
     sqlx::query_as::<_, RequestLogRow>(
         "SELECT request_id, requested_model, served_model, provider, input_tokens,
@@ -1702,9 +1798,10 @@ pub async fn list_requests(
                 latency_ms, cache_hit, cache_type, routing_reason,
                 complexity_score_milli,
                 COALESCE(tokens_saved_by_compression, 0) AS tokens_saved_by_compression,
-                status_code, created_at
+                status_code, created_at, team_id
          FROM usage_records
          WHERE org_id = $1 AND created_at >= $2 AND created_at < $3
+               AND ($6::uuid IS NULL OR team_id = $6)
          ORDER BY created_at DESC
          LIMIT $4 OFFSET $5",
     )
@@ -1713,6 +1810,7 @@ pub async fn list_requests(
     .bind(to)
     .bind(limit.clamp(1, 1_000))
     .bind(offset.max(0))
+    .bind(team_id)
     .fetch_all(pool)
     .await
     .map_err(AegisError::Database)
@@ -2569,6 +2667,7 @@ mod tests {
             totp_enabled: false,
             disabled_at: None,
             created_at: Utc::now(),
+            onboarding_completed_at: None,
         };
         let json = serde_json::to_string(&user).unwrap();
         assert!(!json.contains("argon2"), "{json}");

@@ -173,7 +173,7 @@ async fn usage_records_are_never_visible_across_tenants() {
         "CROSS-TENANT LEAK: usage from another organisation appeared in the summary"
     );
 
-    let rows = repo::list_requests(&pool, attacker.org_id, from, to, 100, 0)
+    let rows = repo::list_requests(&pool, attacker.org_id, from, to, 100, 0, None)
         .await
         .expect("query");
     assert!(
@@ -288,6 +288,18 @@ async fn teams_budgets_and_policies_are_all_org_scoped() {
     assert!(!repo::delete_policy(&pool, attacker.org_id, policy.id)
         .await
         .expect("query"));
+    assert!(
+        repo::update_team(&pool, attacker.org_id, team.id, "pwned")
+            .await
+            .expect("query")
+            .is_none(),
+        "CROSS-TENANT LEAK: an attacker organisation renamed a victim's project"
+    );
+    // The name really is untouched, not just the row count.
+    assert_eq!(
+        repo::list_teams(&pool, victim.org_id).await.expect("query")[0].name,
+        "engineering"
+    );
 
     // The owner still has all three.
     assert_eq!(

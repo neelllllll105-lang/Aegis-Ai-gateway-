@@ -12,7 +12,7 @@ interface Scenario {
   routedModel: string;
   complexityScore: number;
   complexityLabel: "Low" | "Medium" | "High";
-  cacheStatus: "exact_hit" | "semantic_hit" | "miss";
+  cacheStatus: "exact_hit" | "miss";
   routingReason: string;
   baselineCost: string;
   actualCost: string;
@@ -44,23 +44,23 @@ const SCENARIOS: Scenario[] = [
     qualityPreserved: "100% Preserved",
   },
   {
-    id: "semantic-cache-qa",
+    id: "exact-cache-qa",
     name: "Enterprise Knowledge Base QA",
-    category: "Semantic Cache",
+    category: "Exact Cache",
     prompt: "What is our company's refund policy for subscriptions canceled within 14 days of billing?",
     requestedModel: "anthropic/claude-3-5-sonnet",
     routedModel: "aegis/cache-layer",
     complexityScore: 0.42,
     complexityLabel: "Medium",
-    cacheStatus: "semantic_hit",
-    routingReason: "semantic_similarity_98.4%",
+    cacheStatus: "exact_hit",
+    routingReason: "exact_cache_hit",
     baselineCost: "$0.015000",
     actualCost: "$0.000000",
     savings: "$0.015000",
     savingsPercent: "100%",
     latency: "14ms",
     overhead: "0.19ms",
-    qualityPreserved: "Exact Match",
+    qualityPreserved: "Byte-Identical Match",
   },
   {
     id: "code-generation",
@@ -213,7 +213,7 @@ export function RoutingSimulator() {
                 }`}
               >
                 <div className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-muted-light)]">
-                  2. Semantic Cache
+                  2. Exact Cache
                 </div>
                 <div className="mt-1.5">
                   <Stamp tone={cacheTone}>{current.cacheStatus.replace("_", " ")}</Stamp>

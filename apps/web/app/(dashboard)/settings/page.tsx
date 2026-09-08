@@ -11,6 +11,8 @@ import {
 } from "@/lib/api";
 import { Badge, Button, Card, ErrorState, SectionHeader } from "@/components/ui";
 import { formatCount, formatUsd } from "@/lib/format";
+import { useAuth } from "@/lib/auth-context";
+import { OnboardingTour } from "@/components/onboarding-tour";
 
 const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
   auto: "Auto",
@@ -28,10 +30,12 @@ const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
  * rather than a switch someone can flip while scrolling past.
  */
 export default function SettingsPage() {
+  const { canWrite, role } = useAuth();
   const [org, setOrg] = useState<OrgResponse | null>(null);
   const [plan, setPlan] = useState<BillingPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [replayingTour, setReplayingTour] = useState(false);
 
   const [routingMode, setRoutingMode] = useState<RoutingMode | "">("");
   const [savingMode, setSavingMode] = useState(false);
@@ -169,6 +173,25 @@ export default function SettingsPage() {
           </div>
         </Card>
 
+        {(role === "owner" || role === "admin") &&
+          (plan?.plan === "team" || plan?.plan === "enterprise") && (
+            <Card className="p-6">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-sm font-medium text-[var(--color-ink)]">
+                    Walkthrough
+                  </h3>
+                  <p className="mt-1 text-xs text-[var(--color-muted-light)]">
+                    The tour shown automatically the first time an owner or admin signs in.
+                  </p>
+                </div>
+                <Button variant="secondary" onClick={() => setReplayingTour(true)}>
+                  Replay walkthrough
+                </Button>
+              </div>
+            </Card>
+          )}
+
         <Card className="p-6">
           <h3 className="text-sm font-medium text-[var(--color-ink)]">Routing</h3>
           <p className="mt-1 text-xs text-[var(--color-muted-light)]">
@@ -189,11 +212,12 @@ export default function SettingsPage() {
               <select
                 id="org-routing-mode"
                 value={routingMode}
+                disabled={!canWrite}
                 onChange={(event) => {
                   setRoutingMode(event.target.value as RoutingMode);
                   setModeNotice(null);
                 }}
-                className="mt-1.5 w-56 rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
+                className="mt-1.5 w-56 rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)] disabled:opacity-50"
               >
                 {ROUTING_MODES.map((mode) => (
                   <option key={mode} value={mode}>
@@ -202,14 +226,16 @@ export default function SettingsPage() {
                 ))}
               </select>
             </div>
-            <Button
-              onClick={handleSaveRoutingMode}
-              disabled={
-                savingMode || routingMode === (organization?.default_routing_mode ?? "auto")
-              }
-            >
-              {savingMode ? "Saving…" : "Save"}
-            </Button>
+            {canWrite && (
+              <Button
+                onClick={handleSaveRoutingMode}
+                disabled={
+                  savingMode || routingMode === (organization?.default_routing_mode ?? "auto")
+                }
+              >
+                {savingMode ? "Saving…" : "Save"}
+              </Button>
+            )}
             {modeNotice && (
               <span className="text-xs font-bold text-[var(--color-positive)]">
                 {modeNotice}
@@ -252,6 +278,10 @@ export default function SettingsPage() {
           </p>
         </Card>
       </div>
+
+      {replayingTour && (
+        <OnboardingTour onFinish={() => setReplayingTour(false)} />
+      )}
     </>
   );
 }

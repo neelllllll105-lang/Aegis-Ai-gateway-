@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
@@ -424,6 +425,43 @@ export function EmptyState({
         {description}
       </p>
       {action && <div className="mt-5">{action}</div>}
+    </div>
+  );
+}
+
+/**
+ * Shown in place of a page's real content when the org's plan doesn't include the
+ * feature — defense in depth for a direct URL visit, since the sidebar already hides the
+ * nav entry that would normally lead here. `feature`/`requiredPlan` should read as plain
+ * English ("Budgets" / "Team"), not the machine-readable `PlanFeature` key.
+ */
+export function UpgradeRequired({
+  feature,
+  requiredPlan,
+}: {
+  feature: string;
+  requiredPlan: string;
+}) {
+  const router = useRouter();
+  return (
+    <div className="border-pending rounded-2xl border-[1.5px] bg-[var(--color-surface)] px-6 py-14 text-center">
+      <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full border border-[var(--color-ink)] bg-[var(--color-surface2)] text-[var(--color-muted-light)]">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v2h8z" />
+        </svg>
+      </div>
+      <p className="font-serif text-sm font-semibold text-[var(--color-ink)]">
+        {feature} needs the {requiredPlan} plan
+      </p>
+      <p className="mx-auto mt-1 max-w-md text-xs text-[var(--color-muted)] font-medium">
+        Nothing about your current usage or data changes until you upgrade — this is the
+        only thing that does.
+      </p>
+      <div className="mt-5">
+        <Button variant="accent" onClick={() => router.push("/billing")}>
+          View plans
+        </Button>
+      </div>
     </div>
   );
 }

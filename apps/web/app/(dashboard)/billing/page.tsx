@@ -22,6 +22,7 @@ import {
   Th,
 } from "@/components/ui";
 import { formatCount, formatPercent, formatUsd } from "@/lib/format";
+import { useAuth } from "@/lib/auth-context";
 
 /**
  * Billing, credits and chargeback.
@@ -32,6 +33,7 @@ import { formatCount, formatPercent, formatUsd } from "@/lib/format";
  * showing a large gross-savings figure and hoping nobody subtracts.
  */
 export default function BillingPage() {
+  const { canWrite } = useAuth();
   const [plan, setPlan] = useState<BillingPlan | null>(null);
   const [usage, setUsage] = useState<UsageSummaryResponse | null>(null);
   const [credits, setCredits] = useState<CreditsResponse | null>(null);
@@ -248,35 +250,41 @@ export default function BillingPage() {
               </div>
             </div>
 
-            <form onSubmit={handleClaim}>
-              <label
-                htmlFor="referral-code"
-                className="mb-1.5 block text-xs font-bold text-[var(--color-muted)]"
-              >
-                Have a code?
-              </label>
-              <div className="flex gap-2">
-                <input
-                  id="referral-code"
-                  value={referralCode}
-                  onChange={(event) => setReferralCode(event.target.value)}
-                  placeholder="their-org-slug"
-                  className="min-w-0 flex-1 rounded-xl border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 font-mono text-[11px] text-[var(--color-ink)]"
-                />
-                <Button
-                  type="submit"
-                  variant="secondary"
-                  disabled={claiming || !referralCode.trim()}
+            {canWrite ? (
+              <form onSubmit={handleClaim}>
+                <label
+                  htmlFor="referral-code"
+                  className="mb-1.5 block text-xs font-bold text-[var(--color-muted)]"
                 >
-                  {claiming ? "Claiming…" : "Claim"}
-                </Button>
-              </div>
-              {claimNotice && (
-                <p className="mt-1.5 text-[11px] font-bold text-[var(--color-muted)]">
-                  {claimNotice}
-                </p>
-              )}
-            </form>
+                  Have a code?
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    id="referral-code"
+                    value={referralCode}
+                    onChange={(event) => setReferralCode(event.target.value)}
+                    placeholder="their-org-slug"
+                    className="min-w-0 flex-1 rounded-xl border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 font-mono text-[11px] text-[var(--color-ink)]"
+                  />
+                  <Button
+                    type="submit"
+                    variant="secondary"
+                    disabled={claiming || !referralCode.trim()}
+                  >
+                    {claiming ? "Claiming…" : "Claim"}
+                  </Button>
+                </div>
+                {claimNotice && (
+                  <p className="mt-1.5 text-[11px] font-bold text-[var(--color-muted)]">
+                    {claimNotice}
+                  </p>
+                )}
+              </form>
+            ) : (
+              <p className="text-[11px] font-medium text-[var(--color-muted-light)]">
+                Only an owner or admin can claim a referral credit.
+              </p>
+            )}
           </div>
         </Card>
       )}

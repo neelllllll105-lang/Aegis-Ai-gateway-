@@ -165,6 +165,10 @@ export interface User {
   is_admin: boolean;
   email_verified_at: string | null;
   created_at: string;
+  /** When this person finished (or skipped) the dashboard onboarding tour. `null` means
+   *  never — this drives whether it auto-shows, not local storage, so it follows the
+   *  person across devices. */
+  onboarding_completed_at: string | null;
 }
 
 export interface ApiKey {
@@ -262,6 +266,8 @@ export interface RequestLogRow {
   complexity_score_milli?: number | null;
   status_code: number;
   created_at: string;
+  /** The project this request was attributed to, if the key that made it belongs to one. */
+  team_id?: string | null;
 }
 
 export interface ProviderCredential {
@@ -285,6 +291,19 @@ export interface OrgResponse {
   };
 }
 
+/** Keys of `BillingPlan.features` — matches `billing::features::Feature` on the gateway
+ *  exactly. Add a nav item or gated page for a new feature by adding it there first;
+ *  the frontend never hardcodes this mapping itself. */
+export const PLAN_FEATURES = [
+  "byok",
+  "savings",
+  "budgets",
+  "policies",
+  "team_management",
+  "enterprise",
+] as const;
+export type PlanFeature = (typeof PLAN_FEATURES)[number];
+
 export interface BillingPlan {
   plan: string;
   savings_share_bp: number;
@@ -295,6 +314,10 @@ export interface BillingPlan {
     monthly_request_allowance: number | null;
     byok: boolean;
   };
+  /** Every feature this org's plan includes, keyed by `PlanFeature`. Absent from a response
+   *  predating this field on an unmigrated gateway — callers should treat a missing key the
+   *  same as `false`, never assume it's included. */
+  features?: Partial<Record<PlanFeature, boolean>>;
 }
 
 
@@ -511,8 +534,11 @@ export const api = {
     );
   },
 
-  requests: (limit = 100) =>
-    apiRequest<{ requests: RequestLogRow[] }>(`/api/requests?limit=${limit}`),
+  requests: (limit = 100, teamId?: string) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (teamId) params.set("team_id", teamId);
+    return apiRequest<{ requests: RequestLogRow[] }>(`/api/requests?${params}`);
+  },
 
   listProviders: () =>
     apiRequest<{ providers: ProviderCredential[] }>("/api/providers"),
@@ -558,6 +584,9 @@ export const api = {
       body: { name, monthly_budget_mc: monthly_budget_mc ?? null, default_routing_mode },
     }),
 
+  updateTeam: (id: string, name: string) =>
+    apiRequest<Team>(`/api/org/teams/${id}`, { method: "PATCH", body: { name } }),
+
   deleteTeam: (id: string) =>
     apiRequest<void>(`/api/org/teams/${id}`, { method: "DELETE" }),
 
@@ -598,6 +627,13 @@ export const api = {
     const query = params.toString();
     return apiRequest<MyUsageResponse>(`/api/me/usage${query ? `?${query}` : ""}`);
   },
+
+  /** Marks the onboarding tour seen, so it stops auto-showing. Replaying it from Settings
+   *  is a purely client-side re-open of the same component — it does not call this again. */
+  completeOnboarding: () =>
+    apiRequest<{ onboarding_completed: boolean }>("/api/me/onboarding-complete", {
+      method: "POST",
+    }),
 
   listMembers: () => apiRequest<{ members: Member[] }>("/api/org/members"),
 

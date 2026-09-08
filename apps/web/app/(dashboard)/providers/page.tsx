@@ -10,8 +10,10 @@ import {
   ErrorState,
   Field,
   SectionHeader,
+  UpgradeRequired,
 } from "@/components/ui";
 import { formatRelative } from "@/lib/format";
+import { useAuth } from "@/lib/auth-context";
 
 const PROVIDERS = [
   "openai",
@@ -35,6 +37,8 @@ const PROVIDERS = [
  * considerably worse than discovering it here.
  */
 export default function ProvidersPage() {
+  const { canWrite, planFeatures } = useAuth();
+  const hasByok = planFeatures.byok === true;
   const [credentials, setCredentials] = useState<ProviderCredential[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -62,8 +66,14 @@ export default function ProvidersPage() {
   }
 
   useEffect(() => {
+    // A direct URL visit from an under-plan session shouldn't even fetch — the write
+    // this page exists for is refused server-side anyway, and there's nothing to show.
+    if (!hasByok) {
+      setLoading(false);
+      return;
+    }
     void load();
-  }, []);
+  }, [hasByok]);
 
   async function handleAdd(event: React.FormEvent) {
     event.preventDefault();
@@ -124,6 +134,18 @@ export default function ProvidersPage() {
     }
   }
 
+  if (!hasByok) {
+    return (
+      <>
+        <SectionHeader
+          title="Provider keys"
+          description="Bring your own keys and settle directly with each provider — we never mark up their pricing."
+        />
+        <UpgradeRequired feature="Provider keys (BYOK)" requiredPlan="Pro" />
+      </>
+    );
+  }
+
   return (
     <>
       <SectionHeader
@@ -137,6 +159,7 @@ export default function ProvidersPage() {
         </div>
       )}
 
+      {canWrite ? (
       <Card className="mb-6 p-5">
         <form onSubmit={handleAdd} className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2">
@@ -224,6 +247,14 @@ export default function ProvidersPage() {
           </Button>
         </form>
       </Card>
+      ) : (
+        <Card className="mb-6 p-5">
+          <p className="text-xs font-medium text-[var(--color-muted-light)]">
+            Only an owner or admin can add, test, or remove provider keys — these are live
+            credentials billed directly by the provider. Ask one of them to make changes.
+          </p>
+        </Card>
+      )}
 
       <Card>
         {loading ? (
@@ -266,18 +297,20 @@ export default function ProvidersPage() {
                   )}
                 </div>
 
-                <div className="flex shrink-0 gap-2">
-                  <Button
-                    variant="secondary"
-                    onClick={() => handleTest(credential)}
-                    disabled={testing === credential.id}
-                  >
-                    {testing === credential.id ? "Testing…" : "Test"}
-                  </Button>
-                  <Button variant="danger" onClick={() => handleDelete(credential)}>
-                    Remove
-                  </Button>
-                </div>
+                {canWrite && (
+                  <div className="flex shrink-0 gap-2">
+                    <Button
+                      variant="secondary"
+                      onClick={() => handleTest(credential)}
+                      disabled={testing === credential.id}
+                    >
+                      {testing === credential.id ? "Testing…" : "Test"}
+                    </Button>
+                    <Button variant="danger" onClick={() => handleDelete(credential)}>
+                      Remove
+                    </Button>
+                  </div>
+                )}
               </li>
             ))}
           </ul>

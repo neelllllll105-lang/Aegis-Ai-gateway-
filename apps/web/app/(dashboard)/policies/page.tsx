@@ -10,8 +10,10 @@ import {
   ErrorState,
   Field,
   SectionHeader,
+  UpgradeRequired,
 } from "@/components/ui";
 import { formatRelative } from "@/lib/format";
+import { useAuth } from "@/lib/auth-context";
 
 /**
  * Routing policy management.
@@ -76,6 +78,8 @@ const PRESETS = [
 ] as const;
 
 export default function PoliciesPage() {
+  const { canWrite, planFeatures } = useAuth();
+  const hasPolicies = planFeatures.policies === true;
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -103,8 +107,12 @@ export default function PoliciesPage() {
   }
 
   useEffect(() => {
+    if (!hasPolicies) {
+      setLoading(false);
+      return;
+    }
     void load();
-  }, []);
+  }, [hasPolicies]);
 
   function selectPreset(id: string) {
     setPreset(id);
@@ -175,6 +183,19 @@ export default function PoliciesPage() {
 
   const selected = PRESETS.find((entry) => entry.id === preset);
 
+  if (!hasPolicies) {
+    return (
+      <>
+        <SectionHeader
+          eyebrow="Governance"
+          title="Routing policies"
+          description="Rules that override the cost router, automatically, for the whole organization."
+        />
+        <UpgradeRequired feature="Routing policies" requiredPlan="Team" />
+      </>
+    );
+  }
+
   return (
     <>
       <SectionHeader
@@ -189,6 +210,7 @@ export default function PoliciesPage() {
         </div>
       )}
 
+      {canWrite && (
       <Card className="mb-8 p-5">
         <form onSubmit={handleCreate} className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2">
@@ -269,6 +291,7 @@ export default function PoliciesPage() {
           </div>
         </form>
       </Card>
+      )}
 
       {loading ? (
         <Card className="p-10 text-center text-xs font-bold text-[var(--color-muted-light)]">
@@ -295,9 +318,11 @@ export default function PoliciesPage() {
                     Created {formatRelative(policy.created_at)}
                   </p>
                 </div>
-                <Button variant="danger" onClick={() => handleDelete(policy)}>
-                  Delete
-                </Button>
+                {canWrite && (
+                  <Button variant="danger" onClick={() => handleDelete(policy)}>
+                    Delete
+                  </Button>
+                )}
               </div>
 
               <pre className="mt-3 overflow-x-auto rounded-xl border border-[var(--color-ink)] bg-[var(--color-surface2)] p-3 font-mono text-[11px] leading-relaxed text-[var(--color-muted)]">

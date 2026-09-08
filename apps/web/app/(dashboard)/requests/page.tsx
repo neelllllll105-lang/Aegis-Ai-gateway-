@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, ApiError, type RequestLogRow } from "@/lib/api";
+import { api, ApiError, type RequestLogRow, type Team } from "@/lib/api";
 import {
   AttributionChip,
   Badge,
@@ -31,14 +31,27 @@ import {
  */
 export default function RequestsPage() {
   const [rows, setRows] = useState<RequestLogRow[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [teamId, setTeamId] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // The team list is fetched once — it doesn't change while filtering — and best-effort:
+  // an org with no team-management feature simply gets an empty list back, and the filter
+  // control below renders nothing rather than an error.
+  useEffect(() => {
+    api
+      .listTeams()
+      .then((response) => setTeams(response.teams))
+      .catch(() => setTeams([]));
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
 
     api
-      .requests(200)
+      .requests(200, teamId || undefined)
       .then((response) => {
         if (cancelled) return;
         setRows(response.requests);
@@ -55,13 +68,38 @@ export default function RequestsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [teamId]);
+
+  const projectName = (id?: string | null) =>
+    id ? (teams.find((t) => t.id === id)?.name ?? "—") : "—";
 
   return (
     <>
       <SectionHeader
         title="Requests"
         description="Metadata for every request. Prompt and response content is never stored, so it is not shown here — that is by design, not an omission."
+        action={
+          teams.length > 0 ? (
+            <div>
+              <label htmlFor="requests-project" className="sr-only">
+                Filter by project
+              </label>
+              <select
+                id="requests-project"
+                value={teamId}
+                onChange={(event) => setTeamId(event.target.value)}
+                className="rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-xs font-bold text-[var(--color-ink)]"
+              >
+                <option value="">All projects</option>
+                {teams.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : undefined
+        }
       />
 
       {error ? (
@@ -75,13 +113,18 @@ export default function RequestsPage() {
           ) : rows.length === 0 ? (
             <EmptyState
               title="No requests in this period"
-              description="Once traffic flows through the gateway, every request appears here with its routing decision and cost."
+              description={
+                teamId
+                  ? "No requests attributed to this project yet. Try “All projects,” or check back once traffic flows through it."
+                  : "Once traffic flows through the gateway, every request appears here with its routing decision and cost."
+              }
             />
           ) : (
             <TableShell>
               <thead>
                 <tr>
                   <Th>Time</Th>
+                  {teams.length > 0 && <Th>Project</Th>}
                   <Th>Requested</Th>
                   <Th>Served</Th>
                   <Th>Routing</Th>
@@ -96,6 +139,9 @@ export default function RequestsPage() {
                 {rows.map((row) => (
                   <tr key={row.request_id}>
                     <Td muted mono>{formatTimestamp(row.created_at)}</Td>
+                    {teams.length > 0 && (
+                      <Td muted={!row.team_id}>{projectName(row.team_id)}</Td>
+                    )}
                     <Td>
                       <AttributionChip actor="you" label={bareModelName(row.requested_model)} />
                     </Td>

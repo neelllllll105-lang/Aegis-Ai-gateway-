@@ -23,8 +23,10 @@ import {
   TableShell,
   Td,
   Th,
+  UpgradeRequired,
 } from "@/components/ui";
 import { formatRelative, formatUsd } from "@/lib/format";
+import { useAuth } from "@/lib/auth-context";
 
 const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
   auto: "Auto",
@@ -66,6 +68,8 @@ const ROLES = [
  * and one that names them after squads does not.
  */
 export default function TeamPage() {
+  const { canWrite, planFeatures } = useAuth();
+  const hasTeamManagement = planFeatures.team_management === true;
   const [members, setMembers] = useState<Member[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
@@ -95,6 +99,13 @@ export default function TeamPage() {
   const [newMemberRole, setNewMemberRole] = useState<"lead" | "member">("member");
   const [addingMember, setAddingMember] = useState(false);
 
+  // Renaming the currently-managed project. Analytics need no reload of their own —
+  // usage_summary_for_team is keyed by team_id, never by name — so a successful rename
+  // just needs the team list and the open panel's own copy refreshed.
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [renaming, setRenaming] = useState(false);
+
   async function load() {
     try {
       const [memberResponse, teamResponse] = await Promise.all([
@@ -116,8 +127,12 @@ export default function TeamPage() {
   }
 
   useEffect(() => {
+    if (!hasTeamManagement) {
+      setLoading(false);
+      return;
+    }
     void load();
-  }, []);
+  }, [hasTeamManagement]);
 
   async function handleInvite(event: React.FormEvent) {
     event.preventDefault();
@@ -218,6 +233,7 @@ export default function TeamPage() {
     setPanelError(null);
     setPanelLoading(true);
     setNewMemberId("");
+    setEditingName(false);
     try {
       const [membersRes, usageRes] = await Promise.all([
         api.listTeamMembers(team.id),
@@ -273,6 +289,29 @@ export default function TeamPage() {
     }
   }
 
+  async function handleRenameTeam(event: React.FormEvent) {
+    event.preventDefault();
+    if (!managingTeam || !nameDraft.trim() || nameDraft.trim() === managingTeam.name) {
+      setEditingName(false);
+      return;
+    }
+
+    setRenaming(true);
+    setPanelError(null);
+    try {
+      const updated = await api.updateTeam(managingTeam.id, nameDraft.trim());
+      setManagingTeam(updated);
+      setEditingName(false);
+      await load();
+    } catch (caught) {
+      setPanelError(
+        caught instanceof ApiError ? caught.message : "Could not rename this project.",
+      );
+    } finally {
+      setRenaming(false);
+    }
+  }
+
   async function handleDeleteTeam(team: Team) {
     const confirmed = window.confirm(
       `Delete the team "${team.name}"? Keys assigned to it keep working but lose their cost-center attribution.`,
@@ -287,6 +326,19 @@ export default function TeamPage() {
         caught instanceof ApiError ? caught.message : "Could not delete the team.",
       );
     }
+  }
+
+  if (!hasTeamManagement) {
+    return (
+      <>
+        <SectionHeader
+          eyebrow="Organisation"
+          title="People and teams"
+          description="Organize the organisation into projects, invite a second person, and see each project's spend on its own."
+        />
+        <UpgradeRequired feature="People & teams" requiredPlan="Team" />
+      </>
+    );
   }
 
   return (
@@ -335,52 +387,65 @@ export default function TeamPage() {
         </div>
       )}
 
-      <Card className="mb-8 p-5">
-        <h3 className="mb-4 text-sm font-bold text-[var(--color-ink)]">Invite a member</h3>
-        <form
-          onSubmit={handleInvite}
-          className="grid gap-4 sm:grid-cols-[1fr_auto_auto] sm:items-end"
-        >
-          <Field
-            label="Email address"
-            id="invite-email"
-            type="email"
-            value={inviteEmail}
-            onChange={setInviteEmail}
-            required
-            placeholder="colleague@company.com"
-          />
+      {canWrite ? (
+        <Card className="mb-8 p-5">
+          <h3 className="mb-4 text-sm font-bold text-[var(--color-ink)]">Invite a member</h3>
+          <form
+            onSubmit={handleInvite}
+            className="grid gap-4 sm:grid-cols-[1fr_auto_auto] sm:items-end"
+          >
+            <Field
+              label="Email address"
+              id="invite-email"
+              type="email"
+              value={inviteEmail}
+              onChange={setInviteEmail}
+              required
+              placeholder="colleague@company.com"
+            />
 
-          <div>
-            <label
-              htmlFor="invite-role"
-              className="block text-sm font-medium text-[var(--color-muted)]"
-            >
-              Role
-            </label>
-            <select
-              id="invite-role"
-              value={inviteRole}
-              onChange={(event) => setInviteRole(event.target.value)}
-              className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
-            >
-              {ROLES.map((role) => (
-                <option key={role.id} value={role.id}>
-                  {role.label}
-                </option>
-              ))}
-            </select>
-          </div>
+            <div>
+              <label
+                htmlFor="invite-role"
+                className="block text-sm font-medium text-[var(--color-muted)]"
+              >
+                Role
+              </label>
+              <select
+                id="invite-role"
+                value={inviteRole}
+                onChange={(event) => setInviteRole(event.target.value)}
+                className="mt-1.5 w-full rounded-[12px] border border-[var(--color-accent)] bg-[var(--color-surface2)] px-3 py-2 text-sm text-[var(--color-ink)]"
+              >
+                {ROLES.map((role) => (
+                  <option key={role.id} value={role.id}>
+                    {role.label}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-          <Button type="submit" disabled={inviting || !inviteEmail.trim()}>
-            {inviting ? "Sending…" : "Send invite"}
-          </Button>
-        </form>
+            <Button type="submit" disabled={inviting || !inviteEmail.trim()}>
+              {inviting ? "Sending…" : "Send invite"}
+            </Button>
+          </form>
 
-        <p className="mt-3 text-xs font-medium leading-relaxed text-[var(--color-muted-light)]">
-          {ROLES.find((role) => role.id === inviteRole)?.description}
-        </p>
-      </Card>
+          <p className="mt-3 text-xs font-medium leading-relaxed text-[var(--color-muted-light)]">
+            {ROLES.find((role) => role.id === inviteRole)?.description}
+          </p>
+        </Card>
+      ) : (
+        <Card className="mb-8 p-5">
+          <p className="text-xs font-medium text-[var(--color-muted-light)]">
+            Only an owner or admin can invite members, create projects, or change anyone
+            else&rsquo;s access. Ask one of them, or see your own usage on the{" "}
+            <a href="/usage" className="font-bold text-[var(--color-accent)]">
+              Usage
+            </a>{" "}
+            page.
+          </p>
+        </Card>
+      )}
 
       <div className="mb-10">
         <h3 className="mb-3 text-sm font-bold text-[var(--color-ink)]">Members</h3>
@@ -435,7 +500,7 @@ export default function TeamPage() {
                   </Td>
                   <Td muted>{formatRelative(member.joined_at)}</Td>
                   <Td align="right">
-                    {member.role !== "owner" && (
+                    {member.role !== "owner" && canWrite && (
                       <Button variant="danger" onClick={() => handleRemove(member)}>
                         Remove
                       </Button>
@@ -448,6 +513,7 @@ export default function TeamPage() {
         )}
       </div>
 
+      {canWrite && (
       <Card className="mb-6 p-5">
         <h3 className="mb-4 text-sm font-bold text-[var(--color-ink)]">Create a team</h3>
         <form
@@ -501,6 +567,7 @@ export default function TeamPage() {
           header.
         </p>
       </Card>
+      )}
 
       {!loading &&
         (teams.length === 0 ? (
@@ -541,9 +608,11 @@ export default function TeamPage() {
                       <Button variant="secondary" onClick={() => handleManage(team)}>
                         {managingTeam?.id === team.id ? "Close" : "Manage"}
                       </Button>
-                      <Button variant="danger" onClick={() => handleDeleteTeam(team)}>
-                        Delete
-                      </Button>
+                      {canWrite && (
+                        <Button variant="danger" onClick={() => handleDeleteTeam(team)}>
+                          Delete
+                        </Button>
+                      )}
                     </div>
                   </Td>
                 </tr>
@@ -555,12 +624,51 @@ export default function TeamPage() {
       {managingTeam && (
         <Card className="mt-6 p-5">
           <div className="mb-4 flex items-start justify-between gap-4">
-            <div>
-              <h3 className="text-sm font-bold text-[var(--color-ink)]">
-                {managingTeam.name}
-              </h3>
+            <div className="min-w-0 flex-1">
+              {editingName ? (
+                <form onSubmit={handleRenameTeam} className="flex items-end gap-2">
+                  <div className="max-w-xs flex-1">
+                    <Field
+                      label="Project name"
+                      id="rename-team"
+                      value={nameDraft}
+                      onChange={setNameDraft}
+                      required
+                    />
+                  </div>
+                  <Button type="submit" disabled={renaming || !nameDraft.trim()}>
+                    {renaming ? "Saving…" : "Save"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    type="button"
+                    onClick={() => setEditingName(false)}
+                  >
+                    Cancel
+                  </Button>
+                </form>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-[var(--color-ink)]">
+                    {managingTeam.name}
+                  </h3>
+                  {canWrite && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNameDraft(managingTeam.name);
+                        setEditingName(true);
+                      }}
+                      className="text-[10px] font-bold text-[var(--color-accent)] hover:underline"
+                    >
+                      Rename
+                    </button>
+                  )}
+                </div>
+              )}
               <p className="mt-0.5 text-xs font-medium text-[var(--color-muted-light)]">
-                Roster and this month&rsquo;s spend for this project.
+                Roster and this month&rsquo;s spend for this project. Renaming it does not
+                change its usage history — figures follow the new name.
               </p>
             </div>
             <Button variant="ghost" onClick={() => setManagingTeam(null)}>
@@ -628,18 +736,21 @@ export default function TeamPage() {
                         <Badge tone={member.role === "lead" ? "accent" : "neutral"} size="sm">
                           {member.role}
                         </Badge>
-                        <Button
-                          variant="danger"
-                          onClick={() => handleRemoveTeamMember(member)}
-                        >
-                          Remove
-                        </Button>
+                        {canWrite && (
+                          <Button
+                            variant="danger"
+                            onClick={() => handleRemoveTeamMember(member)}
+                          >
+                            Remove
+                          </Button>
+                        )}
                       </div>
                     </li>
                   ))}
                 </ul>
               )}
 
+              {canWrite && (
               <form
                 onSubmit={handleAddTeamMember}
                 className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end"
@@ -693,6 +804,7 @@ export default function TeamPage() {
                   {addingMember ? "Adding…" : "Add to project"}
                 </Button>
               </form>
+              )}
               <p className="mt-2 text-xs font-medium leading-relaxed text-[var(--color-muted-light)]">
                 A lead may manage this project&rsquo;s keys, budget, and routing default
                 without full organisation admin. A member has read access to the

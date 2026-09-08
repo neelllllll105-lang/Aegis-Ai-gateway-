@@ -847,6 +847,22 @@ mod tests {
         )
     }
 
+    /// Reasoning-domain vocabulary (confirmed directly against
+    /// `classifier::tests::multi_step_analysis_is_detected_as_the_reasoning_domain`'s sibling
+    /// prompt) at **medium**, not complex, severity. This matters here specifically: a
+    /// `Complex`-classified request never reaches `select_at_tier` at all — `target_tier`
+    /// returns `None` for it unconditionally, by design (see [3] in `route()`), so the
+    /// domain re-rank and its explanation line can only ever be observed on a Medium or
+    /// Simple request. Two reasoning verbs and no chaining connective keeps the score
+    /// inside the Medium band (0.35-0.70) rather than tipping into Complex.
+    fn reasoning_domain_medium_request() -> NormalizedRequest {
+        NormalizedRequest::simple(
+            "gpt-4o",
+            "Investigate this pricing strategy. Evaluate its viability against the \
+             competitor landscape.",
+        )
+    }
+
     // ---------------------------------------------------------------------------
     // Signals the router was blind to before the enterprise readiness audit.
     // ---------------------------------------------------------------------------
@@ -1043,6 +1059,34 @@ mod tests {
         assert!(
             joined.contains(&decision.served_model),
             "the explanation should name the model that served it: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_detected_task_domain_reaches_the_customer_facing_explanation() {
+        // TaskDomain::preferred_providers() exists specifically to promote a model strong
+        // on this class of work within `select_at_tier`'s candidate re-rank — this proves
+        // that wiring is actually reachable end to end (classification -> re-rank ->
+        // explanation), not just present in the code. The re-rank itself is a soft,
+        // price-bounded nudge (see its own doc comment), so this does not assert which
+        // model wins — only that a real domain detection surfaces to the customer, which is
+        // the property most likely to silently break (an unused `Classification::domain`
+        // read by nothing, the way several other "computed but never consulted" fields in
+        // this project's own history turned out to be).
+        let decision = Router::new()
+            .route(
+                &reasoning_domain_medium_request(),
+                &pricing(),
+                &healthy(),
+                &RoutingInputs::default(),
+            )
+            .unwrap();
+
+        let joined = decision.explanation.join(" ");
+        assert!(
+            joined.contains("task domain: reasoning"),
+            "a reasoning-domain request's provider preference never reached the \
+             explanation: {joined}"
         );
     }
 

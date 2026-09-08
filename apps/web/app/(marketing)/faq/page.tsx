@@ -73,11 +73,11 @@ const COMPARISON_DATA = [
 const FAQS = [
   {
     q: "How is Aegis different from gateways, routers, and observability tools?",
-    a: "Point tools give you one slice — a way to call many models, or a passive spend report. Aegis sits under your entire AI stack: it actively lowers the bill through microsecond deterministic downscaling and semantic caching, enforces hard budgets, protects quality, and provides RFC-9110 audited proof of savings for finance.",
+    a: "Point tools give you one slice — a way to call many models, or a passive spend report. Aegis sits under your entire AI stack: it actively lowers the bill through microsecond deterministic downscaling, exact-match caching, and lossless context compression, enforces hard budgets, protects quality, and provides an audited breakdown of savings for finance.",
   },
   {
     q: "I already use Cursor / Claude Code / OpenAI SDK — where does Aegis fit?",
-    a: "You don't change your code or workflow. You simply set your tool's API base URL to Aegis (http://localhost:8080/v1 or https://api.aegis.dev/v1). Aegis handles prompt classification, semantic cache lookups, and failovers transparently behind the scenes.",
+    a: "You don't change your code or workflow. You simply set your tool's API base URL to Aegis (http://localhost:8080/v1 or https://api.aegis.dev/v1). Aegis handles prompt classification, cache lookups, and failovers transparently behind the scenes.",
   },
   {
     q: "Can Aegis automatically use a more cost-effective model when a task is simple?",
@@ -89,7 +89,7 @@ const FAQS = [
   },
   {
     q: "Do I pay twice for the same question?",
-    a: "No. With our zero-latency semantic cache, duplicate or semantically identical questions return instantly from cache at $0.00 cost.",
+    a: "Not for an exact repeat — a byte-identical prompt returns instantly from cache at $0.00 cost. Fuzzy matching on differently-worded but semantically identical questions is built and tested, and is rolling out as we finish provisioning the on-box model it depends on.",
   },
   {
     q: "Are my prompts and data private?",

@@ -22,6 +22,7 @@ import {
   Th,
 } from "@/components/ui";
 import { formatRelative, formatUsd } from "@/lib/format";
+import { useAuth } from "@/lib/auth-context";
 
 const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
   auto: "Auto",
@@ -40,6 +41,7 @@ const ROUTING_MODE_LABEL: Record<RoutingMode, string> = {
  * ambiguous that is our fault rather than theirs.
  */
 export default function KeysPage() {
+  const { canManageKeys } = useAuth();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -176,23 +178,32 @@ export default function KeysPage() {
         </Card>
       )}
 
-      <Card className="mb-6 p-5">
-        <form onSubmit={handleCreate} className="flex flex-wrap items-end gap-3">
-          <div className="min-w-[220px] flex-1">
-            <Field
-              label="Create a new key"
-              id="key-name"
-              value={newKeyName}
-              onChange={setNewKeyName}
-              placeholder="production-api"
-              hint="A name you will recognise in six months."
-            />
-          </div>
-          <Button type="submit" disabled={creating || !newKeyName.trim()}>
-            {creating ? "Creating…" : "Create key"}
-          </Button>
-        </form>
-      </Card>
+      {canManageKeys ? (
+        <Card className="mb-6 p-5">
+          <form onSubmit={handleCreate} className="flex flex-wrap items-end gap-3">
+            <div className="min-w-[220px] flex-1">
+              <Field
+                label="Create a new key"
+                id="key-name"
+                value={newKeyName}
+                onChange={setNewKeyName}
+                placeholder="production-api"
+                hint="A name you will recognise in six months."
+              />
+            </div>
+            <Button type="submit" disabled={creating || !newKeyName.trim()}>
+              {creating ? "Creating…" : "Create key"}
+            </Button>
+          </form>
+        </Card>
+      ) : (
+        <Card className="mb-6 p-5">
+          <p className="text-xs font-medium text-[var(--color-muted-light)]">
+            Viewers can see keys but not create, edit, or revoke them. Ask an owner, admin,
+            or member to make changes.
+          </p>
+        </Card>
+      )}
 
       <Card>
         {loading ? (
@@ -242,7 +253,7 @@ export default function KeysPage() {
                     <Td>
                       <select
                         value={key.default_routing_mode ?? ""}
-                        disabled={revoked || savingModeFor === key.id}
+                        disabled={revoked || !canManageKeys || savingModeFor === key.id}
                         onChange={(event) =>
                           handleModeChange(key, event.target.value as RoutingMode)
                         }
@@ -260,7 +271,7 @@ export default function KeysPage() {
                     </Td>
                     <Td muted>{formatRelative(key.last_used_at)}</Td>
                     <Td align="right">
-                      {!revoked ? (
+                      {!revoked && canManageKeys ? (
                         <button
                           type="button"
                           onClick={() => handleRevoke(key)}
